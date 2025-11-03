@@ -1,12 +1,15 @@
-use duroxide::providers::{Provider, WorkItem, OrchestrationItem, ExecutionMetadata, ManagementCapability, InstanceInfo, ExecutionInfo, SystemMetrics, QueueDepths};
-use duroxide::Event;
-use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::sync::Arc;
-use uuid::Uuid;
 use anyhow::Result;
+use chrono::{DateTime, TimeZone, Utc};
+use duroxide::providers::{
+    ExecutionInfo, ExecutionMetadata, InstanceInfo, ManagementCapability, OrchestrationItem,
+    Provider, QueueDepths, SystemMetrics, WorkItem,
+};
+use duroxide::Event;
+use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use chrono::{DateTime, Utc};
 use tracing::{debug, error, instrument};
+use uuid::Uuid;
 
 pub struct PostgresProvider {
     pool: Arc<PgPool>,
@@ -20,6 +23,14 @@ impl PostgresProvider {
     }
 
     pub async fn new_with_schema(database_url: &str, schema_name: Option<&str>) -> Result<Self> {
+        Self::new_with_schema_and_timeout(database_url, schema_name, 30_000).await
+    }
+
+    pub async fn new_with_schema_and_timeout(
+        database_url: &str,
+        schema_name: Option<&str>,
+        lock_timeout_ms: u64,
+    ) -> Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(10)
             .connect(database_url)
@@ -29,7 +40,7 @@ impl PostgresProvider {
 
         let provider = Self {
             pool: Arc::new(pool),
-            lock_timeout_ms: 30000, // 30 seconds
+            lock_timeout_ms,
             schema_name: schema_name.clone(),
         };
 
@@ -226,7 +237,7 @@ impl PostgresProvider {
     }
 
     /// Clean up schema after tests (drops all tables and optionally the schema)
-    /// 
+    ///
     /// **SAFETY**: Never drops the "public" schema itself, only tables within it.
     /// Only drops the schema if it's a custom schema (not "public").
     pub async fn cleanup_schema(&self) -> Result<()> {
@@ -251,9 +262,12 @@ impl PostgresProvider {
         // SAFETY: Never drop the "public" schema - it's a PostgreSQL system schema
         // Only drop custom schemas created for testing
         if self.schema_name != "public" {
-            sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", self.schema_name))
-                .execute(&*self.pool)
-                .await?;
+            sqlx::query(&format!(
+                "DROP SCHEMA IF EXISTS {} CASCADE",
+                self.schema_name
+            ))
+            .execute(&*self.pool)
+            .await?;
         } else {
             // Explicit safeguard: we only drop tables from public schema, never the schema itself
             // This ensures we don't accidentally drop the default PostgreSQL schema
@@ -287,12 +301,16 @@ impl Provider for PostgresProvider {
         // Use SELECT FOR UPDATE SKIP LOCKED for atomic lock acquisition
         let instance_id_row: Option<(String,)> = sqlx::query_as(&format!(
             r#"
-            SELECT DISTINCT q.instance_id
+            SELECT q.instance_id
             FROM {} q
-            LEFT JOIN {} il ON q.instance_id = il.instance_id
             WHERE q.visible_at <= NOW()
-              AND (il.instance_id IS NULL OR il.locked_until <= $1)
-            ORDER BY q.id
+              AND NOT EXISTS (
+                SELECT 1
+                FROM {} il
+                WHERE il.instance_id = q.instance_id
+                  AND il.locked_until > $1
+              )
+            ORDER BY q.visible_at, q.id
             LIMIT 1
             FOR UPDATE SKIP LOCKED
             "#,
@@ -442,7 +460,7 @@ impl Provider for PostgresProvider {
         .await
         .ok()?;
 
-        let (orchestration_name, orchestration_version, current_execution_id, history) = 
+        let (orchestration_name, orchestration_version, current_execution_id, history) =
             if let Some((name, version, exec_id)) = instance_info {
                 // Instance exists - get history for current execution
                 let history_rows: Vec<String> = sqlx::query_scalar(&format!(
@@ -464,7 +482,13 @@ impl Provider for PostgresProvider {
                 (name, version, exec_id as u64, history)
             } else {
                 // New instance - derive from first message if it's StartOrchestration
-                if let Some(WorkItem::StartOrchestration { orchestration, version, execution_id, .. }) = messages.first() {
+                if let Some(WorkItem::StartOrchestration {
+                    orchestration,
+                    version,
+                    execution_id,
+                    ..
+                }) = messages.first()
+                {
                     let name = orchestration.clone();
                     let version = version.as_deref().unwrap_or("1.0.0").to_string();
                     let exec_id = *execution_id;
@@ -546,10 +570,10 @@ impl Provider for PostgresProvider {
                     operation = "ack_orchestration_item",
                     error_type = "invalid_lock_token",
                     lock_token = %lock_token,
-                    "Invalid or expired lock token"
+                    "Invalid lock token"
                 );
                 tx.rollback().await.ok();
-                return Err("Invalid or expired lock token".to_string());
+                return Err("Invalid lock token".to_string());
             }
         };
 
@@ -587,7 +611,10 @@ impl Provider for PostgresProvider {
         .map_err(|e| format!("Failed to update current_execution_id: {}", e))?;
 
         // Update instance metadata from runtime-provided metadata (no event inspection)
-        if let (Some(name), Some(version)) = (&metadata.orchestration_name, &metadata.orchestration_version) {
+        if let (Some(name), Some(version)) = (
+            &metadata.orchestration_name,
+            &metadata.orchestration_version,
+        ) {
             sqlx::query(&format!(
                 "UPDATE {} SET orchestration_name = $1, orchestration_version = $2 WHERE instance_id = $3",
                 self.table_name("instances")
@@ -614,12 +641,16 @@ impl Provider for PostgresProvider {
             for event in history_delta {
                 let event_json = serde_json::to_string(&event)
                     .map_err(|e| format!("Failed to serialize event: {}", e))?;
-                
-                // Extract event type for indexing
-                let event_type = format!("{:?}", event).split('{').next().unwrap_or("Unknown").to_string();
 
-                sqlx::query(&format!(
-                    "INSERT INTO {} (instance_id, execution_id, event_id, event_type, event_data) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (instance_id, execution_id, event_id) DO NOTHING",
+                // Extract event type for indexing
+                let event_type = format!("{:?}", event)
+                    .split('{')
+                    .next()
+                    .unwrap_or("Unknown")
+                    .to_string();
+
+                let insert_result = sqlx::query(&format!(
+                    "INSERT INTO {} (instance_id, execution_id, event_id, event_type, event_data) VALUES ($1, $2, $3, $4, $5)",
                     history_table
                 ))
                 .bind(&instance_id)
@@ -628,8 +659,18 @@ impl Provider for PostgresProvider {
                 .bind(event_type)
                 .bind(event_json)
                 .execute(&mut *tx)
-                .await
-                .map_err(|e| format!("Failed to append history: {}", e))?;
+                .await;
+
+                if let Err(e) = insert_result {
+                    if let SqlxError::Database(db_err) = &e {
+                        if db_err.code().as_deref() == Some("23505") {
+                            tx.rollback().await.ok();
+                            return Err("Duplicate event_id".to_string());
+                        }
+                    }
+                    tx.rollback().await.ok();
+                    return Err(format!("Failed to append history: {}", e));
+                }
             }
         }
 
@@ -677,17 +718,24 @@ impl Provider for PostgresProvider {
 
             // Extract instance ID from WorkItem enum
             let target_instance = match &item {
-                WorkItem::StartOrchestration { instance, .. } |
-                WorkItem::ActivityCompleted { instance, .. } |
-                WorkItem::ActivityFailed { instance, .. } |
-                WorkItem::TimerFired { instance, .. } |
-                WorkItem::ExternalRaised { instance, .. } |
-                WorkItem::CancelInstance { instance, .. } |
-                WorkItem::ContinueAsNew { instance, .. } => instance,
-                WorkItem::SubOrchCompleted { parent_instance, .. } |
-                WorkItem::SubOrchFailed { parent_instance, .. } => parent_instance,
+                WorkItem::StartOrchestration { instance, .. }
+                | WorkItem::ActivityCompleted { instance, .. }
+                | WorkItem::ActivityFailed { instance, .. }
+                | WorkItem::TimerFired { instance, .. }
+                | WorkItem::ExternalRaised { instance, .. }
+                | WorkItem::CancelInstance { instance, .. }
+                | WorkItem::ContinueAsNew { instance, .. } => instance,
+                WorkItem::SubOrchCompleted {
+                    parent_instance, ..
+                }
+                | WorkItem::SubOrchFailed {
+                    parent_instance, ..
+                } => parent_instance,
                 WorkItem::ActivityExecute { .. } => {
-                    return Err("ActivityExecute should go to worker queue, not orchestrator queue".to_string());
+                    return Err(
+                        "ActivityExecute should go to worker queue, not orchestrator queue"
+                            .to_string(),
+                    );
                 }
             };
 
@@ -700,7 +748,7 @@ impl Provider for PostgresProvider {
             } = &item
             {
                 let version = version.as_deref().unwrap_or("1.0.0");
-                
+
                 sqlx::query(&format!(
                     "INSERT INTO {} (instance_id, orchestration_name, orchestration_version, current_execution_id) VALUES ($1, $2, $3, $4) ON CONFLICT (instance_id) DO NOTHING",
                     self.table_name("instances")
@@ -861,7 +909,8 @@ impl Provider for PostgresProvider {
         .await
         .map_err(|e| format!("Failed to remove instance lock: {}", e))?;
 
-        tx.commit().await
+        tx.commit()
+            .await
             .map_err(|e| format!("Failed to commit transaction: {}", e))?;
 
         debug!(
@@ -941,14 +990,22 @@ impl Provider for PostgresProvider {
         let event_count = new_events.len();
 
         // Use a transaction for batch insert
-        let mut tx = self.pool.begin().await.map_err(|e| format!("Failed to start transaction: {}", e))?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| format!("Failed to start transaction: {}", e))?;
 
         for event in new_events {
             let event_json = serde_json::to_string(&event)
                 .map_err(|e| format!("Failed to serialize event: {}", e))?;
-            
+
             // Extract event type for indexing (discriminant name)
-            let event_type = format!("{:?}", event).split('{').next().unwrap_or("Unknown").to_string();
+            let event_type = format!("{:?}", event)
+                .split('{')
+                .next()
+                .unwrap_or("Unknown")
+                .to_string();
 
             sqlx::query(&format!(
                 "INSERT INTO {} (instance_id, execution_id, event_id, event_type, event_data) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (instance_id, execution_id, event_id) DO NOTHING",
@@ -964,7 +1021,9 @@ impl Provider for PostgresProvider {
             .map_err(|e| format!("Failed to append history: {}", e))?;
         }
 
-        tx.commit().await.map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        tx.commit()
+            .await
+            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
 
         debug!(
             target = "duroxide::providers::postgres",
@@ -1027,8 +1086,7 @@ impl Provider for PostgresProvider {
         let (id, work_item_json) = row?;
 
         // Deserialize the work item
-        let work_item: WorkItem = serde_json::from_str(&work_item_json)
-            .ok()?;
+        let work_item: WorkItem = serde_json::from_str(&work_item_json).ok()?;
 
         // Generate lock token and calculate expiration
         let lock_token = Self::generate_lock_token();
@@ -1066,7 +1124,10 @@ impl Provider for PostgresProvider {
     async fn ack_worker(&self, token: &str, completion: WorkItem) -> Result<(), String> {
         let start = std::time::Instant::now();
         // Start transaction for atomic delete + enqueue
-        let mut tx = self.pool.begin().await
+        let mut tx = self
+            .pool
+            .begin()
+            .await
             .map_err(|e| format!("Failed to start transaction: {}", e))?;
 
         // Delete the worker queue item
@@ -1077,8 +1138,8 @@ impl Provider for PostgresProvider {
         .bind(token)
         .execute(&mut *tx)
         .await
-            .map_err(|e| format!("Failed to delete worker queue item: {}", e))?
-            .rows_affected();
+        .map_err(|e| format!("Failed to delete worker queue item: {}", e))?
+        .rows_affected();
 
         if rows_affected == 0 {
             error!(
@@ -1097,8 +1158,8 @@ impl Provider for PostgresProvider {
 
         // Extract instance ID from completion WorkItem
         let instance_id = match &completion {
-            WorkItem::ActivityCompleted { instance, .. } |
-            WorkItem::ActivityFailed { instance, .. } => instance,
+            WorkItem::ActivityCompleted { instance, .. }
+            | WorkItem::ActivityFailed { instance, .. } => instance,
             _ => {
                 error!(
                     target = "duroxide::providers::postgres",
@@ -1120,7 +1181,8 @@ impl Provider for PostgresProvider {
         .await
         .map_err(|e| format!("Failed to enqueue completion: {}", e))?;
 
-        tx.commit().await
+        tx.commit()
+            .await
             .map_err(|e| format!("Failed to commit transaction: {}", e))?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -1146,17 +1208,23 @@ impl Provider for PostgresProvider {
 
         // Extract instance ID from WorkItem enum
         let instance_id = match &item {
-            WorkItem::StartOrchestration { instance, .. } |
-            WorkItem::ActivityCompleted { instance, .. } |
-            WorkItem::ActivityFailed { instance, .. } |
-            WorkItem::TimerFired { instance, .. } |
-            WorkItem::ExternalRaised { instance, .. } |
-            WorkItem::CancelInstance { instance, .. } |
-            WorkItem::ContinueAsNew { instance, .. } => instance,
-            WorkItem::SubOrchCompleted { parent_instance, .. } |
-            WorkItem::SubOrchFailed { parent_instance, .. } => parent_instance,
+            WorkItem::StartOrchestration { instance, .. }
+            | WorkItem::ActivityCompleted { instance, .. }
+            | WorkItem::ActivityFailed { instance, .. }
+            | WorkItem::TimerFired { instance, .. }
+            | WorkItem::ExternalRaised { instance, .. }
+            | WorkItem::CancelInstance { instance, .. }
+            | WorkItem::ContinueAsNew { instance, .. } => instance,
+            WorkItem::SubOrchCompleted {
+                parent_instance, ..
+            }
+            | WorkItem::SubOrchFailed {
+                parent_instance, ..
+            } => parent_instance,
             WorkItem::ActivityExecute { .. } => {
-                return Err("ActivityExecute should go to worker queue, not orchestrator queue".to_string());
+                return Err(
+                    "ActivityExecute should go to worker queue, not orchestrator queue".to_string(),
+                );
             }
         };
 
@@ -1169,7 +1237,7 @@ impl Provider for PostgresProvider {
         } = &item
         {
             let version = version.as_deref().unwrap_or("1.0.0");
-            
+
             sqlx::query(&format!(
                 "INSERT INTO {} (instance_id, orchestration_name, orchestration_version, current_execution_id) VALUES ($1, $2, $3, $4) ON CONFLICT (instance_id) DO NOTHING",
                 self.table_name("instances")
@@ -1193,30 +1261,44 @@ impl Provider for PostgresProvider {
             .map_err(|e| format!("Failed to create execution: {}", e))?;
         }
 
-        // Calculate visible_at based on delay_ms or TimerFired.fire_at_ms
-        let visible_at = if let WorkItem::TimerFired { fire_at_ms, .. } = &item {
-            // For TimerFired, use the fire_at_ms timestamp
-            // Convert milliseconds Unix timestamp to TIMESTAMPTZ
-            DateTime::from_timestamp(*fire_at_ms as i64 / 1000, 0)
-                .ok_or_else(|| "Invalid fire_at_ms timestamp".to_string())?
-        } else if let Some(delay_ms) = delay_ms {
-            // For delayed items, use NOW() + delay_ms
-            Utc::now() + chrono::Duration::milliseconds(delay_ms as i64)
-        } else {
-            // Immediate visibility
-            Utc::now()
-        };
+        let _query_sql;
+        let query;
 
-        sqlx::query(&format!(
-            "INSERT INTO {} (instance_id, work_item, visible_at, created_at) VALUES ($1, $2, $3, NOW())",
-            self.table_name("orchestrator_queue")
-        ))
-        .bind(instance_id)
-        .bind(work_item)
-        .bind(visible_at)
-        .execute(&*self.pool)
-        .await
-        .map_err(|e| {
+        if let WorkItem::TimerFired { fire_at_ms, .. } = &item {
+            let fire_at = Utc
+                .timestamp_millis_opt(*fire_at_ms as i64)
+                .single()
+                .ok_or_else(|| "Invalid fire_at_ms timestamp".to_string())?;
+
+            _query_sql = format!(
+                "INSERT INTO {} (instance_id, work_item, visible_at, created_at) VALUES ($1, $2, $3, NOW())",
+                self.table_name("orchestrator_queue")
+            );
+
+            query = sqlx::query(&_query_sql)
+                .bind(instance_id)
+                .bind(&work_item)
+                .bind(fire_at);
+        } else if let Some(delay_ms) = delay_ms {
+            _query_sql = format!(
+                "INSERT INTO {} (instance_id, work_item, visible_at, created_at) VALUES ($1, $2, NOW() + ($3::bigint) * INTERVAL '1 millisecond', NOW())",
+                self.table_name("orchestrator_queue")
+            );
+
+            query = sqlx::query(&_query_sql)
+                .bind(instance_id)
+                .bind(&work_item)
+                .bind(delay_ms as i64);
+        } else {
+            _query_sql = format!(
+                "INSERT INTO {} (instance_id, work_item, visible_at, created_at) VALUES ($1, $2, NOW(), NOW())",
+                self.table_name("orchestrator_queue")
+            );
+
+            query = sqlx::query(&_query_sql).bind(instance_id).bind(&work_item);
+        }
+
+        query.execute(&*self.pool).await.map_err(|e| {
             error!(
                 target = "duroxide::providers::postgres",
                 operation = "enqueue_orchestrator_work",
@@ -1321,7 +1403,7 @@ impl ManagementCapability for PostgresProvider {
     async fn list_instances_by_status(&self, status: &str) -> Result<Vec<String>, String> {
         sqlx::query_scalar(&format!(
             r#"
-            SELECT DISTINCT i.instance_id 
+            SELECT i.instance_id 
             FROM {} i
             JOIN {} e ON i.instance_id = e.instance_id 
               AND i.current_execution_id = e.execution_id
@@ -1352,7 +1434,11 @@ impl ManagementCapability for PostgresProvider {
     }
 
     #[instrument(skip(self), fields(instance = %instance, execution_id = execution_id), target = "duroxide::providers::postgres")]
-    async fn read_execution(&self, instance: &str, execution_id: u64) -> Result<Vec<Event>, String> {
+    async fn read_execution(
+        &self,
+        instance: &str,
+        execution_id: u64,
+    ) -> Result<Vec<Event>, String> {
         let event_data_rows: Vec<String> = sqlx::query_scalar(&format!(
             "SELECT event_data FROM {} WHERE instance_id = $1 AND execution_id = $2 ORDER BY event_id",
             self.table_name("history")
@@ -1388,7 +1474,16 @@ impl ManagementCapability for PostgresProvider {
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
     async fn get_instance_info(&self, instance: &str) -> Result<InstanceInfo, String> {
-        let row: Option<(String, String, String, i64, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<String>, Option<String>)> = sqlx::query_as(&format!(
+        let row: Option<(
+            String,
+            String,
+            String,
+            i64,
+            chrono::DateTime<Utc>,
+            Option<chrono::DateTime<Utc>>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(&format!(
             r#"
             SELECT i.instance_id, i.orchestration_name, i.orchestration_version, 
                    i.current_execution_id, i.created_at, i.updated_at,
@@ -1406,8 +1501,16 @@ impl ManagementCapability for PostgresProvider {
         .await
         .map_err(|e| format!("Failed to get instance info: {}", e))?;
 
-        let (instance_id, orchestration_name, orchestration_version, current_execution_id, created_at, updated_at, status, output) = row
-            .ok_or_else(|| "Instance not found".to_string())?;
+        let (
+            instance_id,
+            orchestration_name,
+            orchestration_version,
+            current_execution_id,
+            created_at,
+            updated_at,
+            status,
+            output,
+        ) = row.ok_or_else(|| "Instance not found".to_string())?;
 
         Ok(InstanceInfo {
             instance_id,
@@ -1417,13 +1520,25 @@ impl ManagementCapability for PostgresProvider {
             status: status.unwrap_or_else(|| "Running".to_string()),
             output,
             created_at: created_at.timestamp_millis() as u64,
-            updated_at: updated_at.map(|dt| dt.timestamp_millis() as u64).unwrap_or(created_at.timestamp_millis() as u64),
+            updated_at: updated_at
+                .map(|dt| dt.timestamp_millis() as u64)
+                .unwrap_or(created_at.timestamp_millis() as u64),
         })
     }
 
     #[instrument(skip(self), fields(instance = %instance, execution_id = execution_id), target = "duroxide::providers::postgres")]
-    async fn get_execution_info(&self, instance: &str, execution_id: u64) -> Result<ExecutionInfo, String> {
-        let row: Option<(i64, String, Option<String>, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>)> = sqlx::query_as(&format!(
+    async fn get_execution_info(
+        &self,
+        instance: &str,
+        execution_id: u64,
+    ) -> Result<ExecutionInfo, String> {
+        let row: Option<(
+            i64,
+            String,
+            Option<String>,
+            chrono::DateTime<Utc>,
+            Option<chrono::DateTime<Utc>>,
+        )> = sqlx::query_as(&format!(
             r#"
             SELECT e.execution_id, e.status, e.output, 
                    e.started_at, e.completed_at
@@ -1438,8 +1553,8 @@ impl ManagementCapability for PostgresProvider {
         .await
         .map_err(|e| format!("Failed to get execution info: {}", e))?;
 
-        let (exec_id, status, output, started_at, completed_at) = row
-            .ok_or_else(|| "Execution not found".to_string())?;
+        let (exec_id, status, output, started_at, completed_at) =
+            row.ok_or_else(|| "Execution not found".to_string())?;
 
         // Get event count for this execution
         let event_count: i64 = sqlx::query_scalar(&format!(
@@ -1584,4 +1699,3 @@ impl ManagementCapability for PostgresProvider {
         })
     }
 }
-
