@@ -1,0 +1,20 @@
+{
+    "sqltools.connections": [
+        {
+            "pgOptions": {
+                "ssl": {
+                    "rejectUnauthorized": true
+                }
+            },
+            "ssh": "Disabled",
+            "previewLimit": 50,
+            "server": "duroxide-pg.postgres.database.azure.com",
+            "port": 5432,
+            "driver": "PostgreSQL",
+            "name": "duroxide-pg",
+            "group": "Personal",
+            "database": "postgres",
+            "username": "affandar"
+        }
+    ]
+}
