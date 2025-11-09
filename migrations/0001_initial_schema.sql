@@ -45,10 +45,6 @@ CREATE TABLE IF NOT EXISTS orchestrator_queue (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- Backfill columns for existing deployments that created the table before instance_id/visible_at existed
-ALTER TABLE orchestrator_queue ADD COLUMN IF NOT EXISTS instance_id TEXT;
-ALTER TABLE orchestrator_queue ADD COLUMN IF NOT EXISTS visible_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
-
 -- Worker queue
 CREATE TABLE IF NOT EXISTS worker_queue (
     id BIGSERIAL PRIMARY KEY,

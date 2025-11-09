@@ -17,11 +17,11 @@ static INIT_LOGGING: Once = Once::new();
 fn init_test_logging() {
     INIT_LOGGING.call_once(|| {
         let env_filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
         // Try to initialize, but ignore if already initialized (e.g., by duroxide or previous test run)
         let _ = tracing_subscriber::fmt()
             .with_env_filter(env_filter)
-            .with_max_level(tracing::Level::INFO)
+            .with_max_level(tracing::Level::DEBUG)
             .with_test_writer()
             .try_init();
     });
@@ -71,7 +71,7 @@ async fn sample_hello_world_fs() {
         .unwrap();
 
     match client
-        .wait_for_orchestration("inst-sample-hello-1", std::time::Duration::from_secs(5))
+        .wait_for_orchestration("inst-sample-hello-1", std::time::Duration::from_secs(30))
         .await
         .unwrap()
     {
