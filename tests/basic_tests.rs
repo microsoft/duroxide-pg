@@ -1,4 +1,5 @@
-use duroxide::providers::{Provider, WorkItem};
+use duroxide::providers::{ExecutionMetadata, Provider, WorkItem};
+use duroxide::{Event, INITIAL_EVENT_ID};
 use duroxide_pg::PostgresProvider;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing_subscriber::EnvFilter;
@@ -188,7 +189,7 @@ async fn test_enqueue_orchestrator_work() {
         .await
         .expect("Failed to create provider");
 
-    let instance_id = "test_instance_1";
+    let instance_id = format!("test_instance_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
     let execution_id = 1u64;
 
     // Enqueue a StartOrchestration work item
@@ -207,17 +208,52 @@ async fn test_enqueue_orchestrator_work() {
         .await
         .expect("Failed to enqueue orchestrator work");
 
+    // Small delay to ensure the item is committed and visible
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+    // ⚠️ CRITICAL: Instance is NOT created on enqueue - must fetch and ack with metadata
+    // Fetch the work item
+    let item = provider
+        .fetch_orchestration_item()
+        .await
+        .expect("Should fetch enqueued work item");
+
+    // Ack with OrchestrationStarted event and proper metadata to create instance
+    provider
+        .ack_orchestration_item(
+            &item.lock_token,
+            execution_id,
+                vec![Event::OrchestrationStarted {
+                    event_id: INITIAL_EVENT_ID,
+                name: "TestOrchestration".to_string(),
+                version: "1.0.0".to_string(),
+                input: "test_input".to_string(),
+                parent_instance: None,
+                parent_id: None,
+            }],
+            vec![], // no worker items
+            vec![], // no orchestrator items
+            ExecutionMetadata {
+                orchestration_name: Some("TestOrchestration".to_string()),
+                orchestration_version: Some("1.0.0".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Failed to ack orchestration item");
+
     // Verify instance was created
-    let execution_id_opt = provider.latest_execution_id(instance_id).await;
+    let execution_id_opt = provider.latest_execution_id(&instance_id).await;
     assert_eq!(
         execution_id_opt,
         Some(execution_id),
         "Instance should have execution_id"
     );
 
-    // Read history (should be empty initially)
-    let events = provider.read(instance_id).await;
-    assert_eq!(events.len(), 0, "History should be empty for new instance");
+    // Read history (should contain the OrchestrationStarted event we just acked)
+    let events = provider.read(&instance_id).await;
+    assert_eq!(events.len(), 1, "History should contain OrchestrationStarted event");
+    assert!(matches!(events[0], Event::OrchestrationStarted { .. }), "First event should be OrchestrationStarted");
 
     provider.cleanup_schema().await.expect("Failed to cleanup");
 }
@@ -389,6 +425,38 @@ async fn test_list_instances_and_executions() {
         .enqueue_orchestrator_work(work_item2, None)
         .await
         .expect("Failed to enqueue");
+
+    // ⚠️ CRITICAL: Instances are NOT created on enqueue - must fetch and ack with metadata
+    // Fetch and ack both work items to create instances
+    for orchestration in ["Orch1", "Orch2"] {
+        let item = provider
+            .fetch_orchestration_item()
+            .await
+            .expect("Should fetch enqueued work item");
+        
+        provider
+            .ack_orchestration_item(
+                &item.lock_token,
+                1u64,
+                vec![Event::OrchestrationStarted {
+                    event_id: INITIAL_EVENT_ID,
+                    name: orchestration.to_string(),
+                    version: "1.0.0".to_string(),
+                    input: "input".to_string(),
+                    parent_instance: None,
+                    parent_id: None,
+                }],
+                vec![],
+                vec![],
+                ExecutionMetadata {
+                    orchestration_name: Some(orchestration.to_string()),
+                    orchestration_version: Some("1.0.0".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("Failed to ack orchestration item");
+    }
 
     // Test list_instances
     let mgmt = provider.as_management_capability().unwrap();

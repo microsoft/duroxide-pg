@@ -6,7 +6,7 @@
 CREATE TABLE IF NOT EXISTS instances (
     instance_id TEXT PRIMARY KEY,
     orchestration_name TEXT NOT NULL,
-    orchestration_version TEXT NOT NULL,
+    orchestration_version TEXT, -- NULLable, set by runtime via ack_orchestration_item metadata
     current_execution_id BIGINT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP

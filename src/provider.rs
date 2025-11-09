@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use duroxide::providers::{
     ExecutionInfo, ExecutionMetadata, InstanceInfo, ManagementCapability, OrchestrationItem,
-    Provider, QueueDepths, SystemMetrics, WorkItem,
+    Provider, ProviderError, QueueDepths, SystemMetrics, WorkItem,
 };
 use duroxide::Event;
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
@@ -91,29 +91,51 @@ impl PostgresProvider {
         &self.schema_name
     }
 
+    /// Convert sqlx::Error to ProviderError with proper classification
+    fn sqlx_to_provider_error(operation: &str, e: SqlxError) -> ProviderError {
+        match e {
+            SqlxError::Database(ref db_err) => {
+                // PostgreSQL error codes
+                let code_opt = db_err.code();
+                let code = code_opt.as_deref();
+                if code == Some("40P01") {
+                    // Deadlock detected
+                    ProviderError::retryable(operation, format!("Deadlock detected: {}", e))
+                } else if code == Some("40001") {
+                    // Serialization failure - permanent error (transaction conflict, not transient)
+                    ProviderError::permanent(operation, format!("Serialization failure: {}", e))
+                } else if code == Some("23505") {
+                    // Unique constraint violation (duplicate event)
+                    ProviderError::permanent(operation, format!("Duplicate detected: {}", e))
+                } else if code == Some("23503") {
+                    // Foreign key constraint violation
+                    ProviderError::permanent(operation, format!("Foreign key violation: {}", e))
+                } else {
+                    ProviderError::permanent(operation, format!("Database error: {}", e))
+                }
+            }
+            SqlxError::PoolClosed | SqlxError::PoolTimedOut => {
+                ProviderError::retryable(operation, format!("Connection pool error: {}", e))
+            }
+            SqlxError::Io(_) => {
+                ProviderError::retryable(operation, format!("I/O error: {}", e))
+            }
+            _ => ProviderError::permanent(operation, format!("Unexpected error: {}", e)),
+        }
+    }
+
     /// Clean up schema after tests (drops all tables and optionally the schema)
     ///
     /// **SAFETY**: Never drops the "public" schema itself, only tables within it.
     /// Only drops the schema if it's a custom schema (not "public").
     pub async fn cleanup_schema(&self) -> Result<()> {
-        let tables = vec![
-            "instances",
-            "executions",
-            "history",
-            "orchestrator_queue",
-            "worker_queue",
-            "instance_locks",
-            "_duroxide_migrations", // Migration tracking table
-        ];
-
-        for table in tables {
-            sqlx::query(&format!(
-                "DROP TABLE IF EXISTS {} CASCADE",
-                self.table_name(table)
-            ))
-            .execute(&*self.pool)
-            .await?;
-        }
+        // Call the stored procedure to drop all tables
+        sqlx::query(&format!(
+            "SELECT {}.cleanup_schema()",
+            self.schema_name
+        ))
+        .execute(&*self.pool)
+        .await?;
 
         // SAFETY: Never drop the "public" schema - it's a PostgreSQL system schema
         // Only drop custom schemas created for testing
@@ -406,7 +428,7 @@ impl Provider for PostgresProvider {
             );
 
             // Step 5: Load instance metadata
-            let instance_info: Option<(String, String, i64)> = sqlx::query_as(&format!(
+            let instance_info: Option<(String, Option<String>, i64)> = sqlx::query_as(&format!(
                 r#"
                 SELECT orchestration_name, orchestration_version, current_execution_id
                 FROM {}
@@ -420,7 +442,16 @@ impl Provider for PostgresProvider {
             .ok()?;
 
             let (orchestration_name, orchestration_version, current_execution_id, history) =
-                if let Some((name, version, exec_id)) = instance_info {
+                if let Some((name, version_opt, exec_id)) = instance_info {
+                    // Handle NULL version
+                    let version = version_opt.unwrap_or_else(|| {
+                        debug_assert!(
+                            false,
+                            "Instance exists with NULL version - should be set by metadata"
+                        );
+                        "unknown".to_string()
+                    });
+                    
                     // Instance exists - get history for current execution
                     let history_rows: Vec<String> = sqlx::query_scalar(&format!(
                         "SELECT event_data FROM {} WHERE instance_id = $1 AND execution_id = $2 ORDER BY event_id",
@@ -440,18 +471,28 @@ impl Provider for PostgresProvider {
 
                     (name, version, exec_id as u64, history)
                 } else {
-                    // New instance - derive from first message if it's StartOrchestration
-                    if let Some(WorkItem::StartOrchestration {
-                        orchestration,
-                        version,
-                        execution_id,
-                        ..
-                    }) = messages.first()
-                    {
-                        let name = orchestration.clone();
-                        let version = version.as_deref().unwrap_or("1.0.0").to_string();
-                        let exec_id = *execution_id;
-                        (name, version, exec_id, Vec::new())
+                    // New instance - find StartOrchestration or ContinueAsNew in all work items
+                    if let Some(start_item) = messages.iter().find(|item| {
+                        matches!(item, WorkItem::StartOrchestration { .. } | WorkItem::ContinueAsNew { .. })
+                    }) {
+                        let (orchestration, version) = match start_item {
+                            WorkItem::StartOrchestration { orchestration, version, .. }
+                            | WorkItem::ContinueAsNew { orchestration, version, .. } => {
+                                (orchestration.clone(), version.clone())
+                            }
+                            _ => unreachable!(),
+                        };
+                        let version = version.unwrap_or_else(|| "unknown".to_string());
+                        let exec_id = match start_item {
+                            WorkItem::StartOrchestration { execution_id, .. } => *execution_id,
+                            WorkItem::ContinueAsNew { .. } => {
+                                // ContinueAsNew doesn't have execution_id - use 1 as default for new instance
+                                // The actual execution_id will be set when the instance is created via ack metadata
+                                1
+                            }
+                            _ => unreachable!(),
+                        };
+                        (orchestration, version, exec_id, Vec::new())
                     } else {
                         // Shouldn't happen - no instance metadata and not StartOrchestration
                         tx.rollback().await.ok();
@@ -498,7 +539,7 @@ impl Provider for PostgresProvider {
         worker_items: Vec<WorkItem>,
         orchestrator_items: Vec<WorkItem>,
         metadata: ExecutionMetadata,
-    ) -> Result<(), String> {
+    ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
         // ALL operations must be atomic (single transaction)
         let mut tx = match self.pool.begin().await {
@@ -511,7 +552,7 @@ impl Provider for PostgresProvider {
                     error = %e,
                     "Failed to start transaction"
                 );
-                return Err(format!("Failed to start transaction: {}", e));
+                return Err(Self::sqlx_to_provider_error("ack_orchestration_item", e));
             }
         };
 
@@ -524,7 +565,7 @@ impl Provider for PostgresProvider {
         .bind(Self::now_millis())
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| format!("Failed to validate lock: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
 
         let instance_id = match instance_id_row {
             Some((id,)) => id,
@@ -537,7 +578,7 @@ impl Provider for PostgresProvider {
                     "Invalid lock token"
                 );
                 tx.rollback().await.ok();
-                return Err("Invalid lock token".to_string());
+                return Err(ProviderError::permanent("ack_orchestration_item", "Invalid lock token"));
             }
         };
 
@@ -552,6 +593,41 @@ impl Provider for PostgresProvider {
             "Acking orchestration item"
         );
 
+        // Step 2: Create or update instance metadata from runtime-provided metadata
+        if let (Some(name), Some(version)) = (
+            &metadata.orchestration_name,
+            &metadata.orchestration_version,
+        ) {
+            // Step 2a: Ensure instance exists (creates if new, ignores if exists)
+            sqlx::query(&format!(
+                "INSERT INTO {} (instance_id, orchestration_name, orchestration_version, current_execution_id)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (instance_id) DO NOTHING",
+                self.table_name("instances")
+            ))
+            .bind(&instance_id)
+            .bind(name)
+            .bind(version)
+            .bind(execution_id as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
+
+            // Step 2b: Update instance with resolved version
+            sqlx::query(&format!(
+                "UPDATE {} 
+                 SET orchestration_name = $1, orchestration_version = $2
+                 WHERE instance_id = $3",
+                self.table_name("instances")
+            ))
+            .bind(name)
+            .bind(version)
+            .bind(&instance_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
+        }
+
         // Step 3: Idempotently create execution row
         sqlx::query(&format!(
             "INSERT INTO {} (instance_id, execution_id, status, started_at) VALUES ($1, $2, 'Running', NOW()) ON CONFLICT (instance_id, execution_id) DO NOTHING",
@@ -561,7 +637,7 @@ impl Provider for PostgresProvider {
         .bind(execution_id as i64)
         .execute(&mut *tx)
         .await
-        .map_err(|e| format!("Failed to create execution: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
 
         // Step 4: Update instance current_execution_id
         sqlx::query(&format!(
@@ -572,24 +648,7 @@ impl Provider for PostgresProvider {
         .bind(&instance_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| format!("Failed to update current_execution_id: {}", e))?;
-
-        // Update instance metadata from runtime-provided metadata (no event inspection)
-        if let (Some(name), Some(version)) = (
-            &metadata.orchestration_name,
-            &metadata.orchestration_version,
-        ) {
-            sqlx::query(&format!(
-                "UPDATE {} SET orchestration_name = $1, orchestration_version = $2 WHERE instance_id = $3",
-                self.table_name("instances")
-            ))
-            .bind(name)
-            .bind(version)
-            .bind(&instance_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| format!("Failed to update instance metadata: {}", e))?;
-        }
+        .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
 
         // Step 5: Append history_delta (validate event_id > 0)
         if !history_delta.is_empty() {
@@ -597,14 +656,14 @@ impl Provider for PostgresProvider {
             for event in &history_delta {
                 if event.event_id() == 0 {
                     tx.rollback().await.ok();
-                    return Err("event_id must be set by runtime".to_string());
+                    return Err(ProviderError::permanent("ack_orchestration_item", "event_id must be set by runtime"));
                 }
             }
 
             let history_table = self.table_name("history");
             for event in history_delta {
                 let event_json = serde_json::to_string(&event)
-                    .map_err(|e| format!("Failed to serialize event: {}", e))?;
+                    .map_err(|e| ProviderError::permanent("ack_orchestration_item", &format!("Failed to serialize event: {}", e)))?;
 
                 // Extract event type for indexing
                 let event_type = format!("{:?}", event)
@@ -629,11 +688,11 @@ impl Provider for PostgresProvider {
                     if let SqlxError::Database(db_err) = &e {
                         if db_err.code().as_deref() == Some("23505") {
                             tx.rollback().await.ok();
-                            return Err("Duplicate event_id".to_string());
+                            return Err(ProviderError::permanent("ack_orchestration_item", "Duplicate event_id detected"));
                         }
                     }
                     tx.rollback().await.ok();
-                    return Err(format!("Failed to append history: {}", e));
+                    return Err(Self::sqlx_to_provider_error("ack_orchestration_item", e));
                 }
             }
         }
@@ -657,13 +716,13 @@ impl Provider for PostgresProvider {
             .bind(execution_id as i64)
             .execute(&mut *tx)
             .await
-            .map_err(|e| format!("Failed to update execution metadata: {}", e))?;
+            .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
         }
 
         // Step 7: Enqueue worker items
         for item in worker_items {
             let work_item = serde_json::to_string(&item)
-                .map_err(|e| format!("Failed to serialize work item: {}", e))?;
+                .map_err(|e| ProviderError::permanent("ack_orchestration_item", &format!("Failed to serialize work item: {}", e)))?;
 
             sqlx::query(&format!(
                 "INSERT INTO {} (work_item, created_at) VALUES ($1, NOW())",
@@ -672,13 +731,15 @@ impl Provider for PostgresProvider {
             .bind(work_item)
             .execute(&mut *tx)
             .await
-            .map_err(|e| format!("Failed to enqueue worker item: {}", e))?;
+            .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
         }
 
         // Step 8: Enqueue orchestrator items (may include TimerFired with delayed visibility)
+        // ⚠️ CRITICAL: DO NOT create instance here - even for StartOrchestration or ContinueAsNew
+        // Instance creation happens ONLY via ack_orchestration_item metadata (step 2 above)
         for item in orchestrator_items {
             let work_item = serde_json::to_string(&item)
-                .map_err(|e| format!("Failed to serialize work item: {}", e))?;
+                .map_err(|e| ProviderError::permanent("ack_orchestration_item", &format!("Failed to serialize work item: {}", e)))?;
 
             // Extract instance ID from WorkItem enum
             let target_instance = match &item {
@@ -696,51 +757,18 @@ impl Provider for PostgresProvider {
                     parent_instance, ..
                 } => parent_instance,
                 WorkItem::ActivityExecute { .. } => {
-                    return Err(
+                    return Err(ProviderError::permanent(
+                        "ack_orchestration_item",
                         "ActivityExecute should go to worker queue, not orchestrator queue"
-                            .to_string(),
-                    );
+                    ));
                 }
             };
-
-            // Handle StartOrchestration - create instance and execution rows
-            if let WorkItem::StartOrchestration {
-                orchestration,
-                version,
-                execution_id: start_exec_id,
-                ..
-            } = &item
-            {
-                let version = version.as_deref().unwrap_or("1.0.0");
-
-                sqlx::query(&format!(
-                    "INSERT INTO {} (instance_id, orchestration_name, orchestration_version, current_execution_id) VALUES ($1, $2, $3, $4) ON CONFLICT (instance_id) DO NOTHING",
-                    self.table_name("instances")
-                ))
-                .bind(target_instance)
-                .bind(orchestration)
-                .bind(version)
-                .bind(*start_exec_id as i64)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| format!("Failed to create instance: {}", e))?;
-
-                sqlx::query(&format!(
-                    "INSERT INTO {} (instance_id, execution_id, status) VALUES ($1, $2, 'Running') ON CONFLICT (instance_id, execution_id) DO NOTHING",
-                    self.table_name("executions")
-                ))
-                .bind(target_instance)
-                .bind(*start_exec_id as i64)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| format!("Failed to create execution: {}", e))?;
-            }
 
             // Calculate visible_at based on item type
             let visible_at = if let WorkItem::TimerFired { fire_at_ms, .. } = &item {
                 // For TimerFired, use the fire_at_ms timestamp
                 DateTime::from_timestamp(*fire_at_ms as i64 / 1000, 0)
-                    .ok_or_else(|| "Invalid fire_at_ms timestamp".to_string())?
+                    .ok_or_else(|| ProviderError::permanent("ack_orchestration_item", "Invalid fire_at_ms timestamp"))?
             } else {
                 // Immediate visibility
                 Utc::now()
@@ -755,7 +783,7 @@ impl Provider for PostgresProvider {
             .bind(visible_at)
             .execute(&mut *tx)
             .await
-            .map_err(|e| format!("Failed to enqueue orchestrator item: {}", e))?;
+            .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
         }
 
         // Step 9: Delete locked messages and remove instance lock
@@ -766,7 +794,7 @@ impl Provider for PostgresProvider {
         .bind(lock_token)
         .execute(&mut *tx)
         .await
-        .map_err(|e| format!("Failed to delete locked messages: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
 
         // Remove instance lock (processing complete)
         sqlx::query(&format!(
@@ -777,7 +805,7 @@ impl Provider for PostgresProvider {
         .bind(lock_token)
         .execute(&mut *tx)
         .await
-        .map_err(|e| format!("Failed to remove instance lock: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
 
         // Commit transaction - all operations succeed or all fail
         match tx.commit().await {
@@ -802,7 +830,7 @@ impl Provider for PostgresProvider {
                     instance_id = %instance_id,
                     "Failed to commit transaction"
                 );
-                Err(format!("Failed to commit transaction: {}", e))
+                Err(Self::sqlx_to_provider_error("ack_orchestration_item", e))
             }
         }
     }
@@ -812,7 +840,7 @@ impl Provider for PostgresProvider {
         &self,
         lock_token: &str,
         delay_ms: Option<u64>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ProviderError> {
         let mut tx = match self.pool.begin().await {
             Ok(tx) => tx,
             Err(e) => {
@@ -823,7 +851,7 @@ impl Provider for PostgresProvider {
                     error = %e,
                     "Failed to start transaction"
                 );
-                return Err(format!("Failed to start transaction: {}", e));
+                return Err(Self::sqlx_to_provider_error("abandon_orchestration_item", e));
             }
         };
 
@@ -835,13 +863,13 @@ impl Provider for PostgresProvider {
         .bind(lock_token)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| format!("Failed to validate lock: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("abandon_orchestration_item", e))?;
 
         let instance_id = match instance_id_row {
             Some((id,)) => id,
             None => {
                 tx.rollback().await.ok();
-                return Err("Invalid lock token".to_string());
+                return Err(ProviderError::permanent("abandon_orchestration_item", "Invalid lock token"));
             }
         };
 
@@ -860,7 +888,7 @@ impl Provider for PostgresProvider {
         .bind(lock_token)
         .execute(&mut *tx)
         .await
-        .map_err(|e| format!("Failed to unlock messages: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("abandon_orchestration_item", e))?;
 
         // Step 3: Remove instance lock
         sqlx::query(&format!(
@@ -870,11 +898,11 @@ impl Provider for PostgresProvider {
         .bind(lock_token)
         .execute(&mut *tx)
         .await
-        .map_err(|e| format!("Failed to remove instance lock: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("abandon_orchestration_item", e))?;
 
         tx.commit()
             .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+            .map_err(|e| Self::sqlx_to_provider_error("abandon_orchestration_item", e))?;
 
         debug!(
             target = "duroxide::providers::postgres",
@@ -889,21 +917,18 @@ impl Provider for PostgresProvider {
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
     async fn read(&self, instance: &str) -> Vec<Event> {
-        // Get latest execution ID
-        let execution_id: Option<i64> = sqlx::query_scalar(&format!(
-            "SELECT current_execution_id FROM {} WHERE instance_id = $1",
-            self.table_name("instances")
+        // Get latest execution ID from executions table (matching SQLite provider behavior)
+        // Default to execution_id 1 if no executions exist
+        let execution_id: i64 = sqlx::query_scalar(&format!(
+            "SELECT COALESCE(MAX(execution_id), 1) FROM {} WHERE instance_id = $1",
+            self.table_name("executions")
         ))
         .bind(instance)
         .fetch_optional(&*self.pool)
         .await
         .ok()
-        .flatten();
-
-        let execution_id = match execution_id {
-            Some(id) => id,
-            None => return Vec::new(), // Instance doesn't exist
-        };
+        .flatten()
+        .unwrap_or(1);
 
         // Load events for that execution
         let event_data_rows: Vec<String> = sqlx::query_scalar(&format!(
@@ -929,7 +954,7 @@ impl Provider for PostgresProvider {
         instance: &str,
         execution_id: u64,
         new_events: Vec<Event>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ProviderError> {
         if new_events.is_empty() {
             return Ok(());
         }
@@ -945,7 +970,7 @@ impl Provider for PostgresProvider {
                     execution_id = execution_id,
                     "event_id must be set by runtime"
                 );
-                return Err("event_id must be set by runtime".to_string());
+                return Err(ProviderError::permanent("append_with_execution", "event_id must be set by runtime"));
             }
         }
 
@@ -957,11 +982,11 @@ impl Provider for PostgresProvider {
             .pool
             .begin()
             .await
-            .map_err(|e| format!("Failed to start transaction: {}", e))?;
+            .map_err(|e| Self::sqlx_to_provider_error("append_with_execution", e))?;
 
         for event in new_events {
             let event_json = serde_json::to_string(&event)
-                .map_err(|e| format!("Failed to serialize event: {}", e))?;
+                .map_err(|e| ProviderError::permanent("append_with_execution", &format!("Failed to serialize event: {}", e)))?;
 
             // Extract event type for indexing (discriminant name)
             let event_type = format!("{:?}", event)
@@ -981,12 +1006,12 @@ impl Provider for PostgresProvider {
             .bind(event_json)
             .execute(&mut *tx)
             .await
-            .map_err(|e| format!("Failed to append history: {}", e))?;
+            .map_err(|e| Self::sqlx_to_provider_error("append_with_execution", e))?;
         }
 
         tx.commit()
             .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+            .map_err(|e| Self::sqlx_to_provider_error("append_with_execution", e))?;
 
         debug!(
             target = "duroxide::providers::postgres",
@@ -1001,13 +1026,13 @@ impl Provider for PostgresProvider {
     }
 
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
-    async fn enqueue_worker_work(&self, item: WorkItem) -> Result<(), String> {
+    async fn enqueue_worker_work(&self, item: WorkItem) -> Result<(), ProviderError> {
         let work_item = serde_json::to_string(&item)
-            .map_err(|e| format!("Failed to serialize work item: {}", e))?;
+            .map_err(|e| ProviderError::permanent("enqueue_worker_work", &format!("Failed to serialize work item: {}", e)))?;
 
         sqlx::query(&format!(
-            "INSERT INTO {} (work_item, created_at) VALUES ($1, NOW())",
-            self.table_name("worker_queue")
+            "SELECT {}.enqueue_worker_work($1)",
+            self.schema_name
         ))
         .bind(work_item)
         .execute(&*self.pool)
@@ -1020,7 +1045,7 @@ impl Provider for PostgresProvider {
                 error = %e,
                 "Failed to enqueue worker work"
             );
-            format!("Failed to enqueue worker work: {}", e)
+            Self::sqlx_to_provider_error("enqueue_worker_work", e)
         })?;
 
         Ok(())
@@ -1103,41 +1128,9 @@ impl Provider for PostgresProvider {
     }
 
     #[instrument(skip(self), fields(token = %token), target = "duroxide::providers::postgres")]
-    async fn ack_worker(&self, token: &str, completion: WorkItem) -> Result<(), String> {
+    async fn ack_worker(&self, token: &str, completion: WorkItem) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
-        // Start transaction for atomic delete + enqueue
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to start transaction: {}", e))?;
-
-        // Delete the worker queue item
-        let rows_affected = sqlx::query(&format!(
-            "DELETE FROM {} WHERE lock_token = $1",
-            self.table_name("worker_queue")
-        ))
-        .bind(token)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to delete worker queue item: {}", e))?
-        .rows_affected();
-
-        if rows_affected == 0 {
-            error!(
-                target = "duroxide::providers::postgres",
-                operation = "ack_worker",
-                error_type = "worker_item_not_found",
-                token = %token,
-                "Worker queue item not found or already processed"
-            );
-            return Err("Worker queue item not found or already processed".to_string());
-        }
-
-        // Enqueue completion to orchestrator queue
-        let completion_json = serde_json::to_string(&completion)
-            .map_err(|e| format!("Failed to serialize completion: {}", e))?;
-
+        
         // Extract instance ID from completion WorkItem
         let instance_id = match &completion {
             WorkItem::ActivityCompleted { instance, .. }
@@ -1149,23 +1142,37 @@ impl Provider for PostgresProvider {
                     error_type = "invalid_completion_type",
                     "Invalid completion work item type"
                 );
-                return Err("Invalid completion work item type".to_string());
+                return Err(ProviderError::permanent("ack_worker", "Invalid completion work item type"));
             }
         };
 
+        let completion_json = serde_json::to_string(&completion)
+            .map_err(|e| ProviderError::permanent("ack_worker", &format!("Failed to serialize completion: {}", e)))?;
+
+        // Call stored procedure to atomically delete worker item and enqueue completion
         sqlx::query(&format!(
-            "INSERT INTO {} (instance_id, work_item, visible_at, created_at) VALUES ($1, $2, NOW(), NOW())",
-            self.table_name("orchestrator_queue")
+            "SELECT {}.ack_worker($1, $2, $3)",
+            self.schema_name
         ))
+        .bind(token)
         .bind(instance_id)
         .bind(completion_json)
-        .execute(&mut *tx)
+        .execute(&*self.pool)
         .await
-        .map_err(|e| format!("Failed to enqueue completion: {}", e))?;
-
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        .map_err(|e| {
+            if e.to_string().contains("Worker queue item not found") {
+                error!(
+                    target = "duroxide::providers::postgres",
+                    operation = "ack_worker",
+                    error_type = "worker_item_not_found",
+                    token = %token,
+                    "Worker queue item not found or already processed"
+                );
+                ProviderError::permanent("ack_worker", "Worker queue item not found or already processed")
+            } else {
+                Self::sqlx_to_provider_error("ack_worker", e)
+            }
+        })?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         debug!(
@@ -1184,9 +1191,9 @@ impl Provider for PostgresProvider {
         &self,
         item: WorkItem,
         delay_ms: Option<u64>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ProviderError> {
         let work_item = serde_json::to_string(&item)
-            .map_err(|e| format!("Failed to serialize work item: {}", e))?;
+            .map_err(|e| ProviderError::permanent("enqueue_orchestrator_work", &format!("Failed to serialize work item: {}", e)))?;
 
         // Extract instance ID from WorkItem enum
         let instance_id = match &item {
@@ -1204,47 +1211,12 @@ impl Provider for PostgresProvider {
                 parent_instance, ..
             } => parent_instance,
             WorkItem::ActivityExecute { .. } => {
-                return Err(
-                    "ActivityExecute should go to worker queue, not orchestrator queue".to_string(),
-                );
+                return Err(ProviderError::permanent(
+                    "enqueue_orchestrator_work",
+                    "ActivityExecute should go to worker queue, not orchestrator queue"
+                ));
             }
         };
-
-        // Handle StartOrchestration - create instance and execution rows
-        if let WorkItem::StartOrchestration {
-            orchestration,
-            version,
-            execution_id,
-            ..
-        } = &item
-        {
-            let version = version.as_deref().unwrap_or("1.0.0");
-
-            sqlx::query(&format!(
-                "INSERT INTO {} (instance_id, orchestration_name, orchestration_version, current_execution_id) VALUES ($1, $2, $3, $4) ON CONFLICT (instance_id) DO NOTHING",
-                self.table_name("instances")
-            ))
-            .bind(instance_id)
-            .bind(orchestration)
-            .bind(version)
-            .bind(*execution_id as i64)
-            .execute(&*self.pool)
-            .await
-            .map_err(|e| format!("Failed to create instance: {}", e))?;
-
-            sqlx::query(&format!(
-                "INSERT INTO {} (instance_id, execution_id, status) VALUES ($1, $2, 'Running') ON CONFLICT (instance_id, execution_id) DO NOTHING",
-                self.table_name("executions")
-            ))
-            .bind(instance_id)
-            .bind(*execution_id as i64)
-            .execute(&*self.pool)
-            .await
-            .map_err(|e| format!("Failed to create execution: {}", e))?;
-        }
-
-        let _query_sql;
-        let query;
 
         // Determine visible_at: use max of fire_at_ms (for TimerFired) and delay_ms
         let now_ms = Self::now_millis();
@@ -1269,19 +1241,25 @@ impl Provider for PostgresProvider {
         let visible_at = Utc
             .timestamp_millis_opt(visible_at_ms as i64)
             .single()
-            .ok_or_else(|| "Invalid visible_at timestamp".to_string())?;
+            .ok_or_else(|| ProviderError::permanent("enqueue_orchestrator_work", "Invalid visible_at timestamp"))?;
 
-        _query_sql = format!(
-            "INSERT INTO {} (instance_id, work_item, visible_at, created_at) VALUES ($1, $2, $3, NOW())",
-            self.table_name("orchestrator_queue")
-        );
+        // ⚠️ CRITICAL: DO NOT extract orchestration metadata - instance creation happens via ack_orchestration_item metadata
+        // Pass NULL for orchestration_name, orchestration_version, execution_id parameters
 
-        query = sqlx::query(&_query_sql)
-            .bind(instance_id)
-            .bind(&work_item)
-            .bind(visible_at);
-
-        query.execute(&*self.pool).await.map_err(|e| {
+        // Call stored procedure to enqueue work
+        sqlx::query(&format!(
+            "SELECT {}.enqueue_orchestrator_work($1, $2, $3, $4, $5, $6)",
+            self.schema_name
+        ))
+        .bind(instance_id)
+        .bind(&work_item)
+        .bind(visible_at)
+        .bind::<Option<String>>(None)  // orchestration_name - NULL
+        .bind::<Option<String>>(None)  // orchestration_version - NULL
+        .bind::<Option<i64>>(None)     // execution_id - NULL
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| {
             error!(
                 target = "duroxide::providers::postgres",
                 operation = "enqueue_orchestrator_work",
@@ -1290,7 +1268,7 @@ impl Provider for PostgresProvider {
                 instance_id = %instance_id,
                 "Failed to enqueue orchestrator work"
             );
-            format!("Failed to enqueue orchestrator work: {}", e)
+            Self::sqlx_to_provider_error("enqueue_orchestrator_work", e)
         })?;
 
         debug!(
@@ -1326,8 +1304,8 @@ impl Provider for PostgresProvider {
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
     async fn latest_execution_id(&self, instance: &str) -> Option<u64> {
         sqlx::query_scalar(&format!(
-            "SELECT current_execution_id FROM {} WHERE instance_id = $1",
-            self.table_name("instances")
+            "SELECT {}.latest_execution_id($1)",
+            self.schema_name
         ))
         .bind(instance)
         .fetch_optional(&*self.pool)
@@ -1340,8 +1318,8 @@ impl Provider for PostgresProvider {
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
     async fn list_instances(&self) -> Vec<String> {
         sqlx::query_scalar(&format!(
-            "SELECT instance_id FROM {} ORDER BY created_at DESC",
-            self.table_name("instances")
+            "SELECT instance_id FROM {}.list_instances()",
+            self.schema_name
         ))
         .fetch_all(&*self.pool)
         .await
@@ -1352,8 +1330,8 @@ impl Provider for PostgresProvider {
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
     async fn list_executions(&self, instance: &str) -> Vec<u64> {
         let execution_ids: Vec<i64> = sqlx::query_scalar(&format!(
-            "SELECT execution_id FROM {} WHERE instance_id = $1 ORDER BY execution_id",
-            self.table_name("executions")
+            "SELECT execution_id FROM {}.list_executions($1)",
+            self.schema_name
         ))
         .bind(instance)
         .fetch_all(&*self.pool)
@@ -1372,46 +1350,38 @@ impl Provider for PostgresProvider {
 #[async_trait::async_trait]
 impl ManagementCapability for PostgresProvider {
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
-    async fn list_instances(&self) -> Result<Vec<String>, String> {
+    async fn list_instances(&self) -> Result<Vec<String>, ProviderError> {
         sqlx::query_scalar(&format!(
-            "SELECT instance_id FROM {} ORDER BY created_at DESC",
-            self.table_name("instances")
+            "SELECT instance_id FROM {}.list_instances()",
+            self.schema_name
         ))
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| format!("Failed to list instances: {}", e))
+        .map_err(|e| Self::sqlx_to_provider_error("list_instances", e))
     }
 
     #[instrument(skip(self), fields(status = %status), target = "duroxide::providers::postgres")]
-    async fn list_instances_by_status(&self, status: &str) -> Result<Vec<String>, String> {
+    async fn list_instances_by_status(&self, status: &str) -> Result<Vec<String>, ProviderError> {
         sqlx::query_scalar(&format!(
-            r#"
-            SELECT i.instance_id 
-            FROM {} i
-            JOIN {} e ON i.instance_id = e.instance_id 
-              AND i.current_execution_id = e.execution_id
-            WHERE e.status = $1
-            ORDER BY i.created_at DESC
-            "#,
-            self.table_name("instances"),
-            self.table_name("executions")
+            "SELECT instance_id FROM {}.list_instances_by_status($1)",
+            self.schema_name
         ))
         .bind(status)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| format!("Failed to list instances by status: {}", e))
+        .map_err(|e| Self::sqlx_to_provider_error("list_instances_by_status", e))
     }
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
-    async fn list_executions(&self, instance: &str) -> Result<Vec<u64>, String> {
+    async fn list_executions(&self, instance: &str) -> Result<Vec<u64>, ProviderError> {
         let execution_ids: Vec<i64> = sqlx::query_scalar(&format!(
-            "SELECT execution_id FROM {} WHERE instance_id = $1 ORDER BY execution_id",
-            self.table_name("executions")
+            "SELECT execution_id FROM {}.list_executions($1)",
+            self.schema_name
         ))
         .bind(instance)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| format!("Failed to list executions: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("list_executions", e))?;
 
         Ok(execution_ids.into_iter().map(|id| id as u64).collect())
     }
@@ -1421,7 +1391,7 @@ impl ManagementCapability for PostgresProvider {
         &self,
         instance: &str,
         execution_id: u64,
-    ) -> Result<Vec<Event>, String> {
+    ) -> Result<Vec<Event>, ProviderError> {
         let event_data_rows: Vec<String> = sqlx::query_scalar(&format!(
             "SELECT event_data FROM {} WHERE instance_id = $1 AND execution_id = $2 ORDER BY event_id",
             self.table_name("history")
@@ -1430,7 +1400,7 @@ impl ManagementCapability for PostgresProvider {
         .bind(execution_id as i64)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| format!("Failed to read execution: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("read_execution", e))?;
 
         event_data_rows
             .into_iter()
@@ -1442,21 +1412,21 @@ impl ManagementCapability for PostgresProvider {
     }
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
-    async fn latest_execution_id(&self, instance: &str) -> Result<u64, String> {
+    async fn latest_execution_id(&self, instance: &str) -> Result<u64, ProviderError> {
         sqlx::query_scalar(&format!(
-            "SELECT current_execution_id FROM {} WHERE instance_id = $1",
-            self.table_name("instances")
+            "SELECT {}.latest_execution_id($1)",
+            self.schema_name
         ))
         .bind(instance)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| format!("Failed to get latest execution: {}", e))?
+        .map_err(|e| Self::sqlx_to_provider_error("latest_execution_id", e))?
         .map(|id: i64| id as u64)
-        .ok_or_else(|| "Instance not found".to_string())
+        .ok_or_else(|| ProviderError::permanent("latest_execution_id", "Instance not found"))
     }
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
-    async fn get_instance_info(&self, instance: &str) -> Result<InstanceInfo, String> {
+    async fn get_instance_info(&self, instance: &str) -> Result<InstanceInfo, ProviderError> {
         let row: Option<(
             String,
             String,
@@ -1467,22 +1437,13 @@ impl ManagementCapability for PostgresProvider {
             Option<String>,
             Option<String>,
         )> = sqlx::query_as(&format!(
-            r#"
-            SELECT i.instance_id, i.orchestration_name, i.orchestration_version, 
-                   i.current_execution_id, i.created_at, i.updated_at,
-                   e.status, e.output
-            FROM {} i
-            LEFT JOIN {} e ON i.instance_id = e.instance_id 
-              AND i.current_execution_id = e.execution_id
-            WHERE i.instance_id = $1
-            "#,
-            self.table_name("instances"),
-            self.table_name("executions")
+            "SELECT * FROM {}.get_instance_info($1)",
+            self.schema_name
         ))
         .bind(instance)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| format!("Failed to get instance info: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("get_instance_info", e))?;
 
         let (
             instance_id,
@@ -1493,7 +1454,7 @@ impl ManagementCapability for PostgresProvider {
             updated_at,
             status,
             output,
-        ) = row.ok_or_else(|| "Instance not found".to_string())?;
+        ) = row.ok_or_else(|| ProviderError::permanent("get_instance_info", "Instance not found"))?;
 
         Ok(InstanceInfo {
             instance_id,
@@ -1514,41 +1475,26 @@ impl ManagementCapability for PostgresProvider {
         &self,
         instance: &str,
         execution_id: u64,
-    ) -> Result<ExecutionInfo, String> {
+    ) -> Result<ExecutionInfo, ProviderError> {
         let row: Option<(
             i64,
             String,
             Option<String>,
             chrono::DateTime<Utc>,
             Option<chrono::DateTime<Utc>>,
+            i64,
         )> = sqlx::query_as(&format!(
-            r#"
-            SELECT e.execution_id, e.status, e.output, 
-                   e.started_at, e.completed_at
-            FROM {} e
-            WHERE e.instance_id = $1 AND e.execution_id = $2
-            "#,
-            self.table_name("executions")
+            "SELECT * FROM {}.get_execution_info($1, $2)",
+            self.schema_name
         ))
         .bind(instance)
         .bind(execution_id as i64)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| format!("Failed to get execution info: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("get_execution_info", e))?;
 
-        let (exec_id, status, output, started_at, completed_at) =
-            row.ok_or_else(|| "Execution not found".to_string())?;
-
-        // Get event count for this execution
-        let event_count: i64 = sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM {} WHERE instance_id = $1 AND execution_id = $2",
-            self.table_name("history")
-        ))
-        .bind(instance)
-        .bind(execution_id as i64)
-        .fetch_one(&*self.pool)
-        .await
-        .map_err(|e| format!("Failed to get event count: {}", e))?;
+        let (exec_id, status, output, started_at, completed_at, event_count) =
+            row.ok_or_else(|| ProviderError::permanent("get_execution_info", "Execution not found"))?;
 
         Ok(ExecutionInfo {
             execution_id: exec_id as u64,
@@ -1561,119 +1507,56 @@ impl ManagementCapability for PostgresProvider {
     }
 
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
-    async fn get_system_metrics(&self) -> Result<SystemMetrics, String> {
-        // Get total instances
-        let total_instances: i64 = sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM {}",
-            self.table_name("instances")
+    async fn get_system_metrics(&self) -> Result<SystemMetrics, ProviderError> {
+        let row: Option<(
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        )> = sqlx::query_as(&format!(
+            "SELECT * FROM {}.get_system_metrics()",
+            self.schema_name
         ))
-        .fetch_one(&*self.pool)
+        .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| format!("Failed to get metrics: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("get_system_metrics", e))?;
 
-        // Get total executions
-        let total_executions: i64 = sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM {}",
-            self.table_name("executions")
-        ))
-        .fetch_one(&*self.pool)
-        .await
-        .map_err(|e| format!("Failed to get metrics: {}", e))?;
-
-        // Get running instances
-        let running: i64 = sqlx::query_scalar(&format!(
-            r#"
-            SELECT COUNT(DISTINCT i.instance_id)
-            FROM {} i
-            JOIN {} e ON i.instance_id = e.instance_id 
-              AND i.current_execution_id = e.execution_id
-            WHERE e.status = 'Running'
-            "#,
-            self.table_name("instances"),
-            self.table_name("executions")
-        ))
-        .fetch_one(&*self.pool)
-        .await
-        .map_err(|e| format!("Failed to get metrics: {}", e))?;
-
-        // Get completed instances
-        let completed: i64 = sqlx::query_scalar(&format!(
-            r#"
-            SELECT COUNT(DISTINCT i.instance_id)
-            FROM {} i
-            JOIN {} e ON i.instance_id = e.instance_id 
-              AND i.current_execution_id = e.execution_id
-            WHERE e.status = 'Completed'
-            "#,
-            self.table_name("instances"),
-            self.table_name("executions")
-        ))
-        .fetch_one(&*self.pool)
-        .await
-        .map_err(|e| format!("Failed to get metrics: {}", e))?;
-
-        // Get failed instances
-        let failed: i64 = sqlx::query_scalar(&format!(
-            r#"
-            SELECT COUNT(DISTINCT i.instance_id)
-            FROM {} i
-            JOIN {} e ON i.instance_id = e.instance_id 
-              AND i.current_execution_id = e.execution_id
-            WHERE e.status = 'Failed'
-            "#,
-            self.table_name("instances"),
-            self.table_name("executions")
-        ))
-        .fetch_one(&*self.pool)
-        .await
-        .map_err(|e| format!("Failed to get metrics: {}", e))?;
-
-        // Get total events
-        let total_events: i64 = sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM {}",
-            self.table_name("history")
-        ))
-        .fetch_one(&*self.pool)
-        .await
-        .map_err(|e| format!("Failed to get metrics: {}", e))?;
+        let (
+            total_instances,
+            total_executions,
+            running_instances,
+            completed_instances,
+            failed_instances,
+            total_events,
+        ) = row.ok_or_else(|| ProviderError::permanent("get_system_metrics", "Failed to get system metrics"))?;
 
         Ok(SystemMetrics {
             total_instances: total_instances as u64,
             total_executions: total_executions as u64,
-            running_instances: running as u64,
-            completed_instances: completed as u64,
-            failed_instances: failed as u64,
+            running_instances: running_instances as u64,
+            completed_instances: completed_instances as u64,
+            failed_instances: failed_instances as u64,
             total_events: total_events as u64,
         })
     }
 
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
-    async fn get_queue_depths(&self) -> Result<QueueDepths, String> {
+    async fn get_queue_depths(&self) -> Result<QueueDepths, ProviderError> {
         let now_ms = Self::now_millis();
 
-        let orchestrator_queue: i64 = sqlx::query_scalar(&format!(
-            r#"
-            SELECT COUNT(*) FROM {} 
-            WHERE lock_token IS NULL OR locked_until <= $1
-            "#,
-            self.table_name("orchestrator_queue")
+        let row: Option<(i64, i64)> = sqlx::query_as(&format!(
+            "SELECT * FROM {}.get_queue_depths($1)",
+            self.schema_name
         ))
         .bind(now_ms)
-        .fetch_one(&*self.pool)
+        .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| format!("Failed to get queue depths: {}", e))?;
+        .map_err(|e| Self::sqlx_to_provider_error("get_queue_depths", e))?;
 
-        let worker_queue: i64 = sqlx::query_scalar(&format!(
-            r#"
-            SELECT COUNT(*) FROM {} 
-            WHERE lock_token IS NULL OR locked_until <= $1
-            "#,
-            self.table_name("worker_queue")
-        ))
-        .bind(now_ms)
-        .fetch_one(&*self.pool)
-        .await
-        .map_err(|e| format!("Failed to get queue depths: {}", e))?;
+        let (orchestrator_queue, worker_queue) =
+            row.ok_or_else(|| ProviderError::permanent("get_queue_depths", "Failed to get queue depths"))?;
 
         Ok(QueueDepths {
             orchestrator_queue: orchestrator_queue as usize,

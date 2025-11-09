@@ -203,6 +203,103 @@ impl MigrationRunner {
         Ok(versions)
     }
 
+    /// Split SQL into statements, respecting dollar-quoted strings ($$...$$)
+    /// This handles stored procedures and other constructs that use dollar-quoting
+    fn split_sql_statements(sql: &str) -> Vec<String> {
+        let mut statements = Vec::new();
+        let mut current_statement = String::new();
+        let mut chars: Vec<char> = sql.chars().collect();
+        let mut i = 0;
+        let mut in_dollar_quote = false;
+        let mut dollar_tag: Option<String> = None;
+
+        while i < chars.len() {
+            let ch = chars[i];
+            
+            if !in_dollar_quote {
+                // Check for start of dollar-quoted string
+                if ch == '$' {
+                    let mut tag = String::new();
+                    tag.push(ch);
+                    i += 1;
+                    
+                    // Collect the tag (e.g., $$, $tag$, $function$)
+                    while i < chars.len() {
+                        let next_ch = chars[i];
+                        if next_ch == '$' {
+                            tag.push(next_ch);
+                            dollar_tag = Some(tag.clone());
+                            in_dollar_quote = true;
+                            current_statement.push_str(&tag);
+                            i += 1;
+                            break;
+                        } else if next_ch.is_alphanumeric() || next_ch == '_' {
+                            tag.push(next_ch);
+                            i += 1;
+                        } else {
+                            // Not a dollar quote, just a $ character
+                            current_statement.push(ch);
+                            break;
+                        }
+                    }
+                } else if ch == ';' {
+                    // End of statement (only if not in dollar quote)
+                    current_statement.push(ch);
+                    let trimmed = current_statement.trim().to_string();
+                    if !trimmed.is_empty() {
+                        statements.push(trimmed);
+                    }
+                    current_statement.clear();
+                    i += 1;
+                } else {
+                    current_statement.push(ch);
+                    i += 1;
+                }
+            } else {
+                // Inside dollar-quoted string
+                current_statement.push(ch);
+                
+                // Check for end of dollar-quoted string
+                if ch == '$' {
+                    let tag = dollar_tag.as_ref().unwrap();
+                    let mut matches = true;
+                    
+                    // Check if the following characters match the closing tag
+                    for (j, tag_char) in tag.chars().enumerate() {
+                        if j == 0 {
+                            continue; // Skip first $ (we already matched it)
+                        }
+                        if i + j >= chars.len() || chars[i + j] != tag_char {
+                            matches = false;
+                            break;
+                        }
+                    }
+                    
+                    if matches {
+                        // Found closing tag - consume remaining tag characters
+                        for _ in 0..(tag.len() - 1) {
+                            if i + 1 < chars.len() {
+                                current_statement.push(chars[i + 1]);
+                                i += 1;
+                            }
+                        }
+                        in_dollar_quote = false;
+                        dollar_tag = None;
+                    }
+                }
+                i += 1;
+            }
+        }
+
+        // Add remaining statement if any
+        let trimmed = current_statement.trim().to_string();
+        if !trimmed.is_empty() {
+            statements.push(trimmed);
+        }
+
+        statements
+    }
+
     /// Apply a single migration
     async fn apply_migration(&self, migration: &Migration) -> Result<()> {
         // Start transaction
@@ -236,12 +333,8 @@ impl MigrationRunner {
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Split by semicolon and filter out empty statements
-        let statements: Vec<&str> = cleaned_sql
-            .split(';')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
+        // Split by semicolon, but respect dollar-quoted strings ($$...$$)
+        let statements = Self::split_sql_statements(&cleaned_sql);
 
         tracing::debug!(
             "Executing {} statements for migration {}",

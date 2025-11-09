@@ -141,7 +141,8 @@ pub async fn test_create_execution(
             },
             None,
         )
-        .await?;
+        .await
+        .map_err(|e| e.message.clone())?;
 
     // Fetch to get lock token
     let item = provider
@@ -167,9 +168,14 @@ pub async fn test_create_execution(
             }],
             vec![], // no worker items
             vec![], // no orchestrator items
-            ExecutionMetadata::default(),
+            ExecutionMetadata {
+                orchestration_name: Some(orchestration.to_string()),
+                orchestration_version: Some(version.to_string()),
+                ..Default::default()
+            },
         )
-        .await?;
+        .await
+        .map_err(|e| e.message.clone())?;
 
     Ok(execution_id)
 }
