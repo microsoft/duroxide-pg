@@ -92,6 +92,58 @@ impl PostgresProvider {
         &self.schema_name
     }
 
+    /// Get server-side timing statistics (requires migration 0003)
+    pub async fn get_timing_stats(&self, minutes: i32) -> Result<Vec<TimingStats>> {
+        #[derive(sqlx::FromRow)]
+        struct TimingRow {
+            procedure_name: String,
+            call_count: i64,
+            avg_ms: Option<f64>,
+            min_ms: Option<f64>,
+            max_ms: Option<f64>,
+            p50_ms: Option<f64>,
+            p95_ms: Option<f64>,
+            p99_ms: Option<f64>,
+        }
+
+        let rows: Vec<TimingRow> = sqlx::query_as(&format!(
+            "SELECT * FROM {}.get_timing_stats($1)",
+            self.schema_name
+        ))
+        .bind(minutes)
+        .fetch_all(&*self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| TimingStats {
+                procedure_name: r.procedure_name,
+                call_count: r.call_count as u64,
+                avg_ms: r.avg_ms.unwrap_or(0.0),
+                min_ms: r.min_ms.unwrap_or(0.0),
+                max_ms: r.max_ms.unwrap_or(0.0),
+                p50_ms: r.p50_ms.unwrap_or(0.0),
+                p95_ms: r.p95_ms.unwrap_or(0.0),
+                p99_ms: r.p99_ms.unwrap_or(0.0),
+            })
+            .collect())
+    }
+}
+
+/// Server-side timing statistics for a stored procedure
+#[derive(Debug, Clone)]
+pub struct TimingStats {
+    pub procedure_name: String,
+    pub call_count: u64,
+    pub avg_ms: f64,
+    pub min_ms: f64,
+    pub max_ms: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+}
+
+impl PostgresProvider {
     /// Convert sqlx::Error to ProviderError with proper classification
     fn sqlx_to_provider_error(operation: &str, e: SqlxError) -> ProviderError {
         match e {
