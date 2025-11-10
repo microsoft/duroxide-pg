@@ -108,14 +108,18 @@ cargo run --release --package duroxide-pg-stress --bin pg-stress -- \
 
 | Metric | Local Docker | Azure Remote | Ratio |
 |--------|--------------|--------------|-------|
-| Throughput (2:2) | ~18 orch/sec | ~5-8 orch/sec (est) | 40-45% |
-| Latency (2:2) | ~55ms | ~150-250ms (est) | 3-5× |
+| Throughput (2:2) | ~18 orch/sec | ~0.36 orch/sec | 2% |
+| Throughput (4:4) | ~12 orch/sec | ~0.50 orch/sec | 4% |
+| Latency (2:2) | ~55ms | ~2745ms | 50× |
+| Latency (4:4) | ~81ms | ~2005ms | 25× |
 | Success Rate | 100% | 100% | ✅ Equal |
 
 **Analysis**:
-- Remote throughput limited by network RTT (~100-200ms to Azure)
-- Stored procedures minimize roundtrips, making remote viable
-- Correctness maintained regardless of latency
+- Remote throughput severely limited by network RTT (~100-200ms to Azure)
+- High latency (2-3 seconds per orchestration) due to multiple roundtrips
+- 4:4 configuration performs better on remote (parallel hides latency)
+- Stored procedures critical for remote viability (already implemented)
+- Correctness maintained regardless of latency (100% success rate)
 
 ---
 

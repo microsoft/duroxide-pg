@@ -44,11 +44,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("DATABASE_URL must be provided via --database-url or DATABASE_URL env var");
 
     // Run stress test suite
-    run_test_suite(database_url, args.duration).await?;
+    run_test_suite(database_url.clone(), args.duration).await?;
 
-    // TODO: Implement result tracking if --track or --track-cloud is set
+    // Show results filename for reference
+    let results_file = duroxide_pg_stress::get_results_filename(&database_url);
+    eprintln!("\nResults can be tracked in: {}", results_file);
+    
     if args.track || args.track_cloud {
-        eprintln!("Note: Result tracking not yet implemented for PostgreSQL provider");
+        eprintln!("Note: Automatic result tracking not yet implemented");
+        eprintln!("Manually append results to {} for historical tracking", results_file);
     }
 
     Ok(())

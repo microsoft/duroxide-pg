@@ -69,16 +69,48 @@ impl ProviderStressFactory for PostgresStressFactory {
     }
 }
 
+/// Extract hostname from PostgreSQL connection URL
+fn extract_hostname(url: &str) -> String {
+    // Parse URL to extract hostname
+    // Format: postgresql://user:pass@hostname:port/db
+    if let Some(at_pos) = url.find('@') {
+        let after_at = &url[at_pos + 1..];
+        if let Some(colon_pos) = after_at.find(':') {
+            let hostname = &after_at[..colon_pos];
+            // Get first subdomain (e.g., "localhost" or "duroxide-pg" from "duroxide-pg.postgres.database.azure.com")
+            if let Some(dot_pos) = hostname.find('.') {
+                return hostname[..dot_pos].to_string();
+            }
+            return hostname.to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
 /// Run the parallel orchestrations stress test suite for PostgreSQL
 pub async fn run_test_suite(
     database_url: String,
     duration_secs: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let hostname = extract_hostname(&database_url);
+    
     info!("=== Duroxide PostgreSQL Stress Test Suite ===");
     info!("Database: {}", mask_password(&database_url));
+    info!("Hostname: {}", hostname);
     info!("Duration: {} seconds per test", duration_secs);
 
-    let concurrency_combos = vec![(1, 1), (2, 2), (4, 4)];
+    // Skip 1:1 for remote databases (too slow with high latency)
+    let is_remote = !database_url.contains("localhost") && !database_url.contains("127.0.0.1");
+    let concurrency_combos = if is_remote {
+        vec![(2, 2), (4, 4)]
+    } else {
+        vec![(1, 1), (2, 2), (4, 4)]
+    };
+    
+    if is_remote {
+        info!("Remote database detected, skipping 1:1 configuration (too slow for high-latency networks)");
+    }
+    
     let mut results = Vec::new();
 
     let factory = PostgresStressFactory::new(database_url);
@@ -137,7 +169,15 @@ pub async fn run_test_suite(
     }
 
     info!("\n✅ All stress tests passed!");
+    
+    // Return hostname for result tracking
     Ok(())
+}
+
+/// Get the results filename based on database hostname
+pub fn get_results_filename(database_url: &str) -> String {
+    let hostname = extract_hostname(database_url);
+    format!("stress-test-results-{}.md", hostname)
 }
 
 fn mask_password(url: &str) -> String {

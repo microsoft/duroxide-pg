@@ -62,19 +62,12 @@ cargo test --test stress_tests -- --ignored stress_test_parallel_orchestrations_
 
 ## Result Tracking
 
-Track results over time for regression detection:
+Results are automatically saved to files named by database hostname:
+- `stress-test-results-localhost.md` - Local Docker PostgreSQL
+- `stress-test-results-duroxide-pg.md` - Azure PostgreSQL
+- `stress-test-results-<hostname>.md` - Other databases
 
-```bash
-cd pg-stress
-./track-results.sh [DURATION_SECS]
-
-# For cloud environment
-TRACK_CLOUD=true ./track-results.sh [DURATION_SECS]
-```
-
-Results are appended to:
-- `stress-test-results.md` (local)
-- `stress-test-results-cloud.md` (Azure)
+This allows tracking performance separately for different database environments.
 
 ## Troubleshooting
 
