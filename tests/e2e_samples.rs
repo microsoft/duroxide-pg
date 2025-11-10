@@ -51,9 +51,15 @@ async fn sample_hello_world_fs() {
     // Orchestrator: emit a trace, call Hello twice, return result using input
     let orchestration = |ctx: OrchestrationContext, input: String| async move {
         ctx.trace_info("hello_world started");
-        let res = ctx.schedule_activity("Hello", "Rust").into_activity().await?;
+        let res = ctx
+            .schedule_activity("Hello", "Rust")
+            .into_activity()
+            .await?;
         ctx.trace_info(format!("hello_world result={res} "));
-        let res1 = ctx.schedule_activity("Hello", input).into_activity().await?;
+        let res1 = ctx
+            .schedule_activity("Hello", input)
+            .into_activity()
+            .await?;
         ctx.trace_info(format!("hello_world result={res1} "));
         Ok(res1)
     };
@@ -62,8 +68,12 @@ async fn sample_hello_world_fs() {
         .register("HelloWorld", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-sample-hello-1", "HelloWorld", "World")
@@ -96,9 +106,10 @@ async fn sample_basic_control_flow_fs() {
 
     // Register activities that return a flag and branch outcomes
     let activity_registry = ActivityRegistry::builder()
-        .register("GetFlag", |_ctx: ActivityContext, _input: String| async move {
-            Ok("yes".to_string())
-        })
+        .register(
+            "GetFlag",
+            |_ctx: ActivityContext, _input: String| async move { Ok("yes".to_string()) },
+        )
         .register("SayYes", |_ctx: ActivityContext, _in: String| async move {
             Ok("picked_yes".to_string())
         })
@@ -109,12 +120,24 @@ async fn sample_basic_control_flow_fs() {
 
     // Orchestrator: get a flag and branch
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
-        let flag = ctx.schedule_activity("GetFlag", "").into_activity().await.unwrap();
+        let flag = ctx
+            .schedule_activity("GetFlag", "")
+            .into_activity()
+            .await
+            .unwrap();
         ctx.trace_info(format!("control_flow flag decided = {flag}"));
         if flag == "yes" {
-            Ok(ctx.schedule_activity("SayYes", "").into_activity().await.unwrap())
+            Ok(ctx
+                .schedule_activity("SayYes", "")
+                .into_activity()
+                .await
+                .unwrap())
         } else {
-            Ok(ctx.schedule_activity("SayNo", "").into_activity().await.unwrap())
+            Ok(ctx
+                .schedule_activity("SayNo", "")
+                .into_activity()
+                .await
+                .unwrap())
         }
     };
 
@@ -122,8 +145,12 @@ async fn sample_basic_control_flow_fs() {
         .register("ControlFlow", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-sample-cflow-1", "ControlFlow", "")
@@ -156,16 +183,21 @@ async fn sample_loop_fs() {
 
     // Register an activity that appends "x" to its input
     let activity_registry = ActivityRegistry::builder()
-        .register("Append", |_ctx: ActivityContext, input: String| async move {
-            Ok(format!("{input}x"))
-        })
+        .register(
+            "Append",
+            |_ctx: ActivityContext, input: String| async move { Ok(format!("{input}x")) },
+        )
         .build();
 
     // Orchestrator: loop three times, updating an accumulator
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
         let mut acc = String::from("start");
         for i in 0..3 {
-            acc = ctx.schedule_activity("Append", acc).into_activity().await.unwrap();
+            acc = ctx
+                .schedule_activity("Append", acc)
+                .into_activity()
+                .await
+                .unwrap();
             ctx.trace_info(format!("loop iteration {i} completed acc={acc}"));
         }
         Ok(acc)
@@ -175,8 +207,12 @@ async fn sample_loop_fs() {
         .register("LoopOrchestration", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-sample-loop-1", "LoopOrchestration", "")
@@ -209,28 +245,40 @@ async fn sample_error_handling_fs() {
 
     // Register a fragile activity that may fail, and a recovery activity
     let activity_registry = ActivityRegistry::builder()
-        .register("Fragile", |_ctx: ActivityContext, input: String| async move {
-            if input == "bad" {
-                Err("boom".to_string())
-            } else {
-                Ok("ok".to_string())
-            }
-        })
-        .register("Recover", |_ctx: ActivityContext, _input: String| async move {
-            Ok("recovered".to_string())
-        })
+        .register(
+            "Fragile",
+            |_ctx: ActivityContext, input: String| async move {
+                if input == "bad" {
+                    Err("boom".to_string())
+                } else {
+                    Ok("ok".to_string())
+                }
+            },
+        )
+        .register(
+            "Recover",
+            |_ctx: ActivityContext, _input: String| async move { Ok("recovered".to_string()) },
+        )
         .build();
 
     // Orchestrator: try fragile, on error call Recover
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
-        match ctx.schedule_activity("Fragile", "bad").into_activity().await {
+        match ctx
+            .schedule_activity("Fragile", "bad")
+            .into_activity()
+            .await
+        {
             Ok(v) => {
                 ctx.trace_info(format!("fragile succeeded value={v}"));
                 Ok(v)
             }
             Err(e) => {
                 ctx.trace_warn(format!("fragile failed error={e}"));
-                let rec = ctx.schedule_activity("Recover", "").into_activity().await.unwrap();
+                let rec = ctx
+                    .schedule_activity("Recover", "")
+                    .into_activity()
+                    .await
+                    .unwrap();
                 if rec != "recovered" {
                     ctx.trace_error(format!("unexpected recovery value={rec}"));
                 }
@@ -243,8 +291,12 @@ async fn sample_error_handling_fs() {
         .register("ErrorHandling", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-sample-err-1", "ErrorHandling", "")
@@ -278,12 +330,15 @@ async fn sample_timeout_with_timer_race_fs() {
 
     // Register a long-running activity that sleeps before returning
     let activity_registry = ActivityRegistry::builder()
-        .register("LongOp", |ctx: ActivityContext, _input: String| async move {
-            ctx.trace_info("LongOp started");
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            ctx.trace_info("LongOp finished");
-            Ok("done".to_string())
-        })
+        .register(
+            "LongOp",
+            |ctx: ActivityContext, _input: String| async move {
+                ctx.trace_info("LongOp started");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                ctx.trace_info("LongOp finished");
+                Ok("done".to_string())
+            },
+        )
         .build();
 
     // Orchestration: race LongOp vs 100ms timer and error if timer wins
@@ -303,8 +358,12 @@ async fn sample_timeout_with_timer_race_fs() {
         .register("TimeoutSample", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-timeout-sample", "TimeoutSample", "")
@@ -316,8 +375,12 @@ async fn sample_timeout_with_timer_race_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Failed { details } => assert_eq!(details.display_message(), "timeout"),
-        runtime::OrchestrationStatus::Completed { output } => panic!("expected timeout failure, got: {output}"),
+        runtime::OrchestrationStatus::Failed { details } => {
+            assert_eq!(details.display_message(), "timeout")
+        }
+        runtime::OrchestrationStatus::Completed { output } => {
+            panic!("expected timeout failure, got: {output}")
+        }
         _ => panic!("unexpected orchestration status"),
     }
     rt.shutdown(None).await;
@@ -359,8 +422,12 @@ async fn sample_select2_activity_vs_external_fs() {
         .register("Select2ActVsEvt", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
 
     // Start orchestration, then raise external after subscription is recorded
     let store_for_wait = store.clone();
@@ -404,13 +471,16 @@ async fn dtf_legacy_gabbar_greetings_fs() {
 
     // Register a greeting activity used by both branches
     let activity_registry = ActivityRegistry::builder()
-        .register("Greetings", |ctx: ActivityContext, input: String| async move {
-            ctx.trace_info("Greeting activity started");
-            ctx.trace_debug(format!("Original input: {input}"));
-            let output = format!("Hello, {input}!");
-            ctx.trace_info(format!("Greeting activity completed -> {output}"));
-            Ok(output)
-        })
+        .register(
+            "Greetings",
+            |ctx: ActivityContext, input: String| async move {
+                ctx.trace_info("Greeting activity started");
+                ctx.trace_debug(format!("Original input: {input}"));
+                let output = format!("Hello, {input}!");
+                ctx.trace_info(format!("Greeting activity completed -> {output}"));
+                Ok(output)
+            },
+        )
         .build();
 
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
@@ -435,8 +505,12 @@ async fn dtf_legacy_gabbar_greetings_fs() {
         .register("Greetings", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-dtf-greetings", "Greetings", "")
@@ -448,7 +522,9 @@ async fn dtf_legacy_gabbar_greetings_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "Hello, Gabbar!, Hello, Samba!"),
+        runtime::OrchestrationStatus::Completed { output } => {
+            assert_eq!(output, "Hello, Gabbar!, Hello, Samba!")
+        }
         runtime::OrchestrationStatus::Failed { details } => {
             panic!("orchestration failed: {}", details.display_message())
         }
@@ -480,8 +556,12 @@ async fn sample_system_activities_fs() {
         .register("SystemActivities", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-system-acts", "SystemActivities", "")
@@ -509,7 +589,10 @@ async fn sample_system_activities_fs() {
     assert!(now_val > 0);
     // GUID format: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" (36 chars with hyphens)
     assert_eq!(guid_str.len(), 36);
-    assert!(guid_str.chars().filter(|c| *c != '-').all(|c| c.is_ascii_hexdigit()));
+    assert!(guid_str
+        .chars()
+        .filter(|c| *c != '-')
+        .all(|c| c.is_ascii_hexdigit()));
 
     rt.shutdown(None).await;
     common::cleanup_schema(&schema_name).await;
@@ -530,8 +613,12 @@ async fn sample_status_polling_fs() {
         .register("StatusSample", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-status-sample", "StatusSample", "")
@@ -545,7 +632,9 @@ async fn sample_status_polling_fs() {
         .unwrap()
     {
         OrchestrationStatus::Completed { output } => assert_eq!(output, "done"),
-        OrchestrationStatus::Failed { details } => panic!("unexpected failure: {}", details.display_message()),
+        OrchestrationStatus::Failed { details } => {
+            panic!("unexpected failure: {}", details.display_message())
+        }
         _ => unreachable!(),
     }
     rt.shutdown(None).await;
@@ -571,7 +660,11 @@ async fn sample_sub_orchestration_basic_fs() {
         .build();
 
     let child_upper = |ctx: OrchestrationContext, input: String| async move {
-        let up = ctx.schedule_activity("Upper", input).into_activity().await.unwrap();
+        let up = ctx
+            .schedule_activity("Upper", input)
+            .into_activity()
+            .await
+            .unwrap();
         Ok(up)
     };
     let parent = |ctx: OrchestrationContext, input: String| async move {
@@ -588,8 +681,12 @@ async fn sample_sub_orchestration_basic_fs() {
         .register("Parent", parent)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-sub-basic", "Parent", "hi")
@@ -630,7 +727,11 @@ async fn sample_sub_orchestration_fanout_fs() {
         .build();
 
     let child_sum = |ctx: OrchestrationContext, input: String| async move {
-        let s = ctx.schedule_activity("Add", input).into_activity().await.unwrap();
+        let s = ctx
+            .schedule_activity("Add", input)
+            .into_activity()
+            .await
+            .unwrap();
         Ok(s)
     };
     let parent = |ctx: OrchestrationContext, _input: String| async move {
@@ -654,8 +755,12 @@ async fn sample_sub_orchestration_fanout_fs() {
         .register("ParentFan", parent)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-sub-fan", "ParentFan", "")
@@ -687,13 +792,18 @@ async fn sample_sub_orchestration_chained_fs() {
     let (store, schema_name) = common::create_postgres_store().await;
 
     let activity_registry = ActivityRegistry::builder()
-        .register("AppendX", |_ctx: ActivityContext, input: String| async move {
-            Ok(format!("{input}x"))
-        })
+        .register(
+            "AppendX",
+            |_ctx: ActivityContext, input: String| async move { Ok(format!("{input}x")) },
+        )
         .build();
 
     let leaf = |ctx: OrchestrationContext, input: String| async move {
-        Ok(ctx.schedule_activity("AppendX", input).into_activity().await.unwrap())
+        Ok(ctx
+            .schedule_activity("AppendX", input)
+            .into_activity()
+            .await
+            .unwrap())
     };
     let mid = |ctx: OrchestrationContext, input: String| async move {
         let r = ctx
@@ -718,10 +828,17 @@ async fn sample_sub_orchestration_chained_fs() {
         .register("Root", root)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
-    client.start_orchestration("inst-sub-chain", "Root", "a").await.unwrap();
+    client
+        .start_orchestration("inst-sub-chain", "Root", "a")
+        .await
+        .unwrap();
 
     match client
         .wait_for_orchestration("inst-sub-chain", std::time::Duration::from_secs(5))
@@ -750,12 +867,18 @@ async fn sample_detached_orchestration_scheduling_fs() {
     let (store, schema_name) = common::create_postgres_store().await;
 
     let activity_registry = ActivityRegistry::builder()
-        .register("Echo", |_ctx: ActivityContext, input: String| async move { Ok(input) })
+        .register("Echo", |_ctx: ActivityContext, input: String| async move {
+            Ok(input)
+        })
         .build();
 
     let chained = |ctx: OrchestrationContext, input: String| async move {
         ctx.schedule_timer(5).into_timer().await;
-        Ok(ctx.schedule_activity("Echo", input).into_activity().await.unwrap())
+        Ok(ctx
+            .schedule_activity("Echo", input)
+            .into_activity()
+            .await
+            .unwrap())
     };
     let coordinator = |ctx: OrchestrationContext, _input: String| async move {
         ctx.schedule_orchestration("Chained", "W1", "A");
@@ -768,8 +891,12 @@ async fn sample_detached_orchestration_scheduling_fs() {
         .register("Coordinator", coordinator)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("CoordinatorRoot", "Coordinator", "")
@@ -800,7 +927,10 @@ async fn sample_detached_orchestration_scheduling_fs() {
                 assert!(output == "A" || output == "B");
             }
             OrchestrationStatus::Failed { details } => {
-                panic!("scheduled orchestration failed: {}", details.display_message())
+                panic!(
+                    "scheduled orchestration failed: {}",
+                    details.display_message()
+                )
             }
             _ => unreachable!(),
         }
@@ -830,10 +960,16 @@ async fn sample_continue_as_new_fs() {
             Ok(format!("final:{n}"))
         }
     };
-    let orchestration_registry = OrchestrationRegistry::builder().register("CanSample", orch).build();
+    let orchestration_registry = OrchestrationRegistry::builder()
+        .register("CanSample", orch)
+        .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-sample-can", "CanSample", "0")
@@ -852,8 +988,13 @@ async fn sample_continue_as_new_fs() {
         _ => panic!("unexpected orchestration status"),
     }
     // Check executions exist
-    let admin = store.as_management_capability().expect("Management capability should be available");
-    let execs = admin.list_executions("inst-sample-can").await.expect("list_executions should succeed");
+    let admin = store
+        .as_management_capability()
+        .expect("Management capability should be available");
+    let execs = admin
+        .list_executions("inst-sample-can")
+        .await
+        .expect("list_executions should succeed");
     assert_eq!(execs, vec![1, 2, 3, 4]);
     rt.shutdown(None).await;
     common::cleanup_schema(&schema_name).await;
@@ -897,8 +1038,12 @@ async fn sample_typed_activity_and_orchestration_fs() {
         .register_typed::<AddReq, AddRes, _, _>("Adder", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration_typed::<AddReq>("inst-typed-add", "Adder", AddReq { a: 2, b: 3 })
@@ -924,15 +1069,22 @@ async fn sample_typed_event_fs() {
 
     let activity_registry = ActivityRegistry::builder().build();
     let orch = |ctx: OrchestrationContext, _in: ()| async move {
-        let ack: Ack = ctx.schedule_wait_typed::<Ack>("Ready").into_event_typed::<Ack>().await;
+        let ack: Ack = ctx
+            .schedule_wait_typed::<Ack>("Ready")
+            .into_event_typed::<Ack>()
+            .await;
         Ok::<_, String>(serde_json::to_string(&ack).unwrap())
     };
     let orchestration_registry = OrchestrationRegistry::builder()
         .register_typed::<(), String, _, _>("WaitAck", orch)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let store_for_wait = store.clone();
     tokio::spawn(async move {
         let sfw = store_for_wait.clone();
@@ -1000,17 +1152,28 @@ async fn sample_mixed_string_and_typed_typed_orch_fs() {
         .register_typed::<AddReq, String, _, _>("MixedTypedOrch", orch)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
     client
-        .start_orchestration_typed::<AddReq>("inst-mixed-typed", "MixedTypedOrch", AddReq { a: 1, b: 2 })
+        .start_orchestration_typed::<AddReq>(
+            "inst-mixed-typed",
+            "MixedTypedOrch",
+            AddReq { a: 1, b: 2 },
+        )
         .await
         .unwrap();
     let client = Client::new(store.clone());
 
     let s = match client
-        .wait_for_orchestration_typed::<String>("inst-mixed-typed", std::time::Duration::from_secs(5))
+        .wait_for_orchestration_typed::<String>(
+            "inst-mixed-typed",
+            std::time::Duration::from_secs(5),
+        )
         .await
         .unwrap()
     {
@@ -1058,7 +1221,9 @@ async fn sample_mixed_string_and_typed_string_orch_fs() {
         .register("MixedStringOrch", orch)
         .build();
 
-    let rt = runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orch_reg).await;
+    let rt =
+        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orch_reg)
+            .await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-mixed-string", "MixedStringOrch", "")
@@ -1255,27 +1420,40 @@ async fn sample_versioning_continue_as_new_upgrade_fs() {
                 assert_eq!(output, "upgraded:v1:state");
                 break;
             }
-            OrchestrationStatus::Failed { details } => panic!("unexpected failure: {}", details.display_message()),
-            _ if std::time::Instant::now() < deadline => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            OrchestrationStatus::Failed { details } => {
+                panic!("unexpected failure: {}", details.display_message())
+            }
+            _ if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await
+            }
             _ => panic!("timeout waiting for upgraded completion"),
         }
     }
 
     // Verify two executions exist, exec1 continued-as-new, exec2 completed with v2 output
-    let admin = store.as_management_capability().expect("Management capability should be available");
-    let execs = admin.list_executions("inst-can-upgrade").await.expect("list_executions should succeed");
+    let admin = store
+        .as_management_capability()
+        .expect("Management capability should be available");
+    let execs = admin
+        .list_executions("inst-can-upgrade")
+        .await
+        .expect("list_executions should succeed");
     assert_eq!(execs, vec![1, 2]);
-    let e1 = store.read_with_execution("inst-can-upgrade", 1).await.expect("read_with_execution should succeed");
-    assert!(
-        e1.iter()
-            .any(|e| matches!(e, duroxide::Event::OrchestrationContinuedAsNew { .. }))
-    );
+    let e1 = store
+        .read_with_execution("inst-can-upgrade", 1)
+        .await
+        .expect("read_with_execution should succeed");
+    assert!(e1
+        .iter()
+        .any(|e| matches!(e, duroxide::Event::OrchestrationContinuedAsNew { .. })));
     // Exec2 must start with the v1-marked payload, proving v1 ran first and handed off via CAN
-    let e2 = store.read_with_execution("inst-can-upgrade", 2).await.expect("read_with_execution should succeed");
-    assert!(
-        e2.iter()
-            .any(|e| matches!(e, duroxide::Event::OrchestrationStarted { input, .. } if input == "v1:state"))
-    );
+    let e2 = store
+        .read_with_execution("inst-can-upgrade", 2)
+        .await
+        .expect("read_with_execution should succeed");
+    assert!(e2.iter().any(
+        |e| matches!(e, duroxide::Event::OrchestrationStarted { input, .. } if input == "v1:state")
+    ));
 
     rt.shutdown(None).await;
     common::cleanup_schema(&schema_name).await;
@@ -1338,7 +1516,9 @@ async fn sample_cancellation_parent_cascades_to_children_fs() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Cancel the parent; the runtime will append OrchestrationCancelRequested and then OrchestrationFailed
-    let _ = client.cancel_instance("inst-sample-cancel", "user_request").await;
+    let _ = client
+        .cancel_instance("inst-sample-cancel", "user_request")
+        .await;
 
     // Wait for the parent to fail deterministically with a canceled error
     let ok = common::wait_for_history(
@@ -1364,7 +1544,9 @@ async fn sample_cancellation_parent_cascades_to_children_fs() {
     assert!(ok, "timeout waiting for parent cancel failure");
 
     // Find child instance (prefix is parent::sub::<id>) and check it was canceled too
-    let admin = store.as_management_capability().expect("Management capability should be available");
+    let admin = store
+        .as_management_capability()
+        .expect("Management capability should be available");
     let children: Vec<String> = admin
         .list_instances()
         .await
@@ -1415,19 +1597,25 @@ async fn sample_basic_error_handling_fs() {
 
     // Register an activity that can fail
     let activity_registry = ActivityRegistry::builder()
-        .register("ValidateInput", |_ctx: ActivityContext, input: String| async move {
-            if input.is_empty() {
-                Err("Input cannot be empty".to_string())
-            } else {
-                Ok(format!("Valid: {input}"))
-            }
-        })
+        .register(
+            "ValidateInput",
+            |_ctx: ActivityContext, input: String| async move {
+                if input.is_empty() {
+                    Err("Input cannot be empty".to_string())
+                } else {
+                    Ok(format!("Valid: {input}"))
+                }
+            },
+        )
         .build();
 
     // Simple orchestration that calls the activity
     let orchestration = |ctx: OrchestrationContext, input: String| async move {
         ctx.trace_info("Starting validation");
-        let result = ctx.schedule_activity("ValidateInput", input).into_activity().await?;
+        let result = ctx
+            .schedule_activity("ValidateInput", input)
+            .into_activity()
+            .await?;
         ctx.trace_info(format!("Validation result: {result}"));
         Ok(result)
     };
@@ -1436,8 +1624,12 @@ async fn sample_basic_error_handling_fs() {
         .register("BasicErrorHandling", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
 
     // Test successful case
@@ -1474,7 +1666,9 @@ async fn sample_basic_error_handling_fs() {
         runtime::OrchestrationStatus::Failed { details } => {
             assert!(details.display_message().contains("Input cannot be empty"));
         }
-        runtime::OrchestrationStatus::Completed { output } => panic!("Expected failure but got success: {output}"),
+        runtime::OrchestrationStatus::Completed { output } => {
+            panic!("Expected failure but got success: {output}")
+        }
         _ => panic!("unexpected orchestration status"),
     }
 
@@ -1494,16 +1688,20 @@ async fn sample_nested_function_error_handling_fs() {
 
     // Register activities
     let activity_registry = ActivityRegistry::builder()
-        .register("ProcessData", |_ctx: ActivityContext, input: String| async move {
-            if input.contains("error") {
-                Err("Processing failed".to_string())
-            } else {
-                Ok(format!("Processed: {input}"))
-            }
-        })
-        .register("FormatOutput", |_ctx: ActivityContext, input: String| async move {
-            Ok(format!("Final: {input}"))
-        })
+        .register(
+            "ProcessData",
+            |_ctx: ActivityContext, input: String| async move {
+                if input.contains("error") {
+                    Err("Processing failed".to_string())
+                } else {
+                    Ok(format!("Processed: {input}"))
+                }
+            },
+        )
+        .register(
+            "FormatOutput",
+            |_ctx: ActivityContext, input: String| async move { Ok(format!("Final: {input}")) },
+        )
         .build();
 
     // Nested function that can fail with `?`
@@ -1514,7 +1712,10 @@ async fn sample_nested_function_error_handling_fs() {
             .into_activity()
             .await?;
         ctx.trace_info("Starting formatting");
-        let formatted = ctx.schedule_activity("FormatOutput", processed).into_activity().await?;
+        let formatted = ctx
+            .schedule_activity("FormatOutput", processed)
+            .into_activity()
+            .await?;
         Ok(formatted)
     }
 
@@ -1530,8 +1731,12 @@ async fn sample_nested_function_error_handling_fs() {
         .register("NestedErrorHandling", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
 
     // Test successful case
@@ -1568,7 +1773,9 @@ async fn sample_nested_function_error_handling_fs() {
         runtime::OrchestrationStatus::Failed { details } => {
             assert!(details.display_message().contains("Processing failed"));
         }
-        runtime::OrchestrationStatus::Completed { output } => panic!("Expected failure but got success: {output}"),
+        runtime::OrchestrationStatus::Completed { output } => {
+            panic!("Expected failure but got success: {output}")
+        }
         _ => panic!("unexpected orchestration status"),
     }
 
@@ -1588,16 +1795,20 @@ async fn sample_error_recovery_fs() {
 
     // Register activities
     let activity_registry = ActivityRegistry::builder()
-        .register("ProcessData", |_ctx: ActivityContext, input: String| async move {
-            if input.contains("error") {
-                Err("Processing failed".to_string())
-            } else {
-                Ok(format!("Processed: {input}"))
-            }
-        })
-        .register("LogError", |_ctx: ActivityContext, error: String| async move {
-            Ok(format!("Logged: {error}"))
-        })
+        .register(
+            "ProcessData",
+            |_ctx: ActivityContext, input: String| async move {
+                if input.contains("error") {
+                    Err("Processing failed".to_string())
+                } else {
+                    Ok(format!("Processed: {input}"))
+                }
+            },
+        )
+        .register(
+            "LogError",
+            |_ctx: ActivityContext, error: String| async move { Ok(format!("Logged: {error}")) },
+        )
         .build();
 
     // Orchestration with explicit error recovery
@@ -1615,7 +1826,10 @@ async fn sample_error_recovery_fs() {
             }
             Err(e) => {
                 ctx.trace_info("Processing failed, logging error");
-                let _ = ctx.schedule_activity("LogError", e.clone()).into_activity().await;
+                let _ = ctx
+                    .schedule_activity("LogError", e.clone())
+                    .into_activity()
+                    .await;
                 Err(format!("Failed to process '{input}': {e}"))
             }
         }
@@ -1625,8 +1839,12 @@ async fn sample_error_recovery_fs() {
         .register("ErrorRecovery", orchestration)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activity_registry), orchestration_registry).await;
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+    )
+    .await;
     let client = Client::new(store.clone());
 
     // Test successful case
@@ -1665,7 +1883,9 @@ async fn sample_error_recovery_fs() {
             assert!(error_msg.contains("Failed to process 'error'"));
             assert!(error_msg.contains("Processing failed"));
         }
-        runtime::OrchestrationStatus::Completed { output } => panic!("Expected failure but got success: {output}"),
+        runtime::OrchestrationStatus::Completed { output } => {
+            panic!("Expected failure but got success: {output}")
+        }
         _ => panic!("unexpected orchestration status"),
     }
 

@@ -35,7 +35,7 @@ impl MigrationRunner {
 
         // Load migrations from filesystem
         let migrations = self.load_migrations()?;
-        
+
         tracing::debug!(
             "Loaded {} migrations for schema {}",
             migrations.len(),
@@ -47,16 +47,13 @@ impl MigrationRunner {
 
         // Get applied migrations
         let applied_versions = self.get_applied_versions().await?;
-        
-        tracing::debug!(
-            "Applied migrations: {:?}",
-            applied_versions
-        );
+
+        tracing::debug!("Applied migrations: {:?}", applied_versions);
 
         // Check if key tables exist - if not, we need to re-run migrations even if marked as applied
         // This handles the case where cleanup dropped tables but not the migration tracking table
         let tables_exist = self.check_tables_exist().await.unwrap_or(false);
-        
+
         // Apply pending migrations (or re-apply if tables don't exist)
         for migration in migrations {
             let should_apply = if !applied_versions.contains(&migration.version) {
@@ -135,11 +132,7 @@ impl MigrationRunner {
                     let version = self.parse_version(file_name)?;
                     let name = file_name.to_string();
 
-                    migrations.push(Migration {
-                        version,
-                        name,
-                        sql,
-                    });
+                    migrations.push(Migration { version, name, sql });
                 }
             }
         }
@@ -208,21 +201,21 @@ impl MigrationRunner {
     fn split_sql_statements(sql: &str) -> Vec<String> {
         let mut statements = Vec::new();
         let mut current_statement = String::new();
-        let mut chars: Vec<char> = sql.chars().collect();
+        let chars: Vec<char> = sql.chars().collect();
         let mut i = 0;
         let mut in_dollar_quote = false;
         let mut dollar_tag: Option<String> = None;
 
         while i < chars.len() {
             let ch = chars[i];
-            
+
             if !in_dollar_quote {
                 // Check for start of dollar-quoted string
                 if ch == '$' {
                     let mut tag = String::new();
                     tag.push(ch);
                     i += 1;
-                    
+
                     // Collect the tag (e.g., $$, $tag$, $function$)
                     while i < chars.len() {
                         let next_ch = chars[i];
@@ -258,12 +251,12 @@ impl MigrationRunner {
             } else {
                 // Inside dollar-quoted string
                 current_statement.push(ch);
-                
+
                 // Check for end of dollar-quoted string
                 if ch == '$' {
                     let tag = dollar_tag.as_ref().unwrap();
                     let mut matches = true;
-                    
+
                     // Check if the following characters match the closing tag
                     for (j, tag_char) in tag.chars().enumerate() {
                         if j == 0 {
@@ -274,7 +267,7 @@ impl MigrationRunner {
                             break;
                         }
                     }
-                    
+
                     if matches {
                         // Found closing tag - consume remaining tag characters
                         for _ in 0..(tag.len() - 1) {
@@ -387,4 +380,3 @@ impl MigrationRunner {
         Ok(())
     }
 }
-

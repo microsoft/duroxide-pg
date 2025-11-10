@@ -1,8 +1,8 @@
 use std::sync::{Arc, Once};
 
 use duroxide::provider_validation::{
-    atomicity, error_handling, instance_creation, instance_locking, lock_expiration, management, multi_execution,
-    queue_semantics,
+    atomicity, error_handling, instance_creation, instance_locking, lock_expiration, management,
+    multi_execution, queue_semantics,
 };
 use duroxide::provider_validations::ProviderFactory;
 use duroxide::providers::Provider;

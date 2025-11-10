@@ -15,3 +15,28 @@ Expected improvement after migration:
 - ack_orchestration_item: ~2,000ms → ~200ms (10× faster)
 - Total turn time: ~4,000ms → ~400ms (10× faster)
 
+
+=== POST-STORED-PROCEDURE MEASUREMENT (After Migration) ===
+Date: November 10, 2025
+Database: Azure PostgreSQL (remote)
+Test: cargo test --test e2e_samples sample_hello_world_fs -- --nocapture
+Log Capture: remote_e2e.log
+
+Performance Metrics (single test run):
+- fetch_orchestration_item (duration_ms): 1084, 227, 431 (avg ≈ 581ms)
+- ack_orchestration_item (duration_ms): 1193, 353, 329 (avg ≈ 625ms)
+- dequeue_worker_peek_lock (duration_ms): 696, 596 (avg ≈ 646ms)
+- ack_worker (duration_ms): 256, 339 (avg ≈ 297ms)
+- Total test time: 15.01 seconds
+
+Observed improvement vs. baseline:
+- fetch_orchestration_item: ~72% faster (2059ms → 581ms avg)
+- ack_orchestration_item: ~70% faster (2061ms → 625ms avg)
+- dequeue_worker_peek_lock / ack_worker: roughly unchanged (still dominated by network latency)
+- End-to-end test runtime: 36% faster (23.65s → 15.01s)
+
+Notes:
+- First fetch/ack in each turn still shows “cold” latency in the 1.0–1.2s range due to metadata creation and network roundtrips, but subsequent calls are sub-500ms.
+- Stored procedures removed ~8 roundtrips per turn; remaining latency is dominated by Azure network RTT.
+- Further gains likely require batching additional runtime calls or relocating the runtime closer to the database.
+

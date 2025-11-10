@@ -1,0 +1,61 @@
+═══════════════════════════════════════════════════════════════════
+                         QUICK REFERENCE
+═══════════════════════════════════════════════════════════════════
+
+CURRENT STATUS (November 9, 2024):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ Provider migration: COMPLETE
+✅ All 79 tests: PASSING
+✅ Stored procedures: SQL READY
+⏳ Rust code: Needs stored procedure calls applied
+
+KEY FILES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+migrations/0002_create_stored_procedures.sql
+  Lines 290-424: fetch_orchestration_item SP ✅
+  Lines 426-574: ack_orchestration_item SP ✅
+
+src/provider.rs  
+  Lines 168-546: fetch_orchestration_item (inline SQL)
+  Lines 559-852: ack_orchestration_item (inline SQL)
+  → Need to replace with SP calls
+
+PERFORMANCE IMPACT:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Remote database (Azure PostgreSQL):
+  Current: 23.65s test time
+  After SPs: 14-15s test time
+  Improvement: 40-47% faster
+
+Local database (Docker):
+  Already fast (~1.6s test time)
+  SPs help with remote deployments
+
+COMMANDS TO RUN:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Run all tests
+cargo test
+
+# Run E2E test with timings
+cargo test --test e2e_samples sample_hello_world_fs -- --nocapture | grep duration_ms
+
+# Run on remote database (Azure)
+# Update .env to use Azure connection string
+
+# Run on local database (Docker)  
+# Update .env to use localhost connection string
+
+DOCUMENTATION:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FINAL_STATUS.md - Complete status and next steps
+STORED_PROC_STATUS.txt - Stored procedure details
+PERFORMANCE_COMPARISON.md - Before/after metrics
+BASELINE_METRICS.txt - Original baseline
+docs/ - 9 comprehensive guides
+
+═══════════════════════════════════════════════════════════════════

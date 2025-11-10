@@ -1,0 +1,95 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                STORED PROCEDURE MIGRATION STATUS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DATE: November 9, 2024
+STATUS: SQL COMPLETE, RUST PENDING
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ MIGRATION FILE: COMPLETE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: migrations/0002_create_stored_procedures.sql
+Lines added: 292 lines
+
+Stored Procedures Created:
+1. ✅ fetch_orchestration_item (lines 290-424, 135 lines)
+   - RETURNS TABLE with out_ prefix to avoid ambiguity
+   - Combines 6-7 queries into 1 roundtrip
+   - Handles: find, lock, mark, fetch, load metadata, fallback logic
+   
+2. ✅ ack_orchestration_item (lines 426-574, 149 lines)
+   - RETURNS VOID
+   - Combines 8-9 queries into 1 roundtrip
+   - Handles: validate lock, create/update instance, append history,
+              enqueue items, cleanup
+
+TESTED: ✅ Both procedures execute successfully
+FIX APPLIED: ✅ DROP FUNCTION before CREATE to handle signature changes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⏳ RUST CODE: NOT APPLIED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: src/provider.rs
+Current: Using inline SQL (working, all tests passing)
+Target: Use stored procedure calls
+
+Method Replacements Needed:
+1. fetch_orchestration_item (lines 168-546, ~378 lines)
+   → Replace with ~60 lines of SP call code
+   
+2. ack_orchestration_item (lines 559-852, ~293 lines)
+   → Replace with ~50 lines of SP call code
+
+Total reduction: ~560 lines of SQL → ~110 lines of SP calls
+
+CHALLENGE: Large method replacements error-prone with brace matching
+SOLUTION: Apply carefully in next session or use feature flags
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📊 PERFORMANCE (Validated on Azure)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+When Rust implementations were temporarily applied:
+
+fetch_orchestration_item:
+  Before: 2,059ms (6-7 queries)
+  After:    628ms (1 stored procedure)  
+  Improvement: 69% faster, 1,431ms saved ✅ CONFIRMED
+
+ack_orchestration_item:
+  Before: 2,061ms (8-9 queries)
+  Expected: ~250ms (1 stored procedure)
+  Improvement: 87% faster, ~1,811ms saved (PROJECTED)
+
+Total Test Time:
+  Before: 23.65s
+  After fetch only: 20.84s (12% faster)
+  After both: ~14-15s estimated (40-47% faster)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 READY FOR NEXT SESSION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Option A: Direct Replacement (15-20 min)
+  - Apply both method implementations
+  - Test and validate
+  - Measure performance improvement
+
+Option B: Feature Flag Approach (30 min, safer)
+  - Add #[cfg(feature = "use-stored-procs")]
+  - Keep both implementations
+  - Test with flag on/off
+  - Easier rollback if issues
+
+Recommendation: Option A (direct replacement)
+  - SQL already validated
+  - Less code to maintain
+  - Cleaner implementation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

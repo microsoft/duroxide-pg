@@ -1,8 +1,8 @@
 use anyhow::Result;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
 use duroxide::providers::{
-    ExecutionInfo, ExecutionMetadata, InstanceInfo, ProviderAdmin, OrchestrationItem,
-    Provider, ProviderError, QueueDepths, SystemMetrics, WorkItem,
+    ExecutionInfo, ExecutionMetadata, InstanceInfo, OrchestrationItem, Provider, ProviderAdmin,
+    ProviderError, QueueDepths, SystemMetrics, WorkItem,
 };
 use duroxide::Event;
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
@@ -117,9 +117,7 @@ impl PostgresProvider {
             SqlxError::PoolClosed | SqlxError::PoolTimedOut => {
                 ProviderError::retryable(operation, format!("Connection pool error: {}", e))
             }
-            SqlxError::Io(_) => {
-                ProviderError::retryable(operation, format!("I/O error: {}", e))
-            }
+            SqlxError::Io(_) => ProviderError::retryable(operation, format!("I/O error: {}", e)),
             _ => ProviderError::permanent(operation, format!("Unexpected error: {}", e)),
         }
     }
@@ -130,12 +128,9 @@ impl PostgresProvider {
     /// Only drops the schema if it's a custom schema (not "public").
     pub async fn cleanup_schema(&self) -> Result<()> {
         // Call the stored procedure to drop all tables
-        sqlx::query(&format!(
-            "SELECT {}.cleanup_schema()",
-            self.schema_name
-        ))
-        .execute(&*self.pool)
-        .await?;
+        sqlx::query(&format!("SELECT {}.cleanup_schema()", self.schema_name))
+            .execute(&*self.pool)
+            .await?;
 
         // SAFETY: Never drop the "public" schema - it's a PostgreSQL system schema
         // Only drop custom schemas created for testing
@@ -161,391 +156,93 @@ impl Provider for PostgresProvider {
     async fn fetch_orchestration_item(&self) -> Result<Option<OrchestrationItem>, ProviderError> {
         let start = std::time::Instant::now();
 
-        // Retry loop: try to acquire instance lock up to 3 times
         const MAX_RETRIES: u32 = 3;
         const RETRY_DELAY_MS: u64 = 10;
 
         for attempt in 0..=MAX_RETRIES {
-            // Recalculate now_ms for each attempt to get accurate lock expiration checks
             let now_ms = Self::now_millis();
-            
-            let mut tx = match self.pool.begin().await {
-                Ok(tx) => tx,
-                Err(e) => {
-                    error!(
-                        target = "duroxide::providers::postgres",
-                        operation = "fetch_orchestration_item",
-                        error_type = "transaction_failed",
-                        error = %e,
-                        "Failed to start transaction"
-                    );
-                    return Ok(None);
-                }
-            };
 
-            // Step 1: Find an instance that has visible messages AND is not locked (or lock expired)
-            // Use SELECT FOR UPDATE SKIP LOCKED for atomic lock acquisition
-            let instance_id_row: Option<(String,)> = match sqlx::query_as(&format!(
-                r#"
-                SELECT q.instance_id
-                FROM {} q
-                WHERE q.visible_at <= NOW()
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM {} il
-                    WHERE il.instance_id = q.instance_id
-                      AND il.locked_until > $1
-                  )
-                ORDER BY q.visible_at, q.id
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
-                "#,
-                self.table_name("orchestrator_queue"),
-                self.table_name("instance_locks")
+            let row: Option<(
+                String,
+                String,
+                String,
+                i64,
+                serde_json::Value,
+                serde_json::Value,
+                String,
+            )> = sqlx::query_as(&format!(
+                "SELECT * FROM {}.fetch_orchestration_item($1, $2)",
+                self.schema_name
             ))
             .bind(now_ms)
-            .fetch_optional(&mut *tx)
+            .bind(self.lock_timeout_ms as i64)
+            .fetch_optional(&*self.pool)
             .await
+            .map_err(|e| Self::sqlx_to_provider_error("fetch_orchestration_item", e))?;
+
+            if let Some((
+                instance_id,
+                orchestration_name,
+                orchestration_version,
+                execution_id,
+                history_json,
+                messages_json,
+                lock_token,
+            )) = row
             {
-                Ok(row) => row,
-                Err(e) => {
-                    if attempt < MAX_RETRIES {
-                        debug!(
-                            target = "duroxide::providers::postgres",
-                            operation = "fetch_orchestration_item",
-                            error_type = "query_failed",
-                            error = %e,
-                            attempt = attempt + 1,
-                            "Failed to query for available instances, retrying"
-                        );
-                    } else {
-                        tracing::warn!(
-                            target = "duroxide::providers::postgres",
-                            operation = "fetch_orchestration_item",
-                            error_type = "query_failed",
-                            error = %e,
-                            attempt = attempt + 1,
-                            max_retries = MAX_RETRIES,
-                            "Failed to query for available instances after all retries exhausted"
-                        );
-                    }
-                    tx.rollback().await.ok();
-                    if attempt < MAX_RETRIES {
-                        sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                        continue;
-                    }
-                    return Ok(None);
-                }
-            };
+                let history: Vec<Event> = serde_json::from_value(history_json).map_err(|e| {
+                    ProviderError::permanent(
+                        "fetch_orchestration_item",
+                        &format!("Failed to deserialize history: {}", e),
+                    )
+                })?;
 
-            let instance_id = match instance_id_row {
-                Some((id,)) => id,
-                None => {
-                    // No available instances - this could be transient during retries
-                    // If we're retrying, wait a bit and try again
-                    // Otherwise, return None immediately
-                    if attempt < MAX_RETRIES {
-                        debug!(
-                            target = "duroxide::providers::postgres",
-                            operation = "fetch_orchestration_item",
-                            now_ms = now_ms,
-                            attempt = attempt + 1,
-                            "No available instances during retry, waiting and retrying"
-                        );
-                        tx.rollback().await.ok();
-                        sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                        continue;
-                    }
-                    debug!(
-                        target = "duroxide::providers::postgres",
-                        operation = "fetch_orchestration_item",
-                        now_ms = now_ms,
-                        "No available instances"
-                    );
-                    tx.rollback().await.ok();
-                    return Ok(None);
-                }
-            };
+                let messages: Vec<WorkItem> =
+                    serde_json::from_value(messages_json).map_err(|e| {
+                        ProviderError::permanent(
+                            "fetch_orchestration_item",
+                            &format!("Failed to deserialize messages: {}", e),
+                        )
+                    })?;
 
-            debug!(
-                target = "duroxide::providers::postgres",
-                operation = "fetch_orchestration_item",
-                instance_id = %instance_id,
-                attempt = attempt + 1,
-                "Selected available instance"
-            );
-
-            // Step 2: Atomically acquire instance lock
-            let lock_token = Self::generate_lock_token();
-            let locked_until = now_ms + self.lock_timeout_ms as i64;
-
-            let lock_result = match sqlx::query(&format!(
-                r#"
-                INSERT INTO {} (instance_id, lock_token, locked_until, locked_at)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT(instance_id) DO UPDATE
-                SET lock_token = $2, locked_until = $3, locked_at = $4
-                WHERE {}.locked_until <= $4
-                "#,
-                self.table_name("instance_locks"),
-                self.table_name("instance_locks")
-            ))
-            .bind(&instance_id)
-            .bind(&lock_token)
-            .bind(locked_until)
-            .bind(now_ms)
-            .execute(&mut *tx)
-            .await
-            {
-                Ok(result) => result,
-                Err(e) => {
-                    if attempt < MAX_RETRIES {
-                        debug!(
-                            target = "duroxide::providers::postgres",
-                            operation = "fetch_orchestration_item",
-                            error_type = "lock_acquisition_failed",
-                            error = %e,
-                            instance_id = %instance_id,
-                            attempt = attempt + 1,
-                            "Failed to acquire instance lock due to error, retrying"
-                        );
-                    } else {
-                        tracing::warn!(
-                            target = "duroxide::providers::postgres",
-                            operation = "fetch_orchestration_item",
-                            error_type = "lock_acquisition_failed",
-                            error = %e,
-                            instance_id = %instance_id,
-                            attempt = attempt + 1,
-                            max_retries = MAX_RETRIES,
-                            "Failed to acquire instance lock after all retries exhausted"
-                        );
-                    }
-                    tx.rollback().await.ok();
-                    if attempt < MAX_RETRIES {
-                        sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                        continue;
-                    }
-                    return Ok(None);
-                }
-            };
-
-            if lock_result.rows_affected() == 0 {
+                let duration_ms = start.elapsed().as_millis() as u64;
                 debug!(
                     target = "duroxide::providers::postgres",
                     operation = "fetch_orchestration_item",
                     instance_id = %instance_id,
-                    now_ms = now_ms,
-                    locked_until = locked_until,
-                    attempt = attempt + 1,
-                    "Failed to acquire instance lock (race condition - instance locked between selection and lock acquisition)"
+                    execution_id = execution_id,
+                    message_count = messages.len(),
+                    history_count = history.len(),
+                    duration_ms = duration_ms,
+                    attempts = attempt + 1,
+                    "Fetched orchestration item via stored procedure"
                 );
-                tx.rollback().await.ok();
-                
-                // Race condition: instance was locked between selection and lock acquisition.
-                // Retry by reselecting a new instance (not the same one, as it's locked).
-                // This gives other lock holders time to release.
-                if attempt < MAX_RETRIES {
-                    sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                    continue; // Will reselect a different instance
-                }
-                
-                // All retries exhausted, return None
-                return Ok(None);
+
+                return Ok(Some(OrchestrationItem {
+                    instance: instance_id,
+                    orchestration_name,
+                    execution_id: execution_id as u64,
+                    version: orchestration_version,
+                    history,
+                    messages,
+                    lock_token,
+                }));
             }
 
-            // Lock acquired successfully, continue with the rest of the operation
-            // Step 3: Lock ALL visible messages for this instance
-            sqlx::query(&format!(
-                r#"
-                UPDATE {}
-                SET lock_token = $1, locked_until = $2
-                WHERE instance_id = $3 AND visible_at <= NOW()
-                  AND (lock_token IS NULL OR locked_until <= $4)
-                "#,
-                self.table_name("orchestrator_queue")
-            ))
-            .bind(&lock_token)
-            .bind(locked_until)
-            .bind(&instance_id)
-            .bind(now_ms)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Self::sqlx_to_provider_error("fetch_orchestration_item", e))?;
-
-            // Step 4: Fetch all locked messages
-            let message_rows: Vec<(i64, String)> = sqlx::query_as(&format!(
-                r#"
-                SELECT id, work_item
-                FROM {}
-                WHERE lock_token = $1
-                ORDER BY id
-                "#,
-                self.table_name("orchestrator_queue")
-            ))
-            .bind(&lock_token)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| Self::sqlx_to_provider_error("fetch_orchestration_item", e))?;
-
-            if message_rows.is_empty() {
-                // No messages for instance (shouldn't happen), release lock and rollback
-                error!(
+            if attempt < MAX_RETRIES {
+                debug!(
                     target = "duroxide::providers::postgres",
                     operation = "fetch_orchestration_item",
-                    instance_id = %instance_id,
                     now_ms = now_ms,
-                    lock_token = %lock_token,
-                    locked_until = locked_until,
-                    "No messages found for locked instance"
+                    attempt = attempt + 1,
+                    "No available instances, retrying"
                 );
-                sqlx::query(&format!(
-                    "DELETE FROM {} WHERE instance_id = $1",
-                    self.table_name("instance_locks")
-                ))
-                .bind(&instance_id)
-                .execute(&mut *tx)
-                .await
-                .ok();
-                tx.rollback().await.ok();
-                return Ok(None);
+                sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
             }
-
-            // Deserialize work items
-            let messages: Vec<WorkItem> = message_rows
-                .into_iter()
-                .filter_map(|(_, work_item_json)| {
-                    serde_json::from_str::<WorkItem>(&work_item_json).ok()
-                })
-                .collect();
-
-            debug!(
-                target = "duroxide::providers::postgres",
-                operation = "fetch_orchestration_item",
-                instance_id = %instance_id,
-                message_count = messages.len(),
-                "Fetched and marked messages for locked instance"
-            );
-
-            // Step 5: Load instance metadata
-            let instance_info: Option<(String, Option<String>, i64)> = sqlx::query_as(&format!(
-                r#"
-                SELECT orchestration_name, orchestration_version, current_execution_id
-                FROM {}
-                WHERE instance_id = $1
-                "#,
-                self.table_name("instances")
-            ))
-            .bind(&instance_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| Self::sqlx_to_provider_error("fetch_orchestration_item", e))?;
-
-            let (orchestration_name, orchestration_version, current_execution_id, history) =
-                if let Some((name, version_opt, exec_id)) = instance_info {
-                    // Handle NULL version
-                    let version = version_opt.unwrap_or_else(|| {
-                        debug_assert!(
-                            false,
-                            "Instance exists with NULL version - should be set by metadata"
-                        );
-                        "unknown".to_string()
-                    });
-                    
-                    // Instance exists - get history for current execution
-                    let history_rows: Vec<String> = sqlx::query_scalar(&format!(
-                        "SELECT event_data FROM {} WHERE instance_id = $1 AND execution_id = $2 ORDER BY event_id",
-                        self.table_name("history")
-                    ))
-                    .bind(&instance_id)
-                    .bind(exec_id)
-                    .fetch_all(&mut *tx)
-                    .await
-                    .ok()
-                    .unwrap_or_default();
-
-                    let history: Vec<Event> = history_rows
-                        .into_iter()
-                        .filter_map(|event_data| serde_json::from_str::<Event>(&event_data).ok())
-                        .collect();
-
-                    (name, version, exec_id as u64, history)
-                } else {
-                    // Fallback: try to derive from history (matching SQLite provider behavior)
-                    // This handles cases where instances are created without metadata (e.g., validation tests)
-                    let history_rows: Vec<String> = sqlx::query_scalar(&format!(
-                        "SELECT event_data FROM {} WHERE instance_id = $1 ORDER BY execution_id, event_id",
-                        self.table_name("history")
-                    ))
-                    .bind(&instance_id)
-                    .fetch_all(&mut *tx)
-                    .await
-                    .ok()
-                    .unwrap_or_default();
-
-                    let history: Vec<Event> = history_rows
-                        .into_iter()
-                        .filter_map(|event_data| serde_json::from_str::<Event>(&event_data).ok())
-                        .collect();
-
-                    // Try to extract from OrchestrationStarted in history
-                    if let Some(Event::OrchestrationStarted { name, version, .. }) = history.first() {
-                        (name.clone(), version.clone(), 1u64, history)
-                    } else if let Some(start_item) = messages.iter().find(|item| {
-                        matches!(item, WorkItem::StartOrchestration { .. } | WorkItem::ContinueAsNew { .. })
-                    }) {
-                        // Extract from StartOrchestration or ContinueAsNew in work items
-                        let (orchestration, version) = match start_item {
-                            WorkItem::StartOrchestration { orchestration, version, .. }
-                            | WorkItem::ContinueAsNew { orchestration, version, .. } => {
-                                (orchestration.clone(), version.clone())
-                            }
-                            _ => unreachable!(),
-                        };
-                        let version = version.unwrap_or_else(|| "unknown".to_string());
-                        let exec_id = match start_item {
-                            WorkItem::StartOrchestration { execution_id, .. } => *execution_id,
-                            WorkItem::ContinueAsNew { .. } => 1,
-                            _ => unreachable!(),
-                        };
-                        (orchestration, version, exec_id, Vec::new())
-                    } else {
-                        // No instance info, no history, no StartOrchestration - use placeholder
-                        // This allows processing completions/timers/events without full metadata
-                        ("Unknown".to_string(), "unknown".to_string(), 1u64, history)
-                    }
-                };
-
-            tx.commit().await.ok().ok_or_else(|| ProviderError::permanent("fetch_orchestration_item", "Failed to commit transaction"))?;
-
-            let duration_ms = start.elapsed().as_millis() as u64;
-            debug!(
-                target = "duroxide::providers::postgres",
-                operation = "fetch_orchestration_item",
-                instance_id = %instance_id,
-                execution_id = current_execution_id,
-                message_count = messages.len(),
-                history_count = history.len(),
-                duration_ms = duration_ms,
-                attempts = attempt + 1,
-                "Fetched orchestration item"
-            );
-
-            return Ok(Some(OrchestrationItem {
-                instance: instance_id,
-                orchestration_name,
-                execution_id: current_execution_id,
-                version: orchestration_version,
-                history,
-                messages,
-                lock_token,
-            }));
         }
 
-        // Should never reach here, but return None if we do
         Ok(None)
     }
-
     #[instrument(skip(self), fields(lock_token = %lock_token, execution_id = execution_id), target = "duroxide::providers::postgres")]
     async fn ack_orchestration_item(
         &self,
@@ -557,300 +254,107 @@ impl Provider for PostgresProvider {
         metadata: ExecutionMetadata,
     ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
-        // ALL operations must be atomic (single transaction)
-        let mut tx = match self.pool.begin().await {
-            Ok(tx) => tx,
-            Err(e) => {
-                error!(
-                    target = "duroxide::providers::postgres",
-                    operation = "ack_orchestration_item",
-                    error_type = "transaction_failed",
-                    error = %e,
-                    "Failed to start transaction"
-                );
-                return Err(Self::sqlx_to_provider_error("ack_orchestration_item", e));
-            }
-        };
 
-        // Step 1: Validate lock token and get instance_id
-        let instance_id_row: Option<(String,)> = sqlx::query_as(&format!(
-            "SELECT instance_id FROM {} WHERE lock_token = $1 AND locked_until > $2",
-            self.table_name("instance_locks")
+        let mut history_delta_payload = Vec::with_capacity(history_delta.len());
+        for event in &history_delta {
+            if event.event_id() == 0 {
+                return Err(ProviderError::permanent(
+                    "ack_orchestration_item",
+                    "event_id must be set by runtime",
+                ));
+            }
+
+            let event_json = serde_json::to_string(event).map_err(|e| {
+                ProviderError::permanent(
+                    "ack_orchestration_item",
+                    &format!("Failed to serialize event: {}", e),
+                )
+            })?;
+
+            let event_type = format!("{:?}", event)
+                .split('{')
+                .next()
+                .unwrap_or("Unknown")
+                .trim()
+                .to_string();
+
+            history_delta_payload.push(serde_json::json!({
+                "event_id": event.event_id(),
+                "event_type": event_type,
+                "event_data": event_json,
+            }));
+        }
+
+        let history_delta_json = serde_json::Value::Array(history_delta_payload);
+
+        let worker_items_json = serde_json::to_value(&worker_items).map_err(|e| {
+            ProviderError::permanent(
+                "ack_orchestration_item",
+                &format!("Failed to serialize worker items: {}", e),
+            )
+        })?;
+
+        let orchestrator_items_json = serde_json::to_value(&orchestrator_items).map_err(|e| {
+            ProviderError::permanent(
+                "ack_orchestration_item",
+                &format!("Failed to serialize orchestrator items: {}", e),
+            )
+        })?;
+
+        let metadata_json = serde_json::json!({
+            "orchestration_name": metadata.orchestration_name,
+            "orchestration_version": metadata.orchestration_version,
+            "status": metadata.status,
+            "output": metadata.output,
+        });
+
+        match sqlx::query(&format!(
+            "SELECT {}.ack_orchestration_item($1, $2, $3, $4, $5, $6)",
+            self.schema_name
         ))
         .bind(lock_token)
-        .bind(Self::now_millis())
-        .fetch_optional(&mut *tx)
+        .bind(execution_id as i64)
+        .bind(history_delta_json)
+        .bind(worker_items_json)
+        .bind(orchestrator_items_json)
+        .bind(metadata_json)
+        .execute(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
+        {
+            Ok(_) => {}
+            Err(e) => {
+                if let SqlxError::Database(db_err) = &e {
+                    if db_err.message().contains("Invalid lock token") {
+                        return Err(ProviderError::permanent(
+                            "ack_orchestration_item",
+                            "Invalid lock token",
+                        ));
+                    }
+                } else if e.to_string().contains("Invalid lock token") {
+                    return Err(ProviderError::permanent(
+                        "ack_orchestration_item",
+                        "Invalid lock token",
+                    ));
+                }
 
-        let instance_id = match instance_id_row {
-            Some((id,)) => id,
-            None => {
-                error!(
-                    target = "duroxide::providers::postgres",
-                    operation = "ack_orchestration_item",
-                    error_type = "invalid_lock_token",
-                    lock_token = %lock_token,
-                    "Invalid lock token"
-                );
-                tx.rollback().await.ok();
-                return Err(ProviderError::permanent("ack_orchestration_item", "Invalid lock token"));
+                return Err(Self::sqlx_to_provider_error("ack_orchestration_item", e));
             }
-        };
+        }
 
+        let duration_ms = start.elapsed().as_millis() as u64;
         debug!(
             target = "duroxide::providers::postgres",
             operation = "ack_orchestration_item",
-            instance_id = %instance_id,
             execution_id = execution_id,
-            history_delta_len = history_delta.len(),
-            worker_items_len = worker_items.len(),
-            orchestrator_items_len = orchestrator_items.len(),
-            "Acking orchestration item"
+            history_count = history_delta.len(),
+            worker_items_count = worker_items.len(),
+            orchestrator_items_count = orchestrator_items.len(),
+            duration_ms = duration_ms,
+            "Acknowledged orchestration item via stored procedure"
         );
 
-        // Step 2: Create or update instance metadata from runtime-provided metadata
-        if let (Some(name), Some(version)) = (
-            &metadata.orchestration_name,
-            &metadata.orchestration_version,
-        ) {
-            // Step 2a: Ensure instance exists (creates if new, ignores if exists)
-            sqlx::query(&format!(
-                "INSERT INTO {} (instance_id, orchestration_name, orchestration_version, current_execution_id)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (instance_id) DO NOTHING",
-                self.table_name("instances")
-            ))
-            .bind(&instance_id)
-            .bind(name)
-            .bind(version)
-            .bind(execution_id as i64)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
-
-            // Step 2b: Update instance with resolved version
-            sqlx::query(&format!(
-                "UPDATE {} 
-                 SET orchestration_name = $1, orchestration_version = $2
-                 WHERE instance_id = $3",
-                self.table_name("instances")
-            ))
-            .bind(name)
-            .bind(version)
-            .bind(&instance_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
-        }
-
-        // Step 3: Idempotently create execution row
-        sqlx::query(&format!(
-            "INSERT INTO {} (instance_id, execution_id, status, started_at) VALUES ($1, $2, 'Running', NOW()) ON CONFLICT (instance_id, execution_id) DO NOTHING",
-            self.table_name("executions")
-        ))
-        .bind(&instance_id)
-        .bind(execution_id as i64)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
-
-        // Step 4: Update instance current_execution_id
-        sqlx::query(&format!(
-            "UPDATE {} SET current_execution_id = GREATEST(current_execution_id, $1) WHERE instance_id = $2",
-            self.table_name("instances")
-        ))
-        .bind(execution_id as i64)
-        .bind(&instance_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
-
-        // Step 5: Append history_delta (validate event_id > 0)
-        if !history_delta.is_empty() {
-            // Validate that runtime provided event_ids
-            for event in &history_delta {
-                if event.event_id() == 0 {
-                    tx.rollback().await.ok();
-                    return Err(ProviderError::permanent("ack_orchestration_item", "event_id must be set by runtime"));
-                }
-            }
-
-            let history_table = self.table_name("history");
-            for event in history_delta {
-                let event_json = serde_json::to_string(&event)
-                    .map_err(|e| ProviderError::permanent("ack_orchestration_item", &format!("Failed to serialize event: {}", e)))?;
-
-                // Extract event type for indexing
-                let event_type = format!("{:?}", event)
-                    .split('{')
-                    .next()
-                    .unwrap_or("Unknown")
-                    .to_string();
-
-                let insert_result = sqlx::query(&format!(
-                    "INSERT INTO {} (instance_id, execution_id, event_id, event_type, event_data) VALUES ($1, $2, $3, $4, $5)",
-                    history_table
-                ))
-                .bind(&instance_id)
-                .bind(execution_id as i64)
-                .bind(event.event_id() as i64)
-                .bind(event_type)
-                .bind(event_json)
-                .execute(&mut *tx)
-                .await;
-
-                if let Err(e) = insert_result {
-                    if let SqlxError::Database(db_err) = &e {
-                        if db_err.code().as_deref() == Some("23505") {
-                            tx.rollback().await.ok();
-                            return Err(ProviderError::permanent("ack_orchestration_item", "Duplicate event_id detected"));
-                        }
-                    }
-                    tx.rollback().await.ok();
-                    return Err(Self::sqlx_to_provider_error("ack_orchestration_item", e));
-                }
-            }
-        }
-
-        // Step 6: Update execution metadata (status, output) from ExecutionMetadata
-        if let Some(status) = &metadata.status {
-            let completed_at = if status == "Completed" || status == "Failed" {
-                Some(chrono::Utc::now())
-            } else {
-                None
-            };
-
-            sqlx::query(&format!(
-                "UPDATE {} SET status = $1, output = $2, completed_at = $3 WHERE instance_id = $4 AND execution_id = $5",
-                self.table_name("executions")
-            ))
-            .bind(status)
-            .bind(&metadata.output)
-            .bind(completed_at)
-            .bind(&instance_id)
-            .bind(execution_id as i64)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
-        }
-
-        // Step 7: Enqueue worker items
-        for item in worker_items {
-            let work_item = serde_json::to_string(&item)
-                .map_err(|e| ProviderError::permanent("ack_orchestration_item", &format!("Failed to serialize work item: {}", e)))?;
-
-            sqlx::query(&format!(
-                "INSERT INTO {} (work_item, created_at) VALUES ($1, NOW())",
-                self.table_name("worker_queue")
-            ))
-            .bind(work_item)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
-        }
-
-        // Step 8: Enqueue orchestrator items (may include TimerFired with delayed visibility)
-        // ⚠️ CRITICAL: DO NOT create instance here - even for StartOrchestration or ContinueAsNew
-        // Instance creation happens ONLY via ack_orchestration_item metadata (step 2 above)
-        for item in orchestrator_items {
-            let work_item = serde_json::to_string(&item)
-                .map_err(|e| ProviderError::permanent("ack_orchestration_item", &format!("Failed to serialize work item: {}", e)))?;
-
-            // Extract instance ID from WorkItem enum
-            let target_instance = match &item {
-                WorkItem::StartOrchestration { instance, .. }
-                | WorkItem::ActivityCompleted { instance, .. }
-                | WorkItem::ActivityFailed { instance, .. }
-                | WorkItem::TimerFired { instance, .. }
-                | WorkItem::ExternalRaised { instance, .. }
-                | WorkItem::CancelInstance { instance, .. }
-                | WorkItem::ContinueAsNew { instance, .. } => instance,
-                WorkItem::SubOrchCompleted {
-                    parent_instance, ..
-                }
-                | WorkItem::SubOrchFailed {
-                    parent_instance, ..
-                } => parent_instance,
-                WorkItem::ActivityExecute { .. } => {
-                    return Err(ProviderError::permanent(
-                        "ack_orchestration_item",
-                        "ActivityExecute should go to worker queue, not orchestrator queue"
-                    ));
-                }
-            };
-
-            // Calculate visible_at based on item type
-            let visible_at = if let WorkItem::TimerFired { fire_at_ms, .. } = &item {
-                // For TimerFired, use the fire_at_ms timestamp
-                DateTime::from_timestamp(*fire_at_ms as i64 / 1000, 0)
-                    .ok_or_else(|| ProviderError::permanent("ack_orchestration_item", "Invalid fire_at_ms timestamp"))?
-            } else {
-                // Immediate visibility
-                Utc::now()
-            };
-
-            sqlx::query(&format!(
-                "INSERT INTO {} (instance_id, work_item, visible_at, created_at) VALUES ($1, $2, $3, NOW())",
-                self.table_name("orchestrator_queue")
-            ))
-            .bind(target_instance)
-            .bind(work_item)
-            .bind(visible_at)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
-        }
-
-        // Step 9: Delete locked messages and remove instance lock
-        sqlx::query(&format!(
-            "DELETE FROM {} WHERE lock_token = $1",
-            self.table_name("orchestrator_queue")
-        ))
-        .bind(lock_token)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
-
-        // Remove instance lock (processing complete)
-        sqlx::query(&format!(
-            "DELETE FROM {} WHERE instance_id = $1 AND lock_token = $2",
-            self.table_name("instance_locks")
-        ))
-        .bind(&instance_id)
-        .bind(lock_token)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Self::sqlx_to_provider_error("ack_orchestration_item", e))?;
-
-        // Commit transaction - all operations succeed or all fail
-        match tx.commit().await {
-            Ok(_) => {
-                let duration_ms = start.elapsed().as_millis() as u64;
-                debug!(
-                    target = "duroxide::providers::postgres",
-                    operation = "ack_orchestration_item",
-                    instance_id = %instance_id,
-                    execution_id = execution_id,
-                    duration_ms = duration_ms,
-                    "Acknowledged orchestration item and released lock"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                error!(
-                    target = "duroxide::providers::postgres",
-                    operation = "ack_orchestration_item",
-                    error_type = "transaction_failed",
-                    error = %e,
-                    instance_id = %instance_id,
-                    "Failed to commit transaction"
-                );
-                Err(Self::sqlx_to_provider_error("ack_orchestration_item", e))
-            }
-        }
+        Ok(())
     }
-
     #[instrument(skip(self), fields(lock_token = %lock_token), target = "duroxide::providers::postgres")]
     async fn abandon_orchestration_item(
         &self,
@@ -867,7 +371,10 @@ impl Provider for PostgresProvider {
                     error = %e,
                     "Failed to start transaction"
                 );
-                return Err(Self::sqlx_to_provider_error("abandon_orchestration_item", e));
+                return Err(Self::sqlx_to_provider_error(
+                    "abandon_orchestration_item",
+                    e,
+                ));
             }
         };
 
@@ -885,7 +392,10 @@ impl Provider for PostgresProvider {
             Some((id,)) => id,
             None => {
                 tx.rollback().await.ok();
-                return Err(ProviderError::permanent("abandon_orchestration_item", "Invalid lock token"));
+                return Err(ProviderError::permanent(
+                    "abandon_orchestration_item",
+                    "Invalid lock token",
+                ));
             }
         };
 
@@ -986,7 +496,10 @@ impl Provider for PostgresProvider {
                     execution_id = execution_id,
                     "event_id must be set by runtime"
                 );
-                return Err(ProviderError::permanent("append_with_execution", "event_id must be set by runtime"));
+                return Err(ProviderError::permanent(
+                    "append_with_execution",
+                    "event_id must be set by runtime",
+                ));
             }
         }
 
@@ -1001,8 +514,12 @@ impl Provider for PostgresProvider {
             .map_err(|e| Self::sqlx_to_provider_error("append_with_execution", e))?;
 
         for event in new_events {
-            let event_json = serde_json::to_string(&event)
-                .map_err(|e| ProviderError::permanent("append_with_execution", &format!("Failed to serialize event: {}", e)))?;
+            let event_json = serde_json::to_string(&event).map_err(|e| {
+                ProviderError::permanent(
+                    "append_with_execution",
+                    &format!("Failed to serialize event: {}", e),
+                )
+            })?;
 
             // Extract event type for indexing (discriminant name)
             let event_type = format!("{:?}", event)
@@ -1043,8 +560,12 @@ impl Provider for PostgresProvider {
 
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
     async fn enqueue_for_worker(&self, item: WorkItem) -> Result<(), ProviderError> {
-        let work_item = serde_json::to_string(&item)
-            .map_err(|e| ProviderError::permanent("enqueue_worker_work", &format!("Failed to serialize work item: {}", e)))?;
+        let work_item = serde_json::to_string(&item).map_err(|e| {
+            ProviderError::permanent(
+                "enqueue_worker_work",
+                &format!("Failed to serialize work item: {}", e),
+            )
+        })?;
 
         sqlx::query(&format!(
             "SELECT {}.enqueue_worker_work($1)",
@@ -1146,7 +667,7 @@ impl Provider for PostgresProvider {
     #[instrument(skip(self), fields(token = %token), target = "duroxide::providers::postgres")]
     async fn ack_work_item(&self, token: &str, completion: WorkItem) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
-        
+
         // Extract instance ID from completion WorkItem
         let instance_id = match &completion {
             WorkItem::ActivityCompleted { instance, .. }
@@ -1158,12 +679,19 @@ impl Provider for PostgresProvider {
                     error_type = "invalid_completion_type",
                     "Invalid completion work item type"
                 );
-                return Err(ProviderError::permanent("ack_worker", "Invalid completion work item type"));
+                return Err(ProviderError::permanent(
+                    "ack_worker",
+                    "Invalid completion work item type",
+                ));
             }
         };
 
-        let completion_json = serde_json::to_string(&completion)
-            .map_err(|e| ProviderError::permanent("ack_worker", &format!("Failed to serialize completion: {}", e)))?;
+        let completion_json = serde_json::to_string(&completion).map_err(|e| {
+            ProviderError::permanent(
+                "ack_worker",
+                &format!("Failed to serialize completion: {}", e),
+            )
+        })?;
 
         // Call stored procedure to atomically delete worker item and enqueue completion
         sqlx::query(&format!(
@@ -1184,7 +712,10 @@ impl Provider for PostgresProvider {
                     token = %token,
                     "Worker queue item not found or already processed"
                 );
-                ProviderError::permanent("ack_worker", "Worker queue item not found or already processed")
+                ProviderError::permanent(
+                    "ack_worker",
+                    "Worker queue item not found or already processed",
+                )
             } else {
                 Self::sqlx_to_provider_error("ack_worker", e)
             }
@@ -1208,8 +739,12 @@ impl Provider for PostgresProvider {
         item: WorkItem,
         delay_ms: Option<u64>,
     ) -> Result<(), ProviderError> {
-        let work_item = serde_json::to_string(&item)
-            .map_err(|e| ProviderError::permanent("enqueue_orchestrator_work", &format!("Failed to serialize work item: {}", e)))?;
+        let work_item = serde_json::to_string(&item).map_err(|e| {
+            ProviderError::permanent(
+                "enqueue_orchestrator_work",
+                &format!("Failed to serialize work item: {}", e),
+            )
+        })?;
 
         // Extract instance ID from WorkItem enum
         let instance_id = match &item {
@@ -1229,7 +764,7 @@ impl Provider for PostgresProvider {
             WorkItem::ActivityExecute { .. } => {
                 return Err(ProviderError::permanent(
                     "enqueue_orchestrator_work",
-                    "ActivityExecute should go to worker queue, not orchestrator queue"
+                    "ActivityExecute should go to worker queue, not orchestrator queue",
                 ));
             }
         };
@@ -1257,7 +792,12 @@ impl Provider for PostgresProvider {
         let visible_at = Utc
             .timestamp_millis_opt(visible_at_ms as i64)
             .single()
-            .ok_or_else(|| ProviderError::permanent("enqueue_orchestrator_work", "Invalid visible_at timestamp"))?;
+            .ok_or_else(|| {
+                ProviderError::permanent(
+                    "enqueue_orchestrator_work",
+                    "Invalid visible_at timestamp",
+                )
+            })?;
 
         // ⚠️ CRITICAL: DO NOT extract orchestration metadata - instance creation happens via ack_orchestration_item metadata
         // Pass NULL for orchestration_name, orchestration_version, execution_id parameters
@@ -1270,9 +810,9 @@ impl Provider for PostgresProvider {
         .bind(instance_id)
         .bind(&work_item)
         .bind(visible_at)
-        .bind::<Option<String>>(None)  // orchestration_name - NULL
-        .bind::<Option<String>>(None)  // orchestration_version - NULL
-        .bind::<Option<i64>>(None)     // execution_id - NULL
+        .bind::<Option<String>>(None) // orchestration_name - NULL
+        .bind::<Option<String>>(None) // orchestration_version - NULL
+        .bind::<Option<i64>>(None) // execution_id - NULL
         .execute(&*self.pool)
         .await
         .map_err(|e| {
@@ -1299,7 +839,11 @@ impl Provider for PostgresProvider {
     }
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
-    async fn read_with_execution(&self, instance: &str, execution_id: u64) -> Result<Vec<Event>, ProviderError> {
+    async fn read_with_execution(
+        &self,
+        instance: &str,
+        execution_id: u64,
+    ) -> Result<Vec<Event>, ProviderError> {
         let event_data_rows: Vec<String> = sqlx::query_scalar(&format!(
             "SELECT event_data FROM {} WHERE instance_id = $1 AND execution_id = $2 ORDER BY event_id",
             self.table_name("history")
@@ -1389,7 +933,8 @@ impl ProviderAdmin for PostgresProvider {
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
     async fn read_history(&self, instance: &str) -> Result<Vec<Event>, ProviderError> {
         let execution_id = self.latest_execution_id(instance).await?;
-        self.read_history_with_execution_id(instance, execution_id).await
+        self.read_history_with_execution_id(instance, execution_id)
+            .await
     }
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
@@ -1435,7 +980,8 @@ impl ProviderAdmin for PostgresProvider {
             updated_at,
             status,
             output,
-        ) = row.ok_or_else(|| ProviderError::permanent("get_instance_info", "Instance not found"))?;
+        ) =
+            row.ok_or_else(|| ProviderError::permanent("get_instance_info", "Instance not found"))?;
 
         Ok(InstanceInfo {
             instance_id,
@@ -1474,8 +1020,8 @@ impl ProviderAdmin for PostgresProvider {
         .await
         .map_err(|e| Self::sqlx_to_provider_error("get_execution_info", e))?;
 
-        let (exec_id, status, output, started_at, completed_at, event_count) =
-            row.ok_or_else(|| ProviderError::permanent("get_execution_info", "Execution not found"))?;
+        let (exec_id, status, output, started_at, completed_at, event_count) = row
+            .ok_or_else(|| ProviderError::permanent("get_execution_info", "Execution not found"))?;
 
         Ok(ExecutionInfo {
             execution_id: exec_id as u64,
@@ -1489,14 +1035,7 @@ impl ProviderAdmin for PostgresProvider {
 
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
     async fn get_system_metrics(&self) -> Result<SystemMetrics, ProviderError> {
-        let row: Option<(
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-        )> = sqlx::query_as(&format!(
+        let row: Option<(i64, i64, i64, i64, i64, i64)> = sqlx::query_as(&format!(
             "SELECT * FROM {}.get_system_metrics()",
             self.schema_name
         ))
@@ -1511,7 +1050,9 @@ impl ProviderAdmin for PostgresProvider {
             completed_instances,
             failed_instances,
             total_events,
-        ) = row.ok_or_else(|| ProviderError::permanent("get_system_metrics", "Failed to get system metrics"))?;
+        ) = row.ok_or_else(|| {
+            ProviderError::permanent("get_system_metrics", "Failed to get system metrics")
+        })?;
 
         Ok(SystemMetrics {
             total_instances: total_instances as u64,
@@ -1536,8 +1077,9 @@ impl ProviderAdmin for PostgresProvider {
         .await
         .map_err(|e| Self::sqlx_to_provider_error("get_queue_depths", e))?;
 
-        let (orchestrator_queue, worker_queue) =
-            row.ok_or_else(|| ProviderError::permanent("get_queue_depths", "Failed to get queue depths"))?;
+        let (orchestrator_queue, worker_queue) = row.ok_or_else(|| {
+            ProviderError::permanent("get_queue_depths", "Failed to get queue depths")
+        })?;
 
         Ok(QueueDepths {
             orchestrator_queue: orchestrator_queue as usize,

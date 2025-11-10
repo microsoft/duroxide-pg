@@ -167,7 +167,10 @@ async fn test_read_empty_instance() {
         .expect("Failed to create provider");
 
     // Reading non-existent instance should return empty vector
-    let events = provider.read("non_existent_instance").await.expect("read should succeed");
+    let events = provider
+        .read("non_existent_instance")
+        .await
+        .expect("read should succeed");
     assert_eq!(
         events.len(),
         0,
@@ -187,7 +190,13 @@ async fn test_enqueue_for_orchestrator() {
         .await
         .expect("Failed to create provider");
 
-    let instance_id = format!("test_instance_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+    let instance_id = format!(
+        "test_instance_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
     let execution_id = 1u64;
 
     // Enqueue a StartOrchestration work item
@@ -222,8 +231,8 @@ async fn test_enqueue_for_orchestrator() {
         .ack_orchestration_item(
             &item.lock_token,
             execution_id,
-                vec![Event::OrchestrationStarted {
-                    event_id: INITIAL_EVENT_ID,
+            vec![Event::OrchestrationStarted {
+                event_id: INITIAL_EVENT_ID,
                 name: "TestOrchestration".to_string(),
                 version: "1.0.0".to_string(),
                 input: "test_input".to_string(),
@@ -242,7 +251,9 @@ async fn test_enqueue_for_orchestrator() {
         .expect("Failed to ack orchestration item");
 
     // Verify instance was created
-    let mgmt = provider.as_management_capability().expect("Management capability should be available");
+    let mgmt = provider
+        .as_management_capability()
+        .expect("Management capability should be available");
     let execution_id_opt = mgmt.latest_execution_id(&instance_id).await.ok();
     assert_eq!(
         execution_id_opt,
@@ -251,9 +262,19 @@ async fn test_enqueue_for_orchestrator() {
     );
 
     // Read history (should contain the OrchestrationStarted event we just acked)
-    let events = provider.read(&instance_id).await.expect("read should succeed");
-    assert_eq!(events.len(), 1, "History should contain OrchestrationStarted event");
-    assert!(matches!(events[0], Event::OrchestrationStarted { .. }), "First event should be OrchestrationStarted");
+    let events = provider
+        .read(&instance_id)
+        .await
+        .expect("read should succeed");
+    assert_eq!(
+        events.len(),
+        1,
+        "History should contain OrchestrationStarted event"
+    );
+    assert!(
+        matches!(events[0], Event::OrchestrationStarted { .. }),
+        "First event should be OrchestrationStarted"
+    );
 
     provider.cleanup_schema().await.expect("Failed to cleanup");
 }
@@ -329,7 +350,10 @@ async fn test_fetch_orchestration_item_empty_queue() {
         .expect("Failed to create provider");
 
     // Fetch from empty queue should return None
-    let item = provider.fetch_orchestration_item().await.expect("fetch should succeed");
+    let item = provider
+        .fetch_orchestration_item()
+        .await
+        .expect("fetch should succeed");
     assert!(item.is_none(), "Empty queue should return None");
 
     provider.cleanup_schema().await.expect("Failed to cleanup");
@@ -434,7 +458,7 @@ async fn test_list_instances_and_executions() {
             .await
             .expect("fetch_orchestration_item should succeed")
             .expect("Should fetch enqueued work item");
-        
+
         provider
             .ack_orchestration_item(
                 &item.lock_token,

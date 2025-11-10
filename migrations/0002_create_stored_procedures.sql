@@ -496,7 +496,7 @@ BEGIN
                     p_execution_id,
                     (elem->>''event_id'')::BIGINT,
                     elem->>''event_type'',
-                    elem::TEXT
+                    elem->>''event_data''
                 FROM JSONB_ARRAY_ELEMENTS(p_history_delta) AS elem;
             END IF;
 

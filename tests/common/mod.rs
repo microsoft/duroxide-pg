@@ -1,10 +1,9 @@
-use duroxide::Event;
 use duroxide::providers::{ExecutionMetadata, Provider, ProviderAdmin, WorkItem};
+use duroxide::Event;
 use duroxide_pg::PostgresProvider;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc as StdArc;
 use std::time::{Duration, Instant};
-
 
 fn get_database_url() -> String {
     dotenvy::dotenv().ok();
@@ -18,7 +17,12 @@ fn next_schema_name() -> String {
 }
 
 #[allow(dead_code)]
-pub async fn wait_for_history<F>(store: StdArc<dyn Provider>, instance: &str, predicate: F, timeout_ms: u64) -> bool
+pub async fn wait_for_history<F>(
+    store: StdArc<dyn Provider>,
+    instance: &str,
+    predicate: F,
+    timeout_ms: u64,
+) -> bool
 where
     F: Fn(&Vec<Event>) -> bool,
 {
@@ -33,7 +37,12 @@ where
 }
 
 #[allow(dead_code)]
-pub async fn wait_for_subscription(store: StdArc<dyn Provider>, instance: &str, name: &str, timeout_ms: u64) -> bool {
+pub async fn wait_for_subscription(
+    store: StdArc<dyn Provider>,
+    instance: &str,
+    name: &str,
+    timeout_ms: u64,
+) -> bool {
     wait_for_history(
         store,
         instance,
@@ -73,7 +82,7 @@ where
 pub async fn create_postgres_store() -> (StdArc<dyn Provider>, String) {
     let database_url = get_database_url();
     let schema_name = next_schema_name();
-    
+
     let provider = PostgresProvider::new_with_schema_and_timeout(
         &database_url,
         Some(&schema_name),
@@ -81,7 +90,7 @@ pub async fn create_postgres_store() -> (StdArc<dyn Provider>, String) {
     )
     .await
     .expect("Failed to create Postgres provider for e2e tests");
-    
+
     (StdArc::new(provider) as StdArc<dyn Provider>, schema_name)
 }
 
@@ -93,7 +102,7 @@ pub async fn cleanup_schema(schema_name: &str) {
         .connect(&database_url)
         .await
         .expect("Failed to connect to database for schema cleanup");
-    
+
     sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
         .execute(&pool)
         .await
@@ -120,9 +129,12 @@ pub async fn test_create_execution(
 ) -> Result<u64, String> {
     // Calculate next execution ID (max + 1, or INITIAL if none exist)
     // Use ProviderAdmin trait to list executions
-    let admin = provider.as_management_capability()
+    let admin = provider
+        .as_management_capability()
         .ok_or_else(|| "Provider doesn't support management operations".to_string())?;
-    let execs = admin.list_executions(instance).await
+    let execs = admin
+        .list_executions(instance)
+        .await
         .map_err(|e| e.message.clone())?;
     let next_execution_id = if execs.is_empty() {
         duroxide::INITIAL_EXECUTION_ID
@@ -183,4 +195,3 @@ pub async fn test_create_execution(
 
     Ok(execution_id)
 }
-
