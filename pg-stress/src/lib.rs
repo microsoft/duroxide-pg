@@ -87,6 +87,145 @@ fn extract_hostname(url: &str) -> String {
     "unknown".to_string()
 }
 
+/// Run a single stress test with custom configuration
+pub async fn run_single_test(
+    database_url: String,
+    duration_secs: u64,
+    orch_conc: usize,
+    worker_conc: usize,
+    idle_sleep_ms: u64,
+) -> Result<StressTestResult, Box<dyn std::error::Error>> {
+    let factory = PostgresStressFactory::new(database_url);
+    
+    let config = StressTestConfig {
+        max_concurrent: 20,
+        duration_secs,
+        tasks_per_instance: 5,
+        activity_delay_ms: 10,
+        orch_concurrency: orch_conc,
+        worker_concurrency: worker_conc,
+    };
+    
+    // We need to create our own runtime with custom options
+    // since the stress test framework hardcodes dispatcher_idle_sleep_ms
+    let provider = factory.create_provider().await;
+    
+    use duroxide::runtime::registry::ActivityRegistry;
+    use duroxide::runtime::RuntimeOptions;
+    use duroxide::OrchestrationRegistry;
+    use duroxide::{ActivityContext, OrchestrationContext};
+    
+    let activity_registry = ActivityRegistry::builder()
+        .register("StressTask", |_ctx: ActivityContext, input: String| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            Ok(format!("done: {}", input))
+        })
+        .build();
+    
+    let orchestration = |ctx: OrchestrationContext, input: String| async move {
+        let task_count: usize = serde_json::from_str::<serde_json::Value>(&input)
+            .ok()
+            .and_then(|v| v.get("task_count").and_then(|tc| tc.as_u64()).map(|n| n as usize))
+            .unwrap_or(5);
+        
+        let mut handles = Vec::new();
+        for i in 0..task_count {
+            handles.push(ctx.schedule_activity("StressTask", format!("task-{}", i)));
+        }
+        for handle in handles {
+            handle.into_activity().await?;
+        }
+        Ok("done".to_string())
+    };
+    
+    let orchestration_registry = OrchestrationRegistry::builder()
+        .register("FanoutWorkflow", orchestration)
+        .build();
+    
+    // Use custom runtime options with specified idle sleep
+    let options = RuntimeOptions {
+        dispatcher_idle_sleep_ms: idle_sleep_ms,
+        orchestration_concurrency: orch_conc,
+        worker_concurrency: worker_conc,
+        ..Default::default()
+    };
+    
+    let rt = duroxide::runtime::Runtime::start_with_options(
+        provider.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+        options,
+    ).await;
+    
+    // Run the test
+    let client = Arc::new(duroxide::Client::new(provider.clone()));
+    let launched = Arc::new(tokio::sync::Mutex::new(0_usize));
+    let completed = Arc::new(tokio::sync::Mutex::new(0_usize));
+    let start_time = std::time::Instant::now();
+    let end_time = start_time + std::time::Duration::from_secs(duration_secs);
+    
+    let mut instance_id = 0_usize;
+    
+    loop {
+        if std::time::Instant::now() >= end_time {
+            break;
+        }
+        
+        let current_launched = *launched.lock().await;
+        if current_launched >= config.max_concurrent {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            continue;
+        }
+        
+        instance_id += 1;
+        let instance = format!("bench-{}", instance_id);
+        *launched.lock().await += 1;
+        
+        let client_clone = Arc::clone(&client);
+        let completed_clone = Arc::clone(&completed);
+        
+        tokio::spawn(async move {
+            let input = serde_json::json!({"task_count": 5}).to_string();
+            if client_clone.start_orchestration(&instance, "FanoutWorkflow", input).await.is_ok() {
+                if let Ok(duroxide::OrchestrationStatus::Completed { .. }) = client_clone
+                    .wait_for_orchestration(&instance, std::time::Duration::from_secs(60))
+                    .await
+                {
+                    *completed_clone.lock().await += 1;
+                }
+            }
+        });
+        
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    
+    // Wait for stragglers
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    
+    let total_launched = *launched.lock().await;
+    let total_completed = *completed.lock().await;
+    let total_time = start_time.elapsed();
+    
+    rt.shutdown(None).await;
+    
+    Ok(StressTestResult {
+        launched: total_launched,
+        completed: total_completed,
+        failed: total_launched - total_completed,
+        failed_infrastructure: 0,
+        failed_configuration: 0,
+        failed_application: 0,
+        total_time,
+        orch_throughput: total_completed as f64 / total_time.as_secs_f64(),
+        activity_throughput: (total_completed * config.tasks_per_instance) as f64 / total_time.as_secs_f64(),
+        avg_latency_ms: if total_completed > 0 {
+            total_time.as_millis() as f64 / total_completed as f64
+        } else {
+            0.0
+        },
+    })
+}
+
 /// Run the parallel orchestrations stress test suite for PostgreSQL
 pub async fn run_test_suite(
     database_url: String,
@@ -99,17 +238,8 @@ pub async fn run_test_suite(
     info!("Hostname: {}", hostname);
     info!("Duration: {} seconds per test", duration_secs);
 
-    // Skip 1:1 for remote databases (too slow with high latency)
-    let is_remote = !database_url.contains("localhost") && !database_url.contains("127.0.0.1");
-    let concurrency_combos = if is_remote {
-        vec![(2, 2), (4, 4)]
-    } else {
-        vec![(1, 1), (2, 2), (4, 4)]
-    };
-    
-    if is_remote {
-        info!("Remote database detected, skipping 1:1 configuration (too slow for high-latency networks)");
-    }
+    // Use 8:8 configuration as requested
+    let concurrency_combos = vec![(8, 8)];
     
     let mut results = Vec::new();
 
