@@ -547,7 +547,7 @@ impl Provider for PostgresProvider {
             Err(e) => {
                 error!(
                     target = "duroxide::providers::postgres",
-                    operation = "dequeue_worker_peek_lock",
+                    operation = "fetch_work_item",
                     error_type = "stored_proc_error",
                     error = %e,
                     "Failed to fetch worker item via stored procedure"
@@ -566,7 +566,7 @@ impl Provider for PostgresProvider {
             Err(e) => {
                 error!(
                     target = "duroxide::providers::postgres",
-                    operation = "dequeue_worker_peek_lock",
+                    operation = "fetch_work_item",
                     error_type = "deserialization_failed",
                     error = %e,
                     "Failed to deserialize worker item"
@@ -576,11 +576,27 @@ impl Provider for PostgresProvider {
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
+        
+        // Extract instance for logging - different work item types have different structures
+        let instance_id = match &work_item {
+            WorkItem::ActivityExecute { instance, .. } => instance.as_str(),
+            WorkItem::ActivityCompleted { instance, .. } => instance.as_str(),
+            WorkItem::ActivityFailed { instance, .. } => instance.as_str(),
+            WorkItem::StartOrchestration { instance, .. } => instance.as_str(),
+            WorkItem::TimerFired { instance, .. } => instance.as_str(),
+            WorkItem::ExternalRaised { instance, .. } => instance.as_str(),
+            WorkItem::CancelInstance { instance, .. } => instance.as_str(),
+            WorkItem::ContinueAsNew { instance, .. } => instance.as_str(),
+            WorkItem::SubOrchCompleted { parent_instance, .. } => parent_instance.as_str(),
+            WorkItem::SubOrchFailed { parent_instance, .. } => parent_instance.as_str(),
+        };
+        
         debug!(
             target = "duroxide::providers::postgres",
-            operation = "dequeue_worker_peek_lock",
+            operation = "fetch_work_item",
+            instance_id = %instance_id,
             duration_ms = duration_ms,
-            "Dequeued worker work item"
+            "Fetched activity work item via stored procedure"
         );
 
         Some((work_item, lock_token))
