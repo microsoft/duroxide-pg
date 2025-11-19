@@ -227,13 +227,6 @@ impl Provider for PostgresProvider {
             }
 
             if attempt < MAX_RETRIES {
-                debug!(
-                    target = "duroxide::providers::postgres",
-                    operation = "fetch_orchestration_item",
-                    now_ms = now_ms,
-                    attempt = attempt + 1,
-                    "No available instances, retrying"
-                );
                 sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
             }
         }
