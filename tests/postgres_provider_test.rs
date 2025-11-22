@@ -113,8 +113,8 @@ impl ProviderFactory for PostgresProviderFactory {
         self.create_postgres_provider().await as Arc<dyn Provider>
     }
 
-    fn lock_timeout_ms(&self) -> u64 {
-        self.lock_timeout_ms
+    fn lock_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.lock_timeout_ms)
     }
 }
 

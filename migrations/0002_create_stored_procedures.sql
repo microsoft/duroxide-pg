@@ -265,25 +265,23 @@ BEGIN
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.renew_work_item_lock(
             p_lock_token TEXT,
+            p_now_ms BIGINT,
             p_extend_secs BIGINT
         )
         RETURNS VOID AS $renew_lock$
         DECLARE
-            v_now_ms BIGINT;
             v_locked_until BIGINT;
             v_rows_affected INTEGER;
         BEGIN
-            -- Get current timestamp in milliseconds
-            v_now_ms := EXTRACT(EPOCH FROM NOW())::BIGINT * 1000;
-            
             -- Calculate new locked_until timestamp
-            v_locked_until := v_now_ms + (p_extend_secs * 1000);
+            v_locked_until := p_now_ms + (p_extend_secs * 1000);
             
             -- Update lock timeout only if lock is still valid
+            -- Use p_now_ms (from application) for consistent time reference
             UPDATE %I.worker_queue
             SET locked_until = v_locked_until
             WHERE lock_token = p_lock_token
-              AND locked_until > v_now_ms;
+              AND locked_until > p_now_ms;
             
             GET DIAGNOSTICS v_rows_affected = ROW_COUNT;
             

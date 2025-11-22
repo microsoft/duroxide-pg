@@ -8,7 +8,8 @@ use duroxide::Event;
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::time::{sleep, Duration};
+use std::time::Duration;
+use tokio::time::sleep;
 use tracing::{debug, error, instrument};
 
 use crate::migrations::MigrationRunner;
@@ -146,15 +147,15 @@ impl Provider for PostgresProvider {
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
     async fn fetch_orchestration_item(
         &self,
-        lock_timeout_secs: u64,
+        lock_timeout: Duration,
     ) -> Result<Option<OrchestrationItem>, ProviderError> {
         let start = std::time::Instant::now();
 
         const MAX_RETRIES: u32 = 3;
         const RETRY_DELAY_MS: u64 = 10;
 
-        // Convert seconds to milliseconds
-        let lock_timeout_ms = lock_timeout_secs * 1000;
+        // Convert Duration to milliseconds
+        let lock_timeout_ms = lock_timeout.as_millis() as i64;
 
         for attempt in 0..=MAX_RETRIES {
             let now_ms = Self::now_millis();
@@ -172,7 +173,7 @@ impl Provider for PostgresProvider {
                 self.schema_name
             ))
             .bind(now_ms)
-            .bind(lock_timeout_ms as i64)
+            .bind(lock_timeout_ms)
             .fetch_optional(&*self.pool)
             .await
             .map_err(|e| Self::sqlx_to_provider_error("fetch_orchestration_item", e))?;
@@ -227,7 +228,7 @@ impl Provider for PostgresProvider {
             }
 
             if attempt < MAX_RETRIES {
-                sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                sleep(std::time::Duration::from_millis(RETRY_DELAY_MS)).await;
             }
         }
 
@@ -349,10 +350,10 @@ impl Provider for PostgresProvider {
     async fn abandon_orchestration_item(
         &self,
         lock_token: &str,
-        delay_ms: Option<u64>,
+        delay: Option<Duration>,
     ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
-        let delay_param: Option<i64> = delay_ms.map(|d| d as i64);
+        let delay_param: Option<i64> = delay.map(|d| d.as_millis() as i64);
 
         let instance_id = match sqlx::query_scalar::<_, String>(&format!(
             "SELECT {}.abandon_orchestration_item($1, $2)",
@@ -391,7 +392,7 @@ impl Provider for PostgresProvider {
             target = "duroxide::providers::postgres",
             operation = "abandon_orchestration_item",
             instance_id = %instance_id,
-            delay_ms = delay_ms,
+            delay_ms = delay.map(|d| d.as_millis() as u64),
             duration_ms = duration_ms,
             "Abandoned orchestration item via stored procedure"
         );
@@ -521,52 +522,34 @@ impl Provider for PostgresProvider {
     }
 
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
-    async fn fetch_work_item(&self, lock_timeout_secs: u64) -> Option<(WorkItem, String)> {
+    async fn fetch_work_item(&self, lock_timeout: Duration) -> Result<Option<(WorkItem, String)>, ProviderError> {
         let start = std::time::Instant::now();
         
-        // Convert seconds to milliseconds
-        let lock_timeout_ms = lock_timeout_secs * 1000;
+        // Convert Duration to milliseconds
+        let lock_timeout_ms = lock_timeout.as_millis() as i64;
         
         let row = match sqlx::query_as::<_, (String, String)>(&format!(
             "SELECT * FROM {}.fetch_work_item($1, $2)",
             self.schema_name
         ))
         .bind(Self::now_millis())
-        .bind(lock_timeout_ms as i64)
+        .bind(lock_timeout_ms)
         .fetch_optional(&*self.pool)
         .await
         {
             Ok(row) => row,
             Err(e) => {
-                error!(
-                    target = "duroxide::providers::postgres",
-                    operation = "fetch_work_item",
-                    error_type = "stored_proc_error",
-                    error = %e,
-                    "Failed to fetch worker item via stored procedure"
-                );
-                return None;
+                return Err(Self::sqlx_to_provider_error("fetch_work_item", e));
             }
         };
 
         let (work_item_json, lock_token) = match row {
             Some(row) => row,
-            None => return None,
+            None => return Ok(None),
         };
 
-        let work_item: WorkItem = match serde_json::from_str(&work_item_json) {
-            Ok(item) => item,
-            Err(e) => {
-                error!(
-                    target = "duroxide::providers::postgres",
-                    operation = "fetch_work_item",
-                    error_type = "deserialization_failed",
-                    error = %e,
-                    "Failed to deserialize worker item"
-                );
-                return None;
-            }
-        };
+        let work_item: WorkItem = serde_json::from_str(&work_item_json)
+            .map_err(|e| ProviderError::permanent("fetch_work_item", &format!("Failed to deserialize worker item: {}", e)))?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         
@@ -592,7 +575,7 @@ impl Provider for PostgresProvider {
             "Fetched activity work item via stored procedure"
         );
 
-        Some((work_item, lock_token))
+        Ok(Some((work_item, lock_token)))
     }
 
     #[instrument(skip(self), fields(token = %token), target = "duroxide::providers::postgres")]
@@ -664,16 +647,23 @@ impl Provider for PostgresProvider {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(token = %token, extend_secs = extend_secs), target = "duroxide::providers::postgres")]
-    async fn renew_work_item_lock(&self, token: &str, extend_secs: u64) -> Result<(), ProviderError> {
+    #[instrument(skip(self), fields(token = %token), target = "duroxide::providers::postgres")]
+    async fn renew_work_item_lock(&self, token: &str, extend_for: Duration) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
 
+        // Get current time from application for consistent time reference
+        let now_ms = Self::now_millis();
+        
+        // Convert Duration to seconds for the stored procedure
+        let extend_secs = extend_for.as_secs() as i64;
+
         match sqlx::query(&format!(
-            "SELECT {}.renew_work_item_lock($1, $2)",
+            "SELECT {}.renew_work_item_lock($1, $2, $3)",
             self.schema_name
         ))
         .bind(token)
-        .bind(extend_secs as i64)
+        .bind(now_ms)
+        .bind(extend_secs)
         .execute(&*self.pool)
         .await
         {
@@ -683,7 +673,7 @@ impl Provider for PostgresProvider {
                     target = "duroxide::providers::postgres",
                     operation = "renew_work_item_lock",
                     token = %token,
-                    extend_secs = extend_secs,
+                    extend_for_secs = extend_secs,
                     duration_ms = duration_ms,
                     "Work item lock renewed successfully"
                 );
@@ -713,7 +703,7 @@ impl Provider for PostgresProvider {
     async fn enqueue_for_orchestrator(
         &self,
         item: WorkItem,
-        delay_ms: Option<u64>,
+        delay: Option<Duration>,
     ) -> Result<(), ProviderError> {
         let work_item = serde_json::to_string(&item).map_err(|e| {
             ProviderError::permanent(
@@ -745,24 +735,24 @@ impl Provider for PostgresProvider {
             }
         };
 
-        // Determine visible_at: use max of fire_at_ms (for TimerFired) and delay_ms
+        // Determine visible_at: use max of fire_at_ms (for TimerFired) and delay
         let now_ms = Self::now_millis();
 
         let visible_at_ms = if let WorkItem::TimerFired { fire_at_ms, .. } = &item {
             if *fire_at_ms > 0 {
-                // Take max of fire_at_ms and delay_ms (if provided)
-                if let Some(delay_ms) = delay_ms {
-                    std::cmp::max(*fire_at_ms, now_ms as u64 + delay_ms)
+                // Take max of fire_at_ms and delay (if provided)
+                if let Some(delay) = delay {
+                    std::cmp::max(*fire_at_ms, now_ms as u64 + delay.as_millis() as u64)
                 } else {
                     *fire_at_ms
                 }
             } else {
-                // fire_at_ms is 0, use delay_ms or NOW()
-                delay_ms.map(|d| now_ms as u64 + d).unwrap_or(now_ms as u64)
+                // fire_at_ms is 0, use delay or NOW()
+                delay.map(|d| now_ms as u64 + d.as_millis() as u64).unwrap_or(now_ms as u64)
             }
         } else {
-            // Non-timer item: use delay_ms or NOW()
-            delay_ms.map(|d| now_ms as u64 + d).unwrap_or(now_ms as u64)
+            // Non-timer item: use delay or NOW()
+            delay.map(|d| now_ms as u64 + d.as_millis() as u64).unwrap_or(now_ms as u64)
         };
 
         let visible_at = Utc
@@ -807,7 +797,7 @@ impl Provider for PostgresProvider {
             target = "duroxide::providers::postgres",
             operation = "enqueue_orchestrator_work",
             instance_id = %instance_id,
-            delay_ms = delay_ms,
+            delay_ms = delay.map(|d| d.as_millis() as u64),
             "Enqueued orchestrator work"
         );
 

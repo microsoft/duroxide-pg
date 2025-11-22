@@ -7,6 +7,7 @@ use duroxide::runtime::{self};
 use duroxide::{ActivityContext, Client, OrchestrationContext, OrchestrationRegistry};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use std::sync::Once;
 use tracing_subscriber::EnvFilter;
 
@@ -348,7 +349,7 @@ async fn sample_timeout_with_timer_race_fs() {
     // Orchestration: race LongOp vs 100ms timer and error if timer wins
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
         let act = ctx.schedule_activity("LongOp", "");
-        let t = ctx.schedule_timer(100);
+        let t = ctx.schedule_timer(std::time::Duration::from_millis(100));
         let (_idx, out) = ctx.select(vec![act, t]).await;
         match out {
             duroxide::DurableOutput::Timer => Err("timeout".to_string()),
@@ -553,10 +554,11 @@ async fn sample_system_activities_fs() {
     let activity_registry = ActivityRegistry::builder().build();
 
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
-        let now = ctx.utcnow_ms().await?;
+        let now = ctx.utcnow().await?;
+        let now_ms = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
         let guid = ctx.new_guid().await?;
-        ctx.trace_info(format!("system now={now}, guid={guid}"));
-        Ok(format!("n={now},g={guid}"))
+        ctx.trace_info(format!("system now={now_ms}, guid={guid}"));
+        Ok(format!("n={now_ms},g={guid}"))
     };
 
     let orchestration_registry = OrchestrationRegistry::builder()
@@ -614,7 +616,7 @@ async fn sample_status_polling_fs() {
 
     let activity_registry = ActivityRegistry::builder().build();
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
-        ctx.schedule_timer(20).into_timer().await;
+        ctx.schedule_timer(std::time::Duration::from_millis(20)).into_timer().await;
         Ok("done".to_string())
     };
     let orchestration_registry = OrchestrationRegistry::builder()
@@ -885,7 +887,7 @@ async fn sample_detached_orchestration_scheduling_fs() {
         .build();
 
     let chained = |ctx: OrchestrationContext, input: String| async move {
-        ctx.schedule_timer(5).into_timer().await;
+        ctx.schedule_timer(std::time::Duration::from_millis(5)).into_timer().await;
         Ok(ctx
             .schedule_activity("Echo", input)
             .into_activity()
@@ -1316,8 +1318,8 @@ async fn sample_versioning_start_latest_vs_exact_fs() {
     reg.set_version_policy(
         "Versioned",
         duroxide::runtime::VersionPolicy::Exact(semver::Version::parse("1.0.0").unwrap()),
-    )
-    .await;
+    );
+    // await is not needed here, set_version_policy is not async
     client
         .start_orchestration("inst-vers-exact", "Versioned", "")
         .await
@@ -1442,14 +1444,14 @@ async fn sample_versioning_continue_as_new_upgrade_fs() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         match client.get_orchestration_status("inst-can-upgrade").await {
-            OrchestrationStatus::Completed { output } => {
+            Ok(OrchestrationStatus::Completed { output }) => {
                 assert_eq!(output, "upgraded:v1:state");
                 break;
             }
-            OrchestrationStatus::Failed { details } => {
+            Ok(OrchestrationStatus::Failed { details }) => {
                 panic!("unexpected failure: {}", details.display_message())
             }
-            _ if std::time::Instant::now() < deadline => {
+            Ok(_) if std::time::Instant::now() < deadline => {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await
             }
             _ => panic!("timeout waiting for upgraded completion"),
@@ -1521,7 +1523,7 @@ async fn sample_cancellation_parent_cascades_to_children_fs() {
 
     // Use faster polling for cancellation timing test
     let options = runtime::RuntimeOptions {
-        dispatcher_idle_sleep_ms: 10,
+        dispatcher_idle_sleep: Duration::from_millis(10),
         ..Default::default()
     };
     let rt = runtime::Runtime::start_with_options(

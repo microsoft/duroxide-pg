@@ -18,6 +18,7 @@ use duroxide::provider_stress_tests::StressTestConfig;
 use duroxide::providers::Provider;
 use duroxide_pg::PostgresProvider;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 
 // Re-export the stress test infrastructure for convenience
@@ -106,7 +107,7 @@ pub async fn run_single_test(
     };
     
     // We need to create our own runtime with custom options
-    // since the stress test framework hardcodes dispatcher_idle_sleep_ms
+    // since the stress test framework hardcodes dispatcher_idle_sleep
     let provider = factory.create_provider().await;
     
     use duroxide::runtime::registry::ActivityRegistry;
@@ -143,7 +144,7 @@ pub async fn run_single_test(
     
     // Use custom runtime options with specified idle sleep
     let options = RuntimeOptions {
-        dispatcher_idle_sleep_ms: idle_sleep_ms,
+        dispatcher_idle_sleep: Duration::from_millis(idle_sleep_ms),
         orchestration_concurrency: orch_conc,
         worker_concurrency: worker_conc,
         ..Default::default()

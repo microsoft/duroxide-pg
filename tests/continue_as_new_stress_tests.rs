@@ -276,7 +276,7 @@ async fn instance_actor_pattern_stress_test() {
                 ctx.trace_warn("No connection string available yet, skipping health check");
 
                 // Wait and retry
-                ctx.schedule_timer(30000).into_timer().await; // 30 seconds
+                ctx.schedule_timer(std::time::Duration::from_millis(30000)).into_timer().await; // 30 seconds
 
                 input_data.iteration += 1;
                 let input_json = serde_json::to_string(&input_data)
@@ -342,7 +342,7 @@ async fn instance_actor_pattern_stress_test() {
         ctx.trace_info(format!("Health check complete, status: {}", status));
 
         // Step 7: Wait before next check
-        ctx.schedule_timer(30000).into_timer().await; // 30 seconds
+        ctx.schedule_timer(std::time::Duration::from_millis(30000)).into_timer().await; // 30 seconds
 
         ctx.trace_info("Restarting instance actor with continue-as-new");
 
@@ -393,7 +393,7 @@ async fn instance_actor_pattern_stress_test() {
         let input_json = serde_json::to_string(&input).unwrap();
 
         client
-            .start_orchestration(instance_id, "InstanceActor", &input_json)
+            .start_orchestration(*instance_id, "InstanceActor", &input_json)
             .await
             .unwrap();
 
