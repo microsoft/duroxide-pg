@@ -1,37 +1,59 @@
 # Duroxide PostgreSQL Provider
 
-A PostgreSQL-based provider implementation for [Duroxide](https://github.com/affandar/duroxide), a durable task orchestration framework.
+A PostgreSQL-based provider implementation for [Duroxide](https://github.com/affandar/duroxide), a durable task orchestration framework for Rust.
 
-## Setup
+## Installation
 
-1. **Install dependencies:**
-   ```bash
-   cargo build
-   ```
+Add to your `Cargo.toml`:
 
-2. **Configure database connection:**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your PostgreSQL connection string
-   ```
+```toml
+[dependencies]
+duroxide-pg = "0.1.0"
+```
 
-3. **Environment Variables:**
-   - `DATABASE_URL`: PostgreSQL connection string (e.g., `postgres://user:password@localhost:5432/database`)
+## Usage
 
-## Implementation Status
+```rust
+use duroxide_pg::PostgresProvider;
+use duroxide::Worker;
 
-This is a work-in-progress implementation. The provider scaffold is set up with:
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Create a provider with the database URL
+    let provider = PostgresProvider::new("postgres://user:password@localhost:5432/mydb").await?;
 
-- ✅ Basic project structure
-- ✅ Duroxide dependency with `provider-test` feature enabled
-- ✅ PostgreSQL connection setup
-- ⏳ Schema initialization (TODO)
-- ⏳ Provider trait implementation (TODO)
-- ⏳ Tests (TODO)
+    // Use with a Duroxide worker
+    let worker = Worker::new(provider);
+    // ... register orchestrations and activities, then run
+    
+    Ok(())
+}
+```
 
-## References
+### Custom Schema
 
-- [Provider Implementation Guide](https://github.com/affandar/duroxide/blob/main/docs/provider-implementation-guide.md)
-- [Architecture Documentation](https://github.com/affandar/duroxide/blob/main/docs/architecture.md)
-- [Reference Implementation](https://github.com/affandar/duroxide/tree/main/src/providers/sqlite.rs)
+To isolate data in a specific PostgreSQL schema:
 
+```rust
+let provider = PostgresProvider::new_with_schema(
+    "postgres://user:password@localhost:5432/mydb",
+    Some("my_schema"),
+).await?;
+```
+
+## Configuration
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `DUROXIDE_PG_POOL_MAX` | Maximum connection pool size | `10` |
+
+## Features
+
+- Automatic schema migration on startup
+- Connection pooling via sqlx
+- Custom schema support for multi-tenant isolation
+- Full implementation of the Duroxide `Provider` and `ProviderAdmin` traits
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.

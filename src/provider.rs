@@ -14,6 +14,28 @@ use tracing::{debug, error, instrument};
 
 use crate::migrations::MigrationRunner;
 
+/// PostgreSQL-based provider for Duroxide durable orchestrations.
+///
+/// Implements the [`Provider`] and [`ProviderAdmin`] traits from Duroxide,
+/// storing orchestration state, history, and work queues in PostgreSQL.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use duroxide_pg::PostgresProvider;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// // Connect using DATABASE_URL or explicit connection string
+/// let provider = PostgresProvider::new("postgres://localhost/mydb").await?;
+///
+/// // Or use a custom schema for isolation
+/// let provider = PostgresProvider::new_with_schema(
+///     "postgres://localhost/mydb",
+///     Some("my_app"),
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct PostgresProvider {
     pool: Arc<PgPool>,
     schema_name: String,

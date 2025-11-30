@@ -2,13 +2,14 @@
 name = "duroxide-pg-stress"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 [[bin]]
 name = "pg-stress"
 path = "src/bin/pg-stress.rs"
 
 [dependencies]
-duroxide = { git = "https://github.com/affandar/duroxide", features = ["provider-test"] }
+duroxide = { version = "0.1", features = ["provider-test"] }
 duroxide-pg = { path = ".." }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
