@@ -7,19 +7,17 @@
 //!
 //! ```rust,no_run
 //! use duroxide_pg::PostgresProvider;
-//! use duroxide::Worker;
+//! use duroxide::runtime::Runtime;
+//! use std::sync::Arc;
 //!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     // Create a provider with the database URL
-//!     let provider = PostgresProvider::new("postgres://user:password@localhost:5432/mydb").await?;
+//! # async fn example() -> anyhow::Result<()> {
+//! // Create a provider with the database URL
+//! let provider = PostgresProvider::new("postgres://user:password@localhost:5432/mydb").await?;
 //!
-//!     // Use with a Duroxide worker
-//!     let worker = Worker::new(provider);
-//!     // ... register orchestrations and activities, then run
-//!
-//!     Ok(())
-//! }
+//! // Use with the Duroxide runtime
+//! // let runtime = Runtime::start_with_store(Arc::new(provider), activity_registry, orchestration_registry).await;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Custom Schema
