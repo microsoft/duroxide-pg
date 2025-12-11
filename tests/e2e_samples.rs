@@ -976,8 +976,7 @@ async fn sample_continue_as_new_fs() {
         let n: u32 = input.parse().unwrap_or(0);
         if n < 3 {
             ctx.trace_info(format!("CAN sample n={n} -> continue"));
-            ctx.continue_as_new((n + 1).to_string());
-            Ok(String::new())
+            return ctx.continue_as_new((n + 1).to_string()).await;
         } else {
             Ok(format!("final:{n}"))
         }
@@ -1423,8 +1422,7 @@ async fn sample_versioning_continue_as_new_upgrade_fs() {
     let v1 = |ctx: OrchestrationContext, input: String| async move {
         ctx.trace_info("v1: upgrading via ContinueAsNew (default policy)".to_string());
         // Roll to a fresh execution, marking the payload so we can attribute it to v1 deterministically
-        ctx.continue_as_new(format!("v1:{input}"));
-        Ok(String::new())
+        ctx.continue_as_new(format!("v1:{input}")).await
     };
     // v2: represents the upgraded logic. Here we just simulate one step and complete for the sample.
     let v2 = |ctx: OrchestrationContext, input: String| async move {

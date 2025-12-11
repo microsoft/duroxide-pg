@@ -43,8 +43,7 @@ async fn concurrent_continue_as_new_chains() {
 
         if count < 9 {
             // 10 executions: 0-8 continue, 9 completes
-            ctx.continue_as_new((count + 1).to_string());
-            Ok("continuing".to_string())
+            return ctx.continue_as_new((count + 1).to_string()).await;
         } else {
             Ok(format!("completed at {count}"))
         }
@@ -279,9 +278,7 @@ async fn instance_actor_pattern_stress_test() {
                 input_data.iteration += 1;
                 let input_json = serde_json::to_string(&input_data)
                     .map_err(|e| format!("Failed to serialize input: {e}"))?;
-                ctx.continue_as_new(input_json);
-
-                return Ok("retrying".to_string());
+                return ctx.continue_as_new(input_json).await;
             }
         };
 
@@ -351,9 +348,7 @@ async fn instance_actor_pattern_stress_test() {
         let input_json = serde_json::to_string(&input_data)
             .map_err(|e| format!("Failed to serialize input: {e}"))?;
 
-        ctx.continue_as_new(input_json);
-
-        Ok("continuing".to_string())
+        ctx.continue_as_new(input_json).await
     };
 
     let orchestrations = OrchestrationRegistry::builder()

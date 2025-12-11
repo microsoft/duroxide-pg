@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `fetch_orchestration_item` now accepts `poll_timeout: Duration` parameter (for long-polling support)
 - `fetch_work_item` now accepts `poll_timeout: Duration` parameter (for long-polling support)
 - Updated test configurations to use `dispatcher_min_poll_interval` (renamed from `dispatcher_idle_sleep`)
+- Updated tests to use new `continue_as_new()` awaitable API (`return ctx.continue_as_new(input).await`)
 
 ### Notes
 
