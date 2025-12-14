@@ -413,9 +413,7 @@ async fn instance_actor_pattern_stress_test() {
                     instance_id,
                     details.display_message()
                 );
-                eprintln!(
-                    "=== DUMPING ALL EXECUTION HISTORIES FOR {instance_id} ===\n"
-                );
+                eprintln!("=== DUMPING ALL EXECUTION HISTORIES FOR {instance_id} ===\n");
 
                 // Find how many executions exist
                 let mut exec_id = 1;

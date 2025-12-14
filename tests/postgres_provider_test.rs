@@ -133,7 +133,6 @@ macro_rules! provider_validation_test {
     };
 }
 
-
 mod atomicity_tests {
     use super::*;
 
@@ -183,6 +182,8 @@ mod lock_expiration_tests {
 
     provider_validation_test!(lock_expiration::test_lock_expires_after_timeout);
     provider_validation_test!(lock_expiration::test_abandon_releases_lock_immediately);
+    provider_validation_test!(lock_expiration::test_abandon_work_item_releases_lock);
+    provider_validation_test!(lock_expiration::test_abandon_work_item_with_delay);
     provider_validation_test!(lock_expiration::test_lock_renewal_on_ack);
     provider_validation_test!(lock_expiration::test_concurrent_lock_attempts_respect_expiration);
     provider_validation_test!(lock_expiration::test_worker_lock_renewal_success);
@@ -222,4 +223,19 @@ mod management_tests {
     provider_validation_test!(management::test_get_execution_info);
     provider_validation_test!(management::test_get_system_metrics);
     provider_validation_test!(management::test_get_queue_depths);
+}
+
+mod poison_message_tests {
+    use super::*;
+    use duroxide::provider_validation::poison_message;
+
+    provider_validation_test!(poison_message::orchestration_attempt_count_starts_at_one);
+    provider_validation_test!(poison_message::orchestration_attempt_count_increments_on_refetch);
+    provider_validation_test!(poison_message::worker_attempt_count_starts_at_one);
+    provider_validation_test!(poison_message::worker_attempt_count_increments_on_lock_expiry);
+    provider_validation_test!(poison_message::attempt_count_is_per_message);
+    provider_validation_test!(poison_message::abandon_work_item_ignore_attempt_decrements);
+    provider_validation_test!(poison_message::abandon_orchestration_item_ignore_attempt_decrements);
+    provider_validation_test!(poison_message::ignore_attempt_never_goes_negative);
+    provider_validation_test!(poison_message::max_attempt_count_across_message_batch);
 }

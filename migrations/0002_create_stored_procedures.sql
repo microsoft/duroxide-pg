@@ -294,6 +294,7 @@ BEGIN
 
     -- Procedure: fetch_work_item
     -- Fetches and locks a worker queue item in a single roundtrip
+    -- Returns attempt_count for poison message detection (duroxide 0.1.2)
     EXECUTE format('DROP FUNCTION IF EXISTS %I.fetch_work_item(BIGINT, BIGINT)', v_schema_name);
 
     EXECUTE format('
@@ -303,7 +304,8 @@ BEGIN
         )
         RETURNS TABLE(
             out_work_item TEXT,
-            out_lock_token TEXT
+            out_lock_token TEXT,
+            out_attempt_count INTEGER
         ) AS $fetch_worker$
         DECLARE
             v_id BIGINT;
@@ -321,13 +323,15 @@ BEGIN
 
             out_lock_token := ''lock_'' || gen_random_uuid()::TEXT;
 
+            -- Increment attempt_count and lock the item
             UPDATE %I.worker_queue
             SET lock_token = out_lock_token,
-                locked_until = p_now_ms + p_lock_timeout_ms
+                locked_until = p_now_ms + p_lock_timeout_ms,
+                attempt_count = attempt_count + 1
             WHERE id = v_id;
 
-            SELECT work_item
-            INTO out_work_item
+            SELECT work_item, attempt_count
+            INTO out_work_item, out_attempt_count
             FROM %I.worker_queue
             WHERE id = v_id;
 
@@ -335,6 +339,63 @@ BEGIN
         END;
         $fetch_worker$ LANGUAGE plpgsql;
     ', v_schema_name, v_schema_name, v_schema_name, v_schema_name);
+
+    -- Procedure: abandon_work_item
+    -- Releases work item lock without completing, with optional delay and attempt count handling
+    -- Added in duroxide 0.1.2 for explicit work item abandonment
+    -- Fixed in duroxide 0.1.3: when delay is provided, keep lock_token to prevent immediate refetch
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.abandon_work_item(TEXT, BIGINT, BOOLEAN)', v_schema_name);
+
+    EXECUTE format('
+        CREATE OR REPLACE FUNCTION %I.abandon_work_item(
+            p_lock_token TEXT,
+            p_delay_ms BIGINT DEFAULT NULL,
+            p_ignore_attempt BOOLEAN DEFAULT FALSE
+        )
+        RETURNS VOID AS $abandon_worker$
+        DECLARE
+            v_rows_affected INTEGER;
+            v_locked_until BIGINT;
+        BEGIN
+            IF p_delay_ms IS NOT NULL AND p_delay_ms > 0 THEN
+                -- Delay provided: keep lock_token, just update locked_until
+                -- This prevents immediate refetch while deferring the retry
+                v_locked_until := (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT + p_delay_ms;
+                
+                IF p_ignore_attempt THEN
+                    UPDATE %I.worker_queue
+                    SET locked_until = v_locked_until,
+                        attempt_count = GREATEST(0, attempt_count - 1)
+                    WHERE lock_token = p_lock_token;
+                ELSE
+                    UPDATE %I.worker_queue
+                    SET locked_until = v_locked_until
+                    WHERE lock_token = p_lock_token;
+                END IF;
+            ELSE
+                -- No delay: clear lock_token for immediate availability
+                IF p_ignore_attempt THEN
+                    UPDATE %I.worker_queue
+                    SET lock_token = NULL,
+                        locked_until = NULL,
+                        attempt_count = GREATEST(0, attempt_count - 1)
+                    WHERE lock_token = p_lock_token;
+                ELSE
+                    UPDATE %I.worker_queue
+                    SET lock_token = NULL,
+                        locked_until = NULL
+                    WHERE lock_token = p_lock_token;
+                END IF;
+            END IF;
+
+            GET DIAGNOSTICS v_rows_affected = ROW_COUNT;
+
+            IF v_rows_affected = 0 THEN
+                RAISE EXCEPTION ''Invalid lock token or already acked'';
+            END IF;
+        END;
+        $abandon_worker$ LANGUAGE plpgsql;
+    ', v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: enqueue_orchestrator_work
     -- Enqueues work to orchestrator queue
@@ -363,6 +424,7 @@ BEGIN
     -- Procedure: fetch_orchestration_item
     -- Fetches and locks an orchestration item in a single database roundtrip
     -- Uses out_ prefix for return columns to avoid ambiguity with table columns
+    -- Returns attempt_count for poison message detection (duroxide 0.1.2)
     -- Drop first since we changed return type signature
     EXECUTE format('DROP FUNCTION IF EXISTS %I.fetch_orchestration_item(BIGINT, BIGINT)', v_schema_name);
     
@@ -378,7 +440,8 @@ BEGIN
             out_execution_id BIGINT,
             out_history JSONB,
             out_messages JSONB,
-            out_lock_token TEXT
+            out_lock_token TEXT,
+            out_attempt_count INTEGER
         ) AS $fetch_orch$
         DECLARE
             v_instance_id TEXT;
@@ -390,6 +453,7 @@ BEGIN
             v_history JSONB;
             v_messages JSONB;
             v_lock_acquired INTEGER;
+            v_max_attempt_count INTEGER;
         BEGIN
             -- Two-phase locking to prevent deadlocks while preserving parallelism.
             -- 
@@ -460,17 +524,19 @@ BEGIN
                 RETURN;
             END IF;
 
-            -- Step 3: Mark all visible messages for this instance with our lock
+            -- Step 3: Mark all visible messages for this instance with our lock and increment attempt_count
             UPDATE %I.orchestrator_queue q
             SET lock_token = v_lock_token,
-                locked_until = v_locked_until
+                locked_until = v_locked_until,
+                attempt_count = q.attempt_count + 1
             WHERE q.instance_id = v_instance_id
               AND q.visible_at <= TO_TIMESTAMP(p_now_ms / 1000.0)
               AND (q.lock_token IS NULL OR q.locked_until <= p_now_ms);
 
-            -- Step 4: Fetch all locked messages as JSONB array
-            SELECT COALESCE(JSONB_AGG(q.work_item::JSONB ORDER BY q.id), ''[]''::JSONB)
-            INTO v_messages
+            -- Step 4: Fetch all locked messages as JSONB array and get max attempt_count
+            SELECT COALESCE(JSONB_AGG(q.work_item::JSONB ORDER BY q.id), ''[]''::JSONB),
+                   COALESCE(MAX(q.attempt_count), 1)
+            INTO v_messages, v_max_attempt_count
             FROM %I.orchestrator_queue q
             WHERE q.lock_token = v_lock_token;
 
@@ -524,7 +590,8 @@ BEGIN
                 v_current_execution_id,
                 v_history,
                 v_messages,
-                v_lock_token;
+                v_lock_token,
+                v_max_attempt_count;
         END;
         $fetch_orch$ LANGUAGE plpgsql;
     ', v_schema_name, v_schema_name, v_schema_name, v_schema_name, 
@@ -681,12 +748,16 @@ BEGIN
        v_schema_name, v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: abandon_orchestration_item
+    -- Updated in duroxide 0.1.2 to add ignore_attempt parameter for poison message handling
+    -- Fixed in duroxide 0.1.3: don't update visible_at when no delay (for consistent timing with fetch)
     EXECUTE format('DROP FUNCTION IF EXISTS %I.abandon_orchestration_item(TEXT, BIGINT)', v_schema_name);
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.abandon_orchestration_item(TEXT, BIGINT, BOOLEAN)', v_schema_name);
 
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.abandon_orchestration_item(
             p_lock_token TEXT,
-            p_delay_ms BIGINT DEFAULT NULL
+            p_delay_ms BIGINT DEFAULT NULL,
+            p_ignore_attempt BOOLEAN DEFAULT FALSE
         )
         RETURNS TEXT AS $abandon_orch$
         DECLARE
@@ -702,16 +773,38 @@ BEGIN
             END IF;
 
             IF p_delay_ms IS NOT NULL AND p_delay_ms > 0 THEN
+                -- Delay provided: set visible_at to future time
                 v_visible_at := NOW() + (p_delay_ms::DOUBLE PRECISION / 1000.0) * INTERVAL ''1 second'';
+                
+                IF p_ignore_attempt THEN
+                    UPDATE %I.orchestrator_queue
+                    SET lock_token = NULL,
+                        locked_until = NULL,
+                        visible_at = v_visible_at,
+                        attempt_count = GREATEST(0, attempt_count - 1)
+                    WHERE lock_token = p_lock_token;
+                ELSE
+                    UPDATE %I.orchestrator_queue
+                    SET lock_token = NULL,
+                        locked_until = NULL,
+                        visible_at = v_visible_at
+                    WHERE lock_token = p_lock_token;
+                END IF;
             ELSE
-                v_visible_at := NOW();
+                -- No delay: just clear lock, don''t update visible_at
+                IF p_ignore_attempt THEN
+                    UPDATE %I.orchestrator_queue
+                    SET lock_token = NULL,
+                        locked_until = NULL,
+                        attempt_count = GREATEST(0, attempt_count - 1)
+                    WHERE lock_token = p_lock_token;
+                ELSE
+                    UPDATE %I.orchestrator_queue
+                    SET lock_token = NULL,
+                        locked_until = NULL
+                    WHERE lock_token = p_lock_token;
+                END IF;
             END IF;
-
-            UPDATE %I.orchestrator_queue
-            SET lock_token = NULL,
-                locked_until = NULL,
-                visible_at = v_visible_at
-            WHERE lock_token = p_lock_token;
 
             DELETE FROM %I.instance_locks
             WHERE lock_token = p_lock_token;
@@ -719,7 +812,46 @@ BEGIN
             RETURN v_instance_id;
         END;
         $abandon_orch$ LANGUAGE plpgsql;
-    ', v_schema_name, v_schema_name, v_schema_name, v_schema_name);
+    ', v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name);
+
+    -- Procedure: renew_orchestration_item_lock
+    -- Extends lock timeout for in-flight orchestration turns
+    -- Added in duroxide 0.1.2 for long-running orchestration support
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.renew_orchestration_item_lock(TEXT, BIGINT, BIGINT)', v_schema_name);
+
+    EXECUTE format('
+        CREATE OR REPLACE FUNCTION %I.renew_orchestration_item_lock(
+            p_lock_token TEXT,
+            p_now_ms BIGINT,
+            p_extend_secs BIGINT
+        )
+        RETURNS VOID AS $renew_orch_lock$
+        DECLARE
+            v_locked_until BIGINT;
+            v_rows_affected INTEGER;
+        BEGIN
+            -- Calculate new locked_until timestamp
+            v_locked_until := p_now_ms + (p_extend_secs * 1000);
+            
+            -- Update instance lock timeout only if lock is still valid
+            UPDATE %I.instance_locks
+            SET locked_until = v_locked_until
+            WHERE lock_token = p_lock_token
+              AND locked_until > p_now_ms;
+            
+            GET DIAGNOSTICS v_rows_affected = ROW_COUNT;
+            
+            IF v_rows_affected = 0 THEN
+                RAISE EXCEPTION ''Lock token invalid, expired, or already released'';
+            END IF;
+
+            -- Also update the locked_until on orchestrator_queue messages
+            UPDATE %I.orchestrator_queue
+            SET locked_until = v_locked_until
+            WHERE lock_token = p_lock_token;
+        END;
+        $renew_orch_lock$ LANGUAGE plpgsql;
+    ', v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: fetch_history (latest execution)
     EXECUTE format('DROP FUNCTION IF EXISTS %I.fetch_history(TEXT)', v_schema_name);

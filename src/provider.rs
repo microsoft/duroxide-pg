@@ -171,7 +171,7 @@ impl Provider for PostgresProvider {
         &self,
         lock_timeout: Duration,
         _poll_timeout: Duration,
-    ) -> Result<Option<OrchestrationItem>, ProviderError> {
+    ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
         let start = std::time::Instant::now();
 
         const MAX_RETRIES: u32 = 3;
@@ -193,6 +193,7 @@ impl Provider for PostgresProvider {
                     serde_json::Value,
                     serde_json::Value,
                     String,
+                    i32,
                 )>,
                 SqlxError,
             > = sqlx::query_as(&format!(
@@ -235,6 +236,7 @@ impl Provider for PostgresProvider {
                 history_json,
                 messages_json,
                 lock_token,
+                attempt_count,
             )) = row
             {
                 let history: Vec<Event> = serde_json::from_value(history_json).map_err(|e| {
@@ -260,20 +262,24 @@ impl Provider for PostgresProvider {
                     execution_id = execution_id,
                     message_count = messages.len(),
                     history_count = history.len(),
+                    attempt_count = attempt_count,
                     duration_ms = duration_ms,
                     attempts = attempt + 1,
                     "Fetched orchestration item via stored procedure"
                 );
 
-                return Ok(Some(OrchestrationItem {
-                    instance: instance_id,
-                    orchestration_name,
-                    execution_id: execution_id as u64,
-                    version: orchestration_version,
-                    history,
-                    messages,
+                return Ok(Some((
+                    OrchestrationItem {
+                        instance: instance_id,
+                        orchestration_name,
+                        execution_id: execution_id as u64,
+                        version: orchestration_version,
+                        history,
+                        messages,
+                    },
                     lock_token,
-                }));
+                    attempt_count as u32,
+                )));
             }
 
             if attempt < MAX_RETRIES {
@@ -425,16 +431,18 @@ impl Provider for PostgresProvider {
         &self,
         lock_token: &str,
         delay: Option<Duration>,
+        ignore_attempt: bool,
     ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
         let delay_param: Option<i64> = delay.map(|d| d.as_millis() as i64);
 
         let instance_id = match sqlx::query_scalar::<_, String>(&format!(
-            "SELECT {}.abandon_orchestration_item($1, $2)",
+            "SELECT {}.abandon_orchestration_item($1, $2, $3)",
             self.schema_name
         ))
         .bind(lock_token)
         .bind(delay_param)
+        .bind(ignore_attempt)
         .fetch_one(&*self.pool)
         .await
         {
@@ -467,6 +475,7 @@ impl Provider for PostgresProvider {
             operation = "abandon_orchestration_item",
             instance_id = %instance_id,
             delay_ms = delay.map(|d| d.as_millis() as u64),
+            ignore_attempt = ignore_attempt,
             duration_ms = duration_ms,
             "Abandoned orchestration item via stored procedure"
         );
@@ -600,13 +609,13 @@ impl Provider for PostgresProvider {
         &self,
         lock_timeout: Duration,
         _poll_timeout: Duration,
-    ) -> Result<Option<(WorkItem, String)>, ProviderError> {
+    ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
         let start = std::time::Instant::now();
 
         // Convert Duration to milliseconds
         let lock_timeout_ms = lock_timeout.as_millis() as i64;
 
-        let row = match sqlx::query_as::<_, (String, String)>(&format!(
+        let row = match sqlx::query_as::<_, (String, String, i32)>(&format!(
             "SELECT * FROM {}.fetch_work_item($1, $2)",
             self.schema_name
         ))
@@ -621,7 +630,7 @@ impl Provider for PostgresProvider {
             }
         };
 
-        let (work_item_json, lock_token) = match row {
+        let (work_item_json, lock_token, attempt_count) = match row {
             Some(row) => row,
             None => return Ok(None),
         };
@@ -657,11 +666,12 @@ impl Provider for PostgresProvider {
             target = "duroxide::providers::postgres",
             operation = "fetch_work_item",
             instance_id = %instance_id,
+            attempt_count = attempt_count,
             duration_ms = duration_ms,
             "Fetched activity work item via stored procedure"
         );
 
-        Ok(Some((work_item, lock_token)))
+        Ok(Some((work_item, lock_token, attempt_count as u32)))
     }
 
     #[instrument(skip(self), fields(token = %token), target = "duroxide::providers::postgres")]
@@ -687,10 +697,7 @@ impl Provider for PostgresProvider {
         };
 
         let completion_json = serde_json::to_string(&completion).map_err(|e| {
-            ProviderError::permanent(
-                "ack_worker",
-                format!("Failed to serialize completion: {e}"),
-            )
+            ProviderError::permanent("ack_worker", format!("Failed to serialize completion: {e}"))
         })?;
 
         // Call stored procedure to atomically delete worker item and enqueue completion
@@ -785,6 +792,128 @@ impl Provider for PostgresProvider {
                 }
 
                 Err(Self::sqlx_to_provider_error("renew_work_item_lock", e))
+            }
+        }
+    }
+
+    #[instrument(skip(self), fields(token = %token), target = "duroxide::providers::postgres")]
+    async fn abandon_work_item(
+        &self,
+        token: &str,
+        delay: Option<Duration>,
+        ignore_attempt: bool,
+    ) -> Result<(), ProviderError> {
+        let start = std::time::Instant::now();
+        let delay_param: Option<i64> = delay.map(|d| d.as_millis() as i64);
+
+        match sqlx::query(&format!(
+            "SELECT {}.abandon_work_item($1, $2, $3)",
+            self.schema_name
+        ))
+        .bind(token)
+        .bind(delay_param)
+        .bind(ignore_attempt)
+        .execute(&*self.pool)
+        .await
+        {
+            Ok(_) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                debug!(
+                    target = "duroxide::providers::postgres",
+                    operation = "abandon_work_item",
+                    token = %token,
+                    delay_ms = delay.map(|d| d.as_millis() as u64),
+                    ignore_attempt = ignore_attempt,
+                    duration_ms = duration_ms,
+                    "Abandoned work item via stored procedure"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                if let SqlxError::Database(db_err) = &e {
+                    if db_err.message().contains("Invalid lock token")
+                        || db_err.message().contains("already acked")
+                    {
+                        return Err(ProviderError::permanent(
+                            "abandon_work_item",
+                            "Invalid lock token or already acked",
+                        ));
+                    }
+                } else if e.to_string().contains("Invalid lock token")
+                    || e.to_string().contains("already acked")
+                {
+                    return Err(ProviderError::permanent(
+                        "abandon_work_item",
+                        "Invalid lock token or already acked",
+                    ));
+                }
+
+                Err(Self::sqlx_to_provider_error("abandon_work_item", e))
+            }
+        }
+    }
+
+    #[instrument(skip(self), fields(token = %token), target = "duroxide::providers::postgres")]
+    async fn renew_orchestration_item_lock(
+        &self,
+        token: &str,
+        extend_for: Duration,
+    ) -> Result<(), ProviderError> {
+        let start = std::time::Instant::now();
+
+        // Get current time from application for consistent time reference
+        let now_ms = Self::now_millis();
+
+        // Convert Duration to seconds for the stored procedure
+        let extend_secs = extend_for.as_secs() as i64;
+
+        match sqlx::query(&format!(
+            "SELECT {}.renew_orchestration_item_lock($1, $2, $3)",
+            self.schema_name
+        ))
+        .bind(token)
+        .bind(now_ms)
+        .bind(extend_secs)
+        .execute(&*self.pool)
+        .await
+        {
+            Ok(_) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                debug!(
+                    target = "duroxide::providers::postgres",
+                    operation = "renew_orchestration_item_lock",
+                    token = %token,
+                    extend_for_secs = extend_secs,
+                    duration_ms = duration_ms,
+                    "Orchestration item lock renewed successfully"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                if let SqlxError::Database(db_err) = &e {
+                    if db_err.message().contains("Lock token invalid")
+                        || db_err.message().contains("expired")
+                        || db_err.message().contains("already released")
+                    {
+                        return Err(ProviderError::permanent(
+                            "renew_orchestration_item_lock",
+                            "Lock token invalid, expired, or already released",
+                        ));
+                    }
+                } else if e.to_string().contains("Lock token invalid")
+                    || e.to_string().contains("expired")
+                    || e.to_string().contains("already released")
+                {
+                    return Err(ProviderError::permanent(
+                        "renew_orchestration_item_lock",
+                        "Lock token invalid, expired, or already released",
+                    ));
+                }
+
+                Err(Self::sqlx_to_provider_error(
+                    "renew_orchestration_item_lock",
+                    e,
+                ))
             }
         }
     }

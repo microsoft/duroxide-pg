@@ -55,6 +55,15 @@ let provider = PostgresProvider::new_with_schema(
 - Connection pooling via sqlx
 - Custom schema support for multi-tenant isolation
 - Full implementation of the Duroxide `Provider` and `ProviderAdmin` traits
+- Poison message detection with attempt count tracking
+- Lock renewal for long-running orchestrations and activities
+
+## Latest Release (0.1.4)
+
+- Updated to duroxide 0.1.3 with poison message handling
+- Added `abandon_work_item()` and `renew_orchestration_item_lock()` methods
+- 61 provider validation tests passing
+- See [CHANGELOG.md](CHANGELOG.md) for full version history
 
 ## License
 

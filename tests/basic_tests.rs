@@ -44,7 +44,9 @@ async fn test_provider_creation() {
         .expect("Failed to create provider");
 
     // Verify schema was created
-    let schema_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)")
+    let schema_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)",
+    )
     .bind(&schema_name)
     .fetch_one(provider.pool())
     .await
@@ -216,8 +218,11 @@ async fn test_enqueue_for_orchestrator() {
 
     // ⚠️ CRITICAL: Instance is NOT created on enqueue - must fetch and ack with metadata
     // Fetch the work item
-    let item = provider
-        .fetch_orchestration_item(std::time::Duration::from_secs(30), std::time::Duration::ZERO) // 30 second lock timeout
+    let (_item, lock_token, _attempt_count) = provider
+        .fetch_orchestration_item(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::ZERO,
+        ) // 30 second lock timeout
         .await
         .expect("fetch_orchestration_item should succeed")
         .expect("Should fetch enqueued work item");
@@ -225,7 +230,7 @@ async fn test_enqueue_for_orchestrator() {
     // Ack with OrchestrationStarted event and proper metadata to create instance
     provider
         .ack_orchestration_item(
-            &item.lock_token,
+            &lock_token,
             execution_id,
             vec![Event::with_event_id(
                 INITIAL_EVENT_ID,
@@ -309,8 +314,11 @@ async fn test_enqueue_and_dequeue_worker() {
         .expect("Failed to enqueue worker work");
 
     // Dequeue worker work
-    let (dequeued_item, lock_token) = provider
-        .fetch_work_item(std::time::Duration::from_secs(30), std::time::Duration::ZERO) // 30 second lock timeout
+    let (dequeued_item, lock_token, _attempt_count) = provider
+        .fetch_work_item(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::ZERO,
+        ) // 30 second lock timeout
         .await
         .expect("Should dequeue worker work")
         .expect("Should have a work item");
@@ -353,7 +361,10 @@ async fn test_fetch_orchestration_item_empty_queue() {
 
     // Fetch from empty queue should return None
     let item = provider
-        .fetch_orchestration_item(std::time::Duration::from_secs(30), std::time::Duration::ZERO) // 30 second lock timeout
+        .fetch_orchestration_item(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::ZERO,
+        ) // 30 second lock timeout
         .await
         .expect("fetch should succeed");
     assert!(item.is_none(), "Empty queue should return None");
@@ -455,15 +466,18 @@ async fn test_list_instances_and_executions() {
     // ⚠️ CRITICAL: Instances are NOT created on enqueue - must fetch and ack with metadata
     // Fetch and ack both work items to create instances
     for (orchestration, instance) in [("Orch1", instance1), ("Orch2", instance2)] {
-        let item = provider
-            .fetch_orchestration_item(std::time::Duration::from_secs(30), std::time::Duration::ZERO) // 30 second lock timeout
+        let (_item, lock_token, _attempt_count) = provider
+            .fetch_orchestration_item(
+                std::time::Duration::from_secs(30),
+                std::time::Duration::ZERO,
+            ) // 30 second lock timeout
             .await
             .expect("fetch_orchestration_item should succeed")
             .expect("Should fetch enqueued work item");
 
         provider
             .ack_orchestration_item(
-                &item.lock_token,
+                &lock_token,
                 INITIAL_EXECUTION_ID,
                 vec![Event::with_event_id(
                     INITIAL_EVENT_ID,
