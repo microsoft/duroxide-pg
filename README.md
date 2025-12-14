@@ -58,7 +58,7 @@ let provider = PostgresProvider::new_with_schema(
 - Poison message detection with attempt count tracking
 - Lock renewal for long-running orchestrations and activities
 
-## Latest Release (0.1.4)
+## Latest Release (0.1.5)
 
 - Updated to duroxide 0.1.3 with poison message handling
 - Added `abandon_work_item()` and `renew_orchestration_item_lock()` methods
