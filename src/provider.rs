@@ -166,6 +166,14 @@ impl PostgresProvider {
 
 #[async_trait::async_trait]
 impl Provider for PostgresProvider {
+    fn name(&self) -> &str {
+        "duroxide-pg"
+    }
+
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
     async fn fetch_orchestration_item(
         &self,

@@ -28,7 +28,7 @@ exclude = [
 ]
 
 [dependencies]
-duroxide = { version = "0.1.3", features = ["provider-test"] }
+duroxide = { git = "https://github.com/affandar/duroxide.git", branch = "staging", features = ["provider-test"] }
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono"], default-features = false }
