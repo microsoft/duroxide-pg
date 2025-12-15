@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2024-12-13
+
+### Added
+
+- `name()` method on Provider trait - returns "duroxide-pg"
+- `version()` method on Provider trait - returns crate version
+- Long-polling design document (`docs/LONG_POLLING_DESIGN.md`)
+
+### Changed
+
+- Updated to duroxide 0.1.4
+
+### Notes
+
+- Long-polling is a design document only; implementation pending
+
 ## [0.1.5] - 2024-12-14
 
 ### Fixed
