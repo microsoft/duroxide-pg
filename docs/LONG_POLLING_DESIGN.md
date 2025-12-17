@@ -1,6 +1,6 @@
-# Long Polling Design (Simplified)
+# Long-Polling Design for PostgreSQL Provider
 
-> Push-based work detection using PostgreSQL LISTEN/NOTIFY with application-level timer tracking.
+> Reducing PostgreSQL query load using LISTEN/NOTIFY with timer-aware wake scheduling.
 
 ## Problem Statement
 
@@ -9,8 +9,9 @@ The current PostgreSQL provider uses a polling-based approach to detect new work
 ```
 Dispatcher Loop:
 1. Call fetch_orchestration_item() → Query DB
-2. If None, sleep(dispatcher_idle_sleep)
-3. Repeat
+2. If None, return immediately
+3. Runtime sleeps for dispatcher_idle_sleep (e.g., 50ms)
+4. Repeat
 ```
 
 With N dispatchers polling every X ms, this generates:
@@ -21,436 +22,569 @@ This creates unnecessary database load and costs, especially in cloud-hosted Pos
 
 ## Goals
 
-1. **Reduce idle query load by 99%+** (from ~160 q/s to ~1 q/s)
-2. **Maintain work detection latency** (<10ms for immediate work)
-3. **Zero changes to duroxide core** - all changes in provider only
-4. **Support multi-dispatcher and multi-node deployments**
-5. **Graceful degradation** - fall back to polling if LISTEN fails
+1. **Reduce idle query load by 99%+** (from ~160 q/s to ~1 q/5min per dispatcher)
+2. **Maintain or improve work detection latency** (~100ms vs current 0-50ms average)
+3. **Precise timer handling** (timers fire within 100ms of visibility time)
+4. **Zero changes to duroxide core** - all changes in provider only
+5. **Graceful degradation** - if NOTIFY fails, fall back to poll_timeout polling
 
 ## Design Overview
 
-### Core Mechanism
+### Core Principle
 
-1. **Triggers** fire `pg_notify()` on INSERT to queue tables
-2. **Listener Task** receives NOTIFY and routes wake tokens
-3. **Timer Task** watches pending timers and sends wake tokens when due
-4. **Competing consumer channel** ensures only ONE dispatcher wakes per event
-5. **Fallback timeout** in timer task ensures work is never missed
+**Notifier is smart. Dispatchers are dumb.**
+
+- **Notifier thread**: Listens for NOTIFY, manages timer heap, wakes dispatchers at the right time
+- **Dispatchers**: Try to fetch, wait for wake or timeout, fetch again
 
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                              PostgreSQL                                  │
-│                                                                         │
-│  ┌─────────────────────┐      ┌─────────────────────┐                   │
-│  │  orchestrator_queue │      │    worker_queue     │                   │
-│  │                     │      │                     │                   │
-│  │  AFTER INSERT ──────┼──────┼─► pg_notify()       │                   │
-│  │  trigger            │      │   trigger           │                   │
-│  └─────────────────────┘      └─────────────────────┘                   │
-│                                                                         │
-│  Channels: {schema}_orch_work, {schema}_worker_work                     │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    │ NOTIFY
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         PostgresProvider                                 │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    Listener Task                                 │    │
-│  │                                                                 │    │
-│  │  PgListener (dedicated connection)                              │    │
-│  │  ├─ LISTEN {schema}_orch_work                                   │    │
-│  │  └─ LISTEN {schema}_worker_work                                 │    │
-│  │                                                                 │    │
-│  │  On NOTIFY:                                                     │    │
-│  │  ├─ Parse visible_at_ms from payload                            │    │
-│  │  ├─ If future → update next_timer_ms, notify timer task         │    │
-│  │  └─ If immediate → send token to wake channel                   │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                              │                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    Timer Task                                    │    │
-│  │                                                                 │    │
-│  │  Watches: next_orch_timer_ms, next_worker_timer_ms              │    │
-│  │                                                                 │    │
-│  │  Loop:                                                          │    │
-│  │  ├─ Sleep until min(next_timer, fallback_interval)              │    │
-│  │  ├─ If timer due → send token to wake channel                   │    │
-│  │  └─ If fallback due → send token to wake channel                │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                              │                                          │
-│                              ▼                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │           async_channel (bounded, multi-consumer)                │    │
-│  │                                                                 │    │
-│  │   Only ONE dispatcher receives each wake token                  │    │
-│  │   Sources: NOTIFY (immediate), Timer (scheduled), Fallback      │    │
-│  └───────┬───────────────────┬───────────────────┬─────────────────┘    │
-│          │                   │                   │                      │
-│          ▼                   ▼                   ▼                      │
-│   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐              │
-│   │ Dispatcher 1│     │ Dispatcher 2│     │ Dispatcher 3│              │
-│   │             │     │             │     │             │              │
-│   │ recv()      │     │ recv()      │     │ recv()      │              │
-│   │ (blocking)  │     │ (blocking)  │     │ (blocking)  │              │
-│   └─────────────┘     └─────────────┘     └─────────────┘              │
-│                                                                         │
-│  Shared State:                                                          │
-│  ├─ next_orch_timer_ms: AtomicI64 (earliest pending timer)             │
-│  ├─ next_worker_timer_ms: AtomicI64                                    │
-│  └─ timer_notify: tokio::sync::Notify (wake timer task on new timer)   │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              PostgreSQL                                      │
+│                                                                             │
+│   ┌─────────────────────┐           ┌─────────────────────┐                 │
+│   │  orchestrator_queue │           │    worker_queue     │                 │
+│   │                     │           │                     │                 │
+│   │  INSERT trigger ────┼───────────┼──── INSERT trigger  │                 │
+│   └──────────┬──────────┘           └──────────┬──────────┘                 │
+│              │                                 │                            │
+│              ▼                                 ▼                            │
+│        NOTIFY 'orch_work'              NOTIFY 'worker_work'                 │
+│        payload: visible_at_ms          payload: visible_at_ms               │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           PostgresProvider                                   │
+│                                                                             │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │                         Notifier Thread                                 │ │
+│  │                                                                        │ │
+│  │   PgListener (dedicated connection)                                    │ │
+│  │   Timer heaps (orch + worker)                                          │ │
+│  │   Refresh query (async, non-blocking)                                  │ │
+│  │                                                                        │ │
+│  │   Responsibilities:                                                    │ │
+│  │   • Receive NOTIFY from PostgreSQL                                     │ │
+│  │   • Track upcoming timers (visible_at in future)                       │ │
+│  │   • Wake dispatchers when work is ready                                │ │
+│  │   • Periodically refresh timer list from DB                            │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│                              │ notify_waiters()                             │
+│                              ▼                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │                    tokio::sync::Notify                                  │ │
+│  │                                                                        │ │
+│  │   orch_notify: Arc<Notify>    worker_notify: Arc<Notify>               │ │
+│  │                                                                        │ │
+│  │   • Wake ALL waiting dispatchers                                       │ │
+│  │   • No buffering (if no waiter, notification is "lost" - that's OK)   │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                    │              │              │                          │
+│                    ▼              ▼              ▼                          │
+│             ┌───────────┐  ┌───────────┐  ┌───────────┐                    │
+│             │Dispatcher │  │Dispatcher │  │Dispatcher │                    │
+│             │    1      │  │    2      │  │    3      │                    │
+│             │           │  │           │  │           │                    │
+│             │ fetch()   │  │ fetch()   │  │ fetch()   │                    │
+│             │ wait()    │  │ wait()    │  │ wait()    │                    │
+│             │ fetch()   │  │ fetch()   │  │ fetch()   │                    │
+│             └───────────┘  └───────────┘  └───────────┘                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Insight: Wake Chain for Parallel Draining
+## Database Schema
 
-Dispatchers send a wake token **only after waking from recv()**, not during tight loops:
+### NOTIFY Triggers
+
+```sql
+-- Migration: Add NOTIFY triggers for long-polling
+
+-- Orchestrator queue notification
+-- Payload: visible_at as epoch milliseconds
+CREATE OR REPLACE FUNCTION {schema}.notify_orch_work()
+RETURNS trigger AS $$
+BEGIN
+    PERFORM pg_notify(
+        '{schema}_orch_work',
+        (EXTRACT(EPOCH FROM NEW.visible_at) * 1000)::BIGINT::TEXT
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Worker queue notification
+CREATE OR REPLACE FUNCTION {schema}.notify_worker_work()
+RETURNS trigger AS $$
+BEGIN
+    PERFORM pg_notify(
+        '{schema}_worker_work',
+        (EXTRACT(EPOCH FROM NEW.visible_at) * 1000)::BIGINT::TEXT
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Attach triggers
+CREATE TRIGGER trg_orch_notify
+    AFTER INSERT ON {schema}.orchestrator_queue
+    FOR EACH ROW EXECUTE FUNCTION {schema}.notify_orch_work();
+
+CREATE TRIGGER trg_worker_notify
+    AFTER INSERT ON {schema}.worker_queue
+    FOR EACH ROW EXECUTE FUNCTION {schema}.notify_worker_work();
+```
+
+## Clock Source Design
+
+### Decision: Rust Clock Only (No DB-Generated Timestamps)
+
+All timestamps in the system are generated by the Rust application using `SystemTime::now()`. 
+The PostgreSQL database **never** generates timestamps via `NOW()` or `CURRENT_TIMESTAMP`.
+
+**Rationale:**
+
+1. **Single Clock Source**: All `visible_at` values come from the same clock source, making timing analysis simpler
+2. **Predictable Behavior**: When a node writes `visible_at = now + delay`, it can later read with the same clock
+3. **Multi-Node Consistency**: Each node uses its own NTP-synced clock; cross-node skew is bounded by NTP accuracy (~50ms typical)
+4. **Testability**: Can inject mock clocks for deterministic testing
+
+**Implementation:**
 
 ```rust
-// Runtime calls provider.fetch() in a loop
-// Provider logic:
-
-async fn fetch_orchestration_item(&self, ...) {
-    // 1. Immediate fetch (tight loop path - NO wake token)
-    if let Some(item) = try_fetch().await? {
-        return Ok(Some(item));
+impl PostgresProvider {
+    /// Single source of truth for all timestamps
+    fn now_millis() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
     }
-    
-    // 2. Queue empty - wait for wake
-    wake_rx.recv().await;
-    
-    // 3. Just woke - fetch and send ONE wake token if found work
-    if let Some(item) = try_fetch().await? {
-        wake_tx.try_send(());  // Wake chain: help drain queue
-        return Ok(Some(item));
-    }
-    Ok(None)
 }
 ```
 
-**Wake sources:**
-- **Listener Task**: Sends token on NOTIFY (immediate work)
-- **Timer Task**: Sends token when timer expires or fallback
-- **Dispatchers**: Send ONE token after waking and finding work
+All stored procedures that need timestamps receive `p_now_ms BIGINT` as a parameter:
+- `ack_orchestration_item(p_lock_token, p_now_ms, ...)`
+- `ack_worker(p_lock_token, p_now_ms, ...)`
+- `enqueue_worker_work(p_work_item, p_now_ms)`
+- `enqueue_orchestrator_work(p_instance_id, p_work_item, p_visible_at, p_now_ms, ...)`
+- `abandon_orchestration_item(p_lock_token, p_now_ms, ...)`
+- `abandon_work_item(p_lock_token, p_now_ms, ...)`
 
-**Why this is efficient:**
-- Tight loop (step 1): No tokens sent - dispatcher already active
-- Wake path (step 3): ONE token per wake cycle, not per item
-- 100 items = ~5 tokens (one per dispatcher), not 100 tokens
+**Table Schema:**
 
-**Self-regulating properties:**
-- Single item: D1 wakes, finds work, wakes D2. D2 finds nothing, waits.
-- Burst of 100: D1→D2→D3→D4 chain (4 tokens). All in tight loops draining.
-- Sustained load: All dispatchers in tight loops, no tokens needed.
-- Queue empties: ~4 wasted fetches (one per dispatcher), acceptable overhead.
-
-The bounded channel (`async_channel::bounded(4)`) matches dispatcher count.
-
-## Detailed Design
-
-### 1. Database Schema (Migration 0005)
+Timestamp columns use `NOT NULL` without defaults, forcing the provider to always supply values:
 
 ```sql
--- Migration 0005: LISTEN/NOTIFY triggers for long-polling
-
-DO $$
-DECLARE
-    v_schema_name TEXT := current_schema();
-BEGIN
-    -- ========================================================================
-    -- Notification Functions
-    -- ========================================================================
-
-    -- Orchestrator queue notification
-    -- Payload: visible_at timestamp in milliseconds (for timer tracking)
-    EXECUTE format('
-        CREATE OR REPLACE FUNCTION %I.notify_orch_work()
-        RETURNS trigger AS $notify$
-        BEGIN
-            PERFORM pg_notify(
-                %L,
-                (EXTRACT(EPOCH FROM NEW.visible_at) * 1000)::BIGINT::TEXT
-            );
-            RETURN NEW;
-        END;
-        $notify$ LANGUAGE plpgsql;
-    ', v_schema_name, v_schema_name || '_orch_work');
-
-    -- Worker queue notification (no payload needed - always immediate)
-    EXECUTE format('
-        CREATE OR REPLACE FUNCTION %I.notify_worker_work()
-        RETURNS trigger AS $notify$
-        BEGIN
-            PERFORM pg_notify(%L, '''');
-            RETURN NEW;
-        END;
-        $notify$ LANGUAGE plpgsql;
-    ', v_schema_name, v_schema_name || '_worker_work');
-
-    -- ========================================================================
-    -- Triggers
-    -- ========================================================================
-
-    EXECUTE format('DROP TRIGGER IF EXISTS trg_orch_notify ON %I.orchestrator_queue', v_schema_name);
-    EXECUTE format('DROP TRIGGER IF EXISTS trg_worker_notify ON %I.worker_queue', v_schema_name);
-
-    EXECUTE format('
-        CREATE TRIGGER trg_orch_notify
-            AFTER INSERT ON %I.orchestrator_queue
-            FOR EACH ROW EXECUTE FUNCTION %I.notify_orch_work();
-    ', v_schema_name, v_schema_name);
-
-    EXECUTE format('
-        CREATE TRIGGER trg_worker_notify
-            AFTER INSERT ON %I.worker_queue
-            FOR EACH ROW EXECUTE FUNCTION %I.notify_worker_work();
-    ', v_schema_name, v_schema_name);
-
-END $$;
+CREATE TABLE orchestrator_queue (
+    ...
+    visible_at TIMESTAMPTZ NOT NULL,  -- No DEFAULT
+    created_at TIMESTAMPTZ NOT NULL   -- No DEFAULT
+);
 ```
 
-### 2. Configuration
+### Multi-Node Clock Skew Analysis
+
+**Scenario: Two nodes (A and B) with clock skew**
+
+```
+Node A clock: 12:00:00.000
+Node B clock: 12:00:00.100  (100ms ahead)
+DB has no clock (all timestamps from nodes)
+
+Case 1: Node A writes timer, Node A reads
+  - A writes: visible_at = 12:00:05.000 (5s timer)
+  - A reads at its 12:00:05.000: timer is visible ✓
+
+Case 2: Node A writes timer, Node B reads
+  - A writes: visible_at = 12:00:05.000
+  - B reads at its 12:00:05.000 (which is A's 12:00:04.900)
+  - B thinks timer is ready, but item was written with A's clock
+  - Timer fires 100ms "early" from A's perspective
+  - Grace period (100ms) absorbs this ✓
+
+Case 3: Node B writes timer, Node A reads  
+  - B writes: visible_at = 12:00:05.100 (B's now + 5s)
+  - A reads at its 12:00:05.100 (which is B's 12:00:05.200)
+  - Timer fires 100ms "late" from B's perspective
+  - Acceptable - within NTP bounds ✓
+```
+
+**Conclusion:** With NTP-synced servers (typical skew < 100ms), the 100ms grace period provides sufficient tolerance.
+
+### Corner Cases
+
+| Case | Description | Impact | Mitigation |
+|------|-------------|--------|------------|
+| Node clock jumps forward | NTP correction or manual change | Timers may fire early | Grace period absorbs small jumps; large jumps are operational errors |
+| Node clock jumps backward | NTP correction | Timers may be delayed | Eventually fire when clock catches up |
+| DB restarts | Irrelevant - DB doesn't track time | None | N/A |
+| Node restart | New `now_millis()` calls from fresh SystemTime | None - clock continues | N/A |
+| VM suspend/resume | Clock may jump on resume | Same as clock jump | Same mitigations |
+
+## Configuration
 
 ```rust
 /// Configuration for long-polling behavior
-#[derive(Clone, Debug)]
 pub struct LongPollConfig {
-    /// Enable LISTEN/NOTIFY based long-polling.
-    /// When false, fetch methods return immediately (backward compatible).
+    /// Enable long-polling (LISTEN/NOTIFY based)
+    /// Default: false (for backward compatibility)
     pub enabled: bool,
     
-    /// Fallback poll interval when no timers are pending.
-    /// Safety net to catch any missed notifications.
+    /// Interval for querying upcoming timers from the database.
+    /// The notifier queries for work with visible_at within this window.
+    /// Also serves as a safety net to catch any missed NOTIFYs.
     /// Default: 60 seconds
-    pub fallback_interval: Duration,
+    pub notifier_poll_interval: Duration,
     
-    /// Grace period before timer expiry to account for clock skew.
-    /// Wake slightly early to ensure timely processing.
-    /// Default: 50ms
-    pub timer_grace_ms: u64,
+    /// Grace period added before firing timers.
+    /// Accounts for clock skew between nodes in a multi-node deployment.
+    /// Timers fire at (visible_at + timer_grace_period).
+    /// Default: 100ms (sufficient for NTP-synced servers)
+    pub timer_grace_period: Duration,
 }
 
 impl Default for LongPollConfig {
     fn default() -> Self {
         Self {
-            enabled: false, // Backward compatible default
-            fallback_interval: Duration::from_secs(60),
-            timer_grace_ms: 50,
+            enabled: false,
+            notifier_poll_interval: Duration::from_secs(60),
+            timer_grace_period: Duration::from_millis(100),
         }
     }
 }
 ```
 
-### 3. Provider Structure
+## Notifier Thread
+
+### Structure
 
 ```rust
-use async_channel::{Receiver, Sender};
-use std::sync::atomic::{AtomicI64, Ordering};
-use tokio::sync::Notify;
-use tokio::task::JoinHandle;
-
-pub struct PostgresProvider {
-    pool: Arc<PgPool>,
+struct Notifier {
+    // PostgreSQL connection for LISTEN
+    pg_listener: PgListener,
+    pool: PgPool,
     schema_name: String,
     
-    // Long-poll infrastructure (None if disabled)
-    long_poll: Option<LongPollState>,
+    // Timer heaps (min-heap by fire time)
+    orch_heap: BinaryHeap<Reverse<Instant>>,
+    worker_heap: BinaryHeap<Reverse<Instant>>,
+    
+    // Dispatcher wake channels
+    orch_notify: Arc<Notify>,
+    worker_notify: Arc<Notify>,
+    
+    // Refresh scheduling
+    next_refresh: Instant,
+    
+    // Active refresh task (if any)
+    // Using oneshot because each refresh produces exactly one result.
+    // We store the receiver here; sender goes to the spawned task.
+    pending_refresh: Option<oneshot::Receiver<RefreshResult>>,
+    
+    // Config
+    config: LongPollConfig,
 }
 
-struct LongPollState {
-    config: LongPollConfig,
-    
-    // Wake channels (competing consumer)
-    orch_wake_tx: Sender<()>,
-    orch_wake_rx: Receiver<()>,
-    worker_wake_tx: Sender<()>,
-    worker_wake_rx: Receiver<()>,
-    
-    // Timer tracking
-    next_orch_timer_ms: Arc<AtomicI64>,  // 0 = no pending timer
-    next_worker_timer_ms: Arc<AtomicI64>,
-    
-    // Signal to timer task when new timer is scheduled
-    orch_timer_notify: Arc<Notify>,
-    worker_timer_notify: Arc<Notify>,
-    
-    // Background task handles
-    listener_handle: JoinHandle<()>,
-    orch_timer_handle: JoinHandle<()>,
-    worker_timer_handle: JoinHandle<()>,
+struct RefreshResult {
+    orch_timers: Vec<i64>,   // visible_at as epoch ms
+    worker_timers: Vec<i64>,
 }
 ```
 
-### 4. Background Tasks
+**Why `oneshot` instead of `mpsc`?**
+- Each refresh task produces exactly ONE result
+- `oneshot::Receiver` is consumed on receive (no stale results)
+- `pending_refresh: Option<...>` replaces the `refresh_in_progress` bool
+- Cleaner semantics: `Some(rx)` = refresh in progress, `None` = idle
 
-#### Listener Task
+### Main Loop
 
 ```rust
-async fn listener_task(
-    pool: PgPool,
-    schema: String,
-    orch_wake_tx: Sender<()>,
-    worker_wake_tx: Sender<()>,
-    next_orch_timer_ms: Arc<AtomicI64>,
-    orch_timer_notify: Arc<Notify>,
-) {
-    let orch_channel = format!("{}_orch_work", schema);
-    let worker_channel = format!("{}_worker_work", schema);
-    
-    loop {
-        match run_listener(
-            &pool, &orch_channel, &worker_channel,
-            &orch_wake_tx, &worker_wake_tx,
-            &next_orch_timer_ms, &orch_timer_notify,
-        ).await {
-            Ok(_) => break, // Clean shutdown
-            Err(e) => {
-                warn!("Listener disconnected: {}, reconnecting in 1s", e);
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        }
-    }
-}
-
-async fn run_listener(
-    pool: &PgPool,
-    orch_channel: &str,
-    worker_channel: &str,
-    orch_wake_tx: &Sender<()>,
-    worker_wake_tx: &Sender<()>,
-    next_orch_timer_ms: &AtomicI64,
-    orch_timer_notify: &Notify,
-) -> Result<()> {
-    let mut listener = PgListener::connect_with(pool).await?;
-    listener.listen(orch_channel).await?;
-    listener.listen(worker_channel).await?;
-    
-    loop {
-        let notification = listener.recv().await?;
-        let channel = notification.channel();
-        
-        if channel == orch_channel {
-            let visible_at_ms: i64 = notification.payload().parse().unwrap_or(0);
-            let now_ms = now_millis();
-            
-            if visible_at_ms > now_ms {
-                // Future timer - update tracking and wake timer task
-                update_next_timer(next_orch_timer_ms, visible_at_ms);
-                orch_timer_notify.notify_one();
+impl Notifier {
+    async fn run(&mut self) {
+        loop {
+            // Calculate next wake time
+            let next_timer = self.earliest_timer();
+            let refresh_in_progress = self.pending_refresh.is_some();
+            let next_wake = if refresh_in_progress {
+                // Don't wait for refresh time if query already running
+                next_timer.unwrap_or_else(|| Instant::now() + Duration::from_secs(60))
             } else {
-                // Immediate work - wake ONE dispatcher
-                let _ = orch_wake_tx.try_send(());
-            }
-        } else if channel == worker_channel {
-            let _ = worker_wake_tx.try_send(());
-        }
-    }
-}
-
-fn update_next_timer(atomic: &AtomicI64, new_time_ms: i64) {
-    let _ = atomic.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-        if current == 0 || new_time_ms < current {
-            Some(new_time_ms)
-        } else {
-            None
-        }
-    });
-}
-```
-
-#### Timer Task
-
-```rust
-async fn timer_task(
-    wake_tx: Sender<()>,
-    next_timer_ms: Arc<AtomicI64>,
-    timer_notify: Arc<Notify>,
-    config: LongPollConfig,
-) {
-    loop {
-        let sleep_duration = compute_sleep_duration(&next_timer_ms, &config);
-        
-        tokio::select! {
-            // Sleep until next timer or fallback
-            _ = tokio::time::sleep(sleep_duration) => {
-                // Timer or fallback expired - wake ONE dispatcher
-                let _ = wake_tx.try_send(());
+                match next_timer {
+                    Some(t) => t.min(self.next_refresh),
+                    None => self.next_refresh,
+                }
+            };
+            
+            select! {
+                // PostgreSQL NOTIFY received
+                result = self.pg_listener.recv() => {
+                    match result {
+                        Ok(notification) => self.handle_notify(notification),
+                        Err(_) => self.handle_reconnect().await,
+                    }
+                }
                 
-                // Clear timer if it was a timer wake (not fallback)
-                let next = next_timer_ms.load(Ordering::SeqCst);
-                if next > 0 && next <= now_millis() {
-                    next_timer_ms.store(0, Ordering::SeqCst);
+                // Timer or refresh time reached
+                _ = sleep_until(next_wake) => {
+                    self.pop_and_wake_expired_timers();
+                    self.maybe_start_refresh();
+                }
+                
+                // Refresh query completed (non-blocking)
+                Some(result) = async {
+                    match &mut self.pending_refresh {
+                        Some(rx) => rx.await.ok(),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.pending_refresh = None;  // Consume the receiver
+                    self.handle_refresh_result(result);
                 }
             }
-            
-            // New timer scheduled - recalculate sleep
-            _ = timer_notify.notified() => {
-                // Loop will recalculate sleep duration
-                continue;
-            }
         }
     }
-}
-
-fn compute_sleep_duration(next_timer_ms: &AtomicI64, config: &LongPollConfig) -> Duration {
-    let next = next_timer_ms.load(Ordering::SeqCst);
-    let now = now_millis();
     
-    if next > 0 && next > now {
-        // Sleep until timer (minus grace period)
-        let until_timer_ms = (next - now) as u64;
-        let until_timer = Duration::from_millis(
-            until_timer_ms.saturating_sub(config.timer_grace_ms)
-        );
-        until_timer.min(config.fallback_interval)
-    } else if next > 0 {
-        // Timer already due
-        Duration::ZERO
-    } else {
-        // No pending timer - use fallback
-        config.fallback_interval
+    fn earliest_timer(&self) -> Option<Instant> {
+        let orch = self.orch_heap.peek().map(|r| r.0);
+        let worker = self.worker_heap.peek().map(|r| r.0);
+        match (orch, worker) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
     }
 }
 ```
 
-### 5. Fetch Methods
-
-The key insight: **only send wake token after waking from recv()**, not during tight fetch loops.
+### Handling NOTIFY
 
 ```rust
-#[async_trait::async_trait]
-impl Provider for PostgresProvider {
+impl Notifier {
+    fn handle_notify(&mut self, notification: PgNotification) {
+        let visible_at_ms: i64 = notification.payload()
+            .parse()
+            .unwrap_or(0);  // 0 = treat as immediate
+        
+        let now_ms = current_epoch_ms();
+        let window_end_ms = instant_to_epoch_ms(self.next_refresh);
+        
+        let is_orch = notification.channel().ends_with("_orch_work");
+        
+        if visible_at_ms <= now_ms {
+            // Immediately visible → wake dispatchers now
+            // No grace period needed: NOTIFY only fires after INSERT commits,
+            // so the row is already queryable.
+            self.wake_dispatchers(is_orch);
+        } else if visible_at_ms <= window_end_ms {
+            // Future timer within current window → add to timer heap
+            // Add 100ms grace period AFTER visible_at to account for:
+            // - Clock skew between application and database
+            // - Ensure row is definitely visible when we query
+            let fire_at_ms = visible_at_ms + self.config.timer_grace_period.as_millis() as i64;
+            let fire_at = epoch_ms_to_instant(fire_at_ms);
+            
+            if is_orch {
+                self.orch_heap.push(Reverse(fire_at));
+            } else {
+                self.worker_heap.push(Reverse(fire_at));
+            }
+        }
+        // Beyond window → ignore, refresh will catch it
+    }
+    
+    fn wake_dispatchers(&self, is_orch: bool) {
+        if is_orch {
+            self.orch_notify.notify_waiters();
+        } else {
+            self.worker_notify.notify_waiters();
+        }
+    }
+}
+```
+
+### Timer Management
+
+```rust
+impl Notifier {
+    fn pop_and_wake_expired_timers(&mut self) {
+        let now = Instant::now();
+        
+        // Pop expired orchestrator timers
+        while let Some(Reverse(fire_at)) = self.orch_heap.peek() {
+            if *fire_at <= now {
+                self.orch_heap.pop();
+                self.orch_notify.notify_waiters();
+            } else {
+                break;
+            }
+        }
+        
+        // Pop expired worker timers
+        while let Some(Reverse(fire_at)) = self.worker_heap.peek() {
+            if *fire_at <= now {
+                self.worker_heap.pop();
+                self.worker_notify.notify_waiters();
+            } else {
+                break;
+            }
+        }
+    }
+}
+```
+
+### Refresh Query (Non-Blocking)
+
+The refresh query is spawned as a separate task to avoid blocking the main loop during slow queries (up to 5s latency).
+
+```rust
+impl Notifier {
+    fn maybe_start_refresh(&mut self) {
+        // Skip if refresh already in progress or not yet due
+        if self.pending_refresh.is_some() || Instant::now() < self.next_refresh {
+            return;
+        }
+        
+        let (tx, rx) = oneshot::channel();
+        self.pending_refresh = Some(rx);
+        
+        let pool = self.pool.clone();
+        let schema = self.schema_name.clone();
+        let window_end = self.next_refresh + self.config.notifier_poll_interval;
+        let window_end_ts = instant_to_timestamp(window_end);
+        
+        tokio::spawn(async move {
+            // Query for upcoming timers in both queues
+            let orch_timers = sqlx::query_scalar::<_, i64>(&format!(
+                "SELECT (EXTRACT(EPOCH FROM visible_at) * 1000)::BIGINT
+                 FROM {}.orchestrator_queue
+                 WHERE visible_at > NOW()
+                   AND visible_at <= $1
+                   AND locked_until IS NULL",
+                schema
+            ))
+            .bind(window_end_ts)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+            
+            let worker_timers = sqlx::query_scalar::<_, i64>(&format!(
+                "SELECT (EXTRACT(EPOCH FROM visible_at) * 1000)::BIGINT
+                 FROM {}.worker_queue
+                 WHERE visible_at > NOW()
+                   AND visible_at <= $1
+                   AND locked_until IS NULL",
+                schema
+            ))
+            .bind(window_end_ts)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+            
+            // Send result (ignore error if receiver dropped)
+            let _ = tx.send(RefreshResult { orch_timers, worker_timers });
+        });
+    }
+    
+    fn handle_refresh_result(&mut self, result: RefreshResult) {
+        let now = Instant::now();
+        let now_ms = current_epoch_ms();
+        let grace_ms = self.config.timer_grace_period.as_millis() as i64;
+        
+        // Add orchestrator timers
+        for visible_at_ms in result.orch_timers {
+            let fire_at_ms = visible_at_ms + grace_ms;
+            if fire_at_ms > now_ms {
+                let delay = Duration::from_millis((fire_at_ms - now_ms) as u64);
+                self.orch_heap.push(Reverse(now + delay));
+            }
+        }
+        
+        // Add worker timers
+        for visible_at_ms in result.worker_timers {
+            let fire_at_ms = visible_at_ms + grace_ms;
+            if fire_at_ms > now_ms {
+                let delay = Duration::from_millis((fire_at_ms - now_ms) as u64);
+                self.worker_heap.push(Reverse(now + delay));
+            }
+        }
+        
+        // pending_refresh already set to None in select! branch
+        self.next_refresh = now + self.config.notifier_poll_interval;
+    }
+}
+```
+
+### Reconnection Handling
+
+```rust
+impl Notifier {
+    async fn handle_reconnect(&mut self) {
+        // Backoff and reconnect
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        
+        if let Ok(listener) = PgListener::connect_with(&self.pool).await {
+            self.pg_listener = listener;
+            
+            let _ = self.pg_listener
+                .listen(&format!("{}_orch_work", self.schema_name))
+                .await;
+            let _ = self.pg_listener
+                .listen(&format!("{}_worker_work", self.schema_name))
+                .await;
+            
+            // Wake all dispatchers to catch any missed NOTIFYs
+            self.orch_notify.notify_waiters();
+            self.worker_notify.notify_waiters();
+            
+            // Force a refresh to rebuild timer heaps
+            self.next_refresh = Instant::now();
+        }
+    }
+}
+```
+
+## Dispatcher Integration
+
+The dispatcher's fetch methods are modified to wait for a wake signal or timeout:
+
+```rust
+impl PostgresProvider {
     async fn fetch_orchestration_item(
         &self,
         lock_timeout: Duration,
         poll_timeout: Duration,
     ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
-        // 1. Try immediate fetch (tight loop - no wake token!)
-        //    If runtime is calling us repeatedly, we're already awake
-        if let Some(item) = self.try_fetch_orchestration_immediate(lock_timeout).await? {
-            self.clear_orch_timer();
-            return Ok(Some(item));
-        }
         
-        // 2. If long-poll disabled, return immediately
-        let Some(ref lp) = self.long_poll else {
-            return Ok(None);
-        };
-        
-        // 3. Queue empty - wait for wake signal
-        let _ = tokio::time::timeout(poll_timeout, lp.orch_wake_rx.recv()).await;
-        
-        // 4. Just woke up - fetch and propagate wake chain if found work
-        let result = self.try_fetch_orchestration_immediate(lock_timeout).await?;
+        // Step 1: Try to fetch immediately
+        let result = self.do_fetch_orchestration_item(lock_timeout).await?;
         if result.is_some() {
-            // Found work after waking - wake ONE more dispatcher to help
-            let _ = lp.orch_wake_tx.try_send(());
-            self.clear_orch_timer();
+            return Ok(result);
         }
-        Ok(result)
+        
+        // Step 2: No work - wait for wake signal or timeout
+        if let Some(notify) = &self.orch_notify {
+            select! {
+                _ = notify.notified() => {
+                    // Woken by notifier (NOTIFY or timer)
+                }
+                _ = tokio::time::sleep(poll_timeout) => {
+                    // Timeout - safety net polling
+                }
+            }
+            
+            // Step 3: Fetch again after wake
+            return self.do_fetch_orchestration_item(lock_timeout).await;
+        }
+        
+        // Long-poll disabled - return immediately (old behavior)
+        Ok(None)
     }
     
     async fn fetch_work_item(
@@ -458,210 +592,721 @@ impl Provider for PostgresProvider {
         lock_timeout: Duration,
         poll_timeout: Duration,
     ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
-        // 1. Try immediate fetch (tight loop - no wake token!)
-        if let Some(item) = self.try_fetch_work_immediate(lock_timeout).await? {
-            return Ok(Some(item));
-        }
         
-        // 2. If long-poll disabled, return immediately
-        let Some(ref lp) = self.long_poll else {
-            return Ok(None);
-        };
-        
-        // 3. Queue empty - wait for wake signal
-        let _ = tokio::time::timeout(poll_timeout, lp.worker_wake_rx.recv()).await;
-        
-        // 4. Just woke up - fetch and propagate wake chain if found work
-        let result = self.try_fetch_work_immediate(lock_timeout).await?;
+        // Same pattern as fetch_orchestration_item
+        let result = self.do_fetch_work_item(lock_timeout).await?;
         if result.is_some() {
-            let _ = lp.worker_wake_tx.try_send(());
+            return Ok(result);
         }
-        Ok(result)
+        
+        if let Some(notify) = &self.worker_notify {
+            select! {
+                _ = notify.notified() => {}
+                _ = tokio::time::sleep(poll_timeout) => {}
+            }
+            return self.do_fetch_work_item(lock_timeout).await;
+        }
+        
+        Ok(None)
     }
+}
+```
+
+## Timing Analysis
+
+### NOTIFY Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         NOTIFY Decision Tree                                 │
+│                                                                             │
+│   NOTIFY received with visible_at:                                          │
+│                                                                             │
+│                         visible_at                                          │
+│                             │                                               │
+│                             ▼                                               │
+│                 ┌───────────────────────┐                                   │
+│                 │  visible_at <= now?   │                                   │
+│                 └───────────┬───────────┘                                   │
+│                             │                                               │
+│                ┌────────────┴────────────┐                                  │
+│                ▼                         ▼                                  │
+│              YES                        NO                                  │
+│                │                         │                                  │
+│                ▼                         ▼                                  │
+│   ┌─────────────────────┐   ┌─────────────────────────────┐                │
+│   │ Wake dispatchers    │   │ visible_at <= next_refresh? │                │
+│   │ immediately         │   └─────────────┬───────────────┘                │
+│   └─────────────────────┘                 │                                │
+│                              ┌────────────┴────────────┐                   │
+│                              ▼                         ▼                   │
+│                            YES                        NO                   │
+│                              │                         │                   │
+│                              ▼                         ▼                   │
+│                 ┌──────────────────────┐   ┌─────────────────────┐         │
+│                 │ heap.push(           │   │ Ignore              │         │
+│                 │   visible_at + 100ms │   │ (refresh will       │         │
+│                 │ )                    │   │  catch it later)    │         │
+│                 └──────────────────────┘   └─────────────────────┘         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Timer Buffer (100ms Grace Period)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Timer Fire Sequence                                  │
+│                                                                             │
+│   visible_at          visible_at + 100ms         fetch query                │
+│       │                      │                       │                      │
+│       ▼                      ▼                       ▼                      │
+│   ────┼──────────────────────┼───────────────────────┼───────►              │
+│       │                      │                       │                      │
+│       │   ◄── grace ──►      │                       │                      │
+│       │      period          │                       │                      │
+│       │      100ms           │                       │                      │
+│       │                      │                       │                      │
+│    Row becomes            Timer fires,          SELECT succeeds             │
+│    queryable              wake dispatchers      (row definitely visible)    │
+│                                                                             │
+│   Why 100ms buffer?                                                         │
+│   • Clock skew between application and database                             │
+│   • Network latency                                                         │
+│   • Transaction commit timing                                               │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Timeline Examples
+
+```
+notifier_poll_interval = 60s
+timer_grace_period = 100ms
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Case 1: Immediate Work
+──────────────────────
+
+t=0:      INSERT(visible_at=NOW) → NOTIFY(payload=now_ms)
+t=0+ε:    Notifier: visible_at <= now → wake dispatchers
+t=0+ε:    Dispatcher wakes, fetches work ✓
+
+Latency: <1ms
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Case 2: Timer Within Window
+───────────────────────────
+
+t=0:      Notifier starts, next_refresh = 60s
+t=5s:     INSERT(visible_at = t+25s = 30s) → NOTIFY(payload=30000)
+          Notifier: 30s > now, 30s <= 60s → heap.push(30.1s)
+t=30.1s:  Timer fires → wake dispatchers
+t=30.1s:  Dispatcher fetches work ✓
+
+Latency: 100ms (grace period)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Case 3: Timer Beyond Window
+───────────────────────────
+
+t=0:      Notifier starts, next_refresh = 60s
+t=10s:    INSERT(visible_at = t+70s = 80s) → NOTIFY(payload=80000)
+          Notifier: 80s > 60s → IGNORE
+t=60s:    Refresh query: visible_at in (60s, 120s)
+          Finds visible_at=80s → heap.push(80.1s)
+          next_refresh = 120s
+t=80.1s:  Timer fires → wake dispatchers ✓
+
+Latency: 100ms (grace period)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Case 4: Work Exists Before Notifier Starts
+──────────────────────────────────────────
+
+t=-5s:    INSERT(visible_at = now) → work is immediately visible
+t=0:      Notifier starts
+          Refresh query: visible_at in (0, 60s)
+          (visible_at = -5s not in range, missed by query)
+t=0.5s:   Dispatcher starts
+          do_fetch() → FINDS THE WORK! ✓
+
+Key: Dispatcher always calls do_fetch() first, catches existing work.
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Case 5: NOTIFY Lost (All Dispatchers Busy)
+──────────────────────────────────────────
+
+t=0:      All dispatchers processing work
+t=1s:     INSERT(visible_at=now) → NOTIFY
+          Notifier: notify_waiters() → no waiters, "lost"
+t=2s:     Dispatcher 1 finishes processing
+          Calls fetch_orchestration_item()
+          Step 1: do_fetch() → FINDS THE WORK! ✓
+
+Key: do_fetch() always runs first, notification is optimization only.
+
+═══════════════════════════════════════════════════════════════════════════════
+```
+
+## Failure Modes and Resilience
+
+### Litmus Test: Notifier Thread Dead
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│   Q: Do dispatchers function correctly if notifier thread is dead?          │
+│                                                                             │
+│   A: YES - they degrade to poll_timeout polling.                            │
+│                                                                             │
+│   Dispatcher fetch():                                                       │
+│     1. do_fetch() → None                                                    │
+│     2. select! {                                                            │
+│          notify.notified() => {}  ← never fires (thread dead)               │
+│          sleep(poll_timeout) => {} ← fires after poll_timeout               │
+│        }                                                                    │
+│     3. do_fetch() → might find work                                         │
+│                                                                             │
+│   Result: Polls every poll_timeout (default 5 min) instead of on-demand.    │
+│   Work is never lost, just detected with higher latency.                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Resilience Summary
+
+| Failure Mode | Behavior | Impact |
+|--------------|----------|--------|
+| Notifier thread dead | Fall back to poll_timeout | Latency up to poll_timeout |
+| NOTIFY connection drops | Reconnect + wake all + refresh | Brief delay, then normal |
+| NOTIFY lost (no waiters) | do_fetch() finds work anyway | No impact |
+| Refresh query slow (5s) | Non-blocking, loop continues | No impact on NOTIFY/timers |
+| Refresh query fails | Retry on next interval | Timers may be delayed |
+| Duplicate timers in heap | Extra wake, dispatcher polls | Harmless (slight overhead) |
+
+### Why `tokio::sync::Notify` is Sufficient
+
+| Concern | Answer |
+|---------|--------|
+| What if notification is lost? | `do_fetch()` runs first every loop, finds visible work |
+| What about buffering? | Not needed - work is in DB, not in channel |
+| Thundering herd? | Yes, all dispatchers wake, but `SKIP LOCKED` handles contention |
+| Memory usage? | Zero buffering, minimal overhead |
+
+## Query Load Analysis
+
+### Before (Short Polling)
+
+```
+4 dispatchers × 20 polls/sec × 2 queues = 160 queries/sec when idle
+```
+
+### After (Long Polling)
+
+```
+Idle state:
+- 0 polls from dispatchers (waiting on notify)
+- 1 refresh query per 60s = 0.017 queries/sec per queue
+- Total: ~0.03 queries/sec
+
+Active state:
+- NOTIFY triggers immediate wake
+- 1 query per work item processed
+- Same as before for actual work
+```
+
+### Improvement
+
+```
+Idle: 160 q/s → 0.03 q/s = 99.98% reduction
+Active: Same query efficiency (one fetch per work item)
+```
+
+## Provider Structure Changes
+
+```rust
+pub struct PostgresProvider {
+    pool: Arc<PgPool>,
+    schema_name: String,
+    
+    // Long-poll infrastructure (None if disabled)
+    orch_notify: Option<Arc<Notify>>,
+    worker_notify: Option<Arc<Notify>>,
+    notifier_handle: Option<JoinHandle<()>>,
+    
+    // Config
+    long_poll_config: LongPollConfig,
 }
 
 impl PostgresProvider {
-    fn clear_orch_timer(&self) {
-        if let Some(ref lp) = self.long_poll {
-            lp.next_orch_timer_ms.store(0, Ordering::SeqCst);
+    /// Create provider with default config (long-poll disabled)
+    pub async fn new(database_url: &str) -> Result<Self> {
+        Self::new_with_options(database_url, None, LongPollConfig::default()).await
+    }
+    
+    /// Create provider with long-polling enabled
+    pub async fn new_with_long_poll(database_url: &str) -> Result<Self> {
+        let config = LongPollConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        Self::new_with_options(database_url, None, config).await
+    }
+    
+    /// Create provider with full configuration
+    pub async fn new_with_options(
+        database_url: &str,
+        schema_name: Option<&str>,
+        config: LongPollConfig,
+    ) -> Result<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .connect(database_url)
+            .await?;
+        
+        let schema = schema_name.unwrap_or("public").to_string();
+        
+        let (orch_notify, worker_notify, notifier_handle) = if config.enabled {
+            let orch_notify = Arc::new(Notify::new());
+            let worker_notify = Arc::new(Notify::new());
+            
+            let notifier = Notifier::new(
+                pool.clone(),
+                schema.clone(),
+                orch_notify.clone(),
+                worker_notify.clone(),
+                config.clone(),
+            ).await?;
+            
+            let handle = tokio::spawn(async move {
+                notifier.run().await;
+            });
+            
+            (Some(orch_notify), Some(worker_notify), Some(handle))
+        } else {
+            (None, None, None)
+        };
+        
+        Ok(Self {
+            pool: Arc::new(pool),
+            schema_name: schema,
+            orch_notify,
+            worker_notify,
+            notifier_handle,
+            long_poll_config: config,
+        })
+    }
+}
+
+impl Drop for PostgresProvider {
+    fn drop(&mut self) {
+        if let Some(handle) = self.notifier_handle.take() {
+            handle.abort();
         }
     }
 }
 ```
 
-### 6. Clone Implementation
+## Summary
 
-```rust
-impl Clone for PostgresProvider {
-    fn clone(&self) -> Self {
-        Self {
-            pool: self.pool.clone(),
-            schema_name: self.schema_name.clone(),
-            long_poll: self.long_poll.as_ref().map(|lp| LongPollState {
-                config: lp.config.clone(),
-                orch_wake_tx: lp.orch_wake_tx.clone(),
-                orch_wake_rx: lp.orch_wake_rx.clone(),  // async_channel Receiver is Clone
-                worker_wake_tx: lp.worker_wake_tx.clone(),
-                worker_wake_rx: lp.worker_wake_rx.clone(),
-                next_orch_timer_ms: lp.next_orch_timer_ms.clone(),
-                next_worker_timer_ms: lp.next_worker_timer_ms.clone(),
-                orch_timer_notify: lp.orch_timer_notify.clone(),
-                worker_timer_notify: lp.worker_timer_notify.clone(),
-                // Handles are not cloned - only original owns them
-                listener_handle: /* dummy or Arc-wrapped */,
-                orch_timer_handle: /* dummy or Arc-wrapped */,
-                worker_timer_handle: /* dummy or Arc-wrapped */,
-            }),
-        }
-    }
-}
-```
+| Component | Responsibility |
+|-----------|----------------|
+| **Database triggers** | Fire NOTIFY with visible_at on INSERT |
+| **Notifier thread** | Listen for NOTIFY, manage timer heap, wake dispatchers |
+| **Timer heap** | Track upcoming visible_at times, fire at +100ms grace |
+| **Refresh query** | Periodic safety net, catch missed NOTIFYs, rebuild heap |
+| **Dispatcher** | fetch() → wait(notify OR timeout) → fetch() |
+| **poll_timeout** | Ultimate safety net, graceful degradation |
 
-## Why Not Fetch-in-Trigger?
+### Key Design Properties
 
-One might ask: can the trigger call `fetch_orchestration_item` and send the locked item via NOTIFY payload?
+1. **Correctness independent of notifier** - Dispatchers work if notifier dies
+2. **No work lost** - Work is in DB, notifications are optimization
+3. **Bounded memory** - Timer heap only tracks within refresh window
+4. **Non-blocking refresh** - Slow queries don't block NOTIFY handling
+5. **Graceful degradation** - Falls back to poll_timeout polling
+6. **Simple dispatchers** - All timing logic in notifier thread
 
-**No**, because:
-
-| Issue | Problem |
-|-------|---------|
-| **NOTIFY is broadcast** | All nodes receive every NOTIFY. Pre-locking sends token to everyone, but only one can use it. |
-| **Transaction timing** | Trigger runs inside INSERT transaction. Lock isn't visible until COMMIT. |
-| **Payload size limit** | pg_notify limited to ~8KB. OrchestrationItem with history can exceed this. |
-| **Lock ownership** | Trigger doesn't know which dispatcher will win. Can't pre-assign. |
-
-The current design is optimal:
-- NOTIFY wakes ONE dispatcher (via channel)
-- That dispatcher acquires lock via `FOR UPDATE SKIP LOCKED`
-- Clean transaction boundaries
-
-## Wake Chain Dynamics
-
-### Single Node - Burst of Work (100 items)
-
-```
-T+0    Queue: [1,2,3...100], All dispatchers waiting
-       NOTIFY arrives → Listener sends 1 token
-
-T+1    D1 wakes (recv), fetches item1, sends 1 token
-       D1 returns item1 to runtime
-       D2 wakes (recv), fetches item2, sends 1 token
-
-T+2    D1: runtime calls fetch() → immediate path → item3 (no token!)
-       D2 returns item2 to runtime
-       D3 wakes (recv), fetches item4, sends 1 token
-
-T+3    D1, D2: tight loop fetching (no tokens)
-       D3 returns item4
-       D4 wakes (recv), fetches item5, sends 1 token (to channel)
-
-T+4    All 4 dispatchers in tight fetch loops
-       Channel has 1 token
-       No more tokens sent!
-
-T+5+   D1→item6, D2→item7, D3→item8, D4→item9 (parallel, tight loops)
-       ... continues until queue empty ...
-
-T+100  Queue empty
-       D1 immediate fetch → nothing → wait on recv()
-       D1 gets token from channel, fetches → nothing, sends 1 token
-       D2 immediate fetch → nothing → wait on recv()
-       D2 gets token, fetches → nothing, sends 1 token
-       ... chain winds down, all waiting ...
-
-Total tokens: ~8 (4 initial wake chain + ~4 wind-down)
-NOT 100!
-```
-
-### Sustained Load
-
-Under sustained load, all dispatchers stay in tight fetch loops:
-- Immediate fetch path succeeds → no tokens sent
-- All dispatchers continuously fetching and processing
-- **Zero token overhead** - system is self-sustaining
-- Only NOTIFY needed at start, then pure tight loops
-
-### Returning to Idle
-
-When queue empties:
-- Immediate fetch returns None → dispatcher waits on recv()
-- Tokens in channel (at most ~4) get consumed
-- Each consumer finds nothing, may send one more token
-- Chain winds down in O(dispatcher_count) fetches
-- All dispatchers waiting, channel empty
-
-## Multi-Node Behavior
-
-| Event | Behavior |
-|-------|----------|
-| New immediate work | NOTIFY → All nodes receive → Each node: ONE dispatcher wakes |
-| Wake chain | Each node's dispatchers wake each other independently |
-| Timer scheduled | NOTIFY → All nodes update `next_timer_ms` |
-| Timer expires | Each node's timer task wakes ONE dispatcher |
-| N nodes | N queries initially, then wake chains within each node |
-| Winner | `FOR UPDATE SKIP LOCKED` → one wins, others find nothing and chain stops |
-
-The wake chain is **per-node**. Cross-node coordination happens via the database (`SKIP LOCKED`).
-
-## Failure Modes
-
-| Failure | Behavior |
-|---------|----------|
-| Listener disconnects | Auto-reconnect after 1s, timer task continues sending fallbacks |
-| NOTIFY lost | Fallback timeout catches it (60s default) |
-| Timer task crash | Restart via supervision (or combined with listener task) |
-| Channel full | `try_send` drops token, but subsequent timer/fallback will retry |
-
-The fallback interval is the ultimate safety net.
-
-## Performance Comparison
-
-| Configuration | Idle Load (4 dispatchers) | Wake Latency | Notes |
-|---------------|---------------------------|--------------|-------|
-| Short-poll (50ms) | 160 q/s | 0-50ms avg | Current default |
-| Short-poll (1s) | 8 q/s | 0-1000ms avg | Simple tuning |
-| **Long-poll** | **~0.07 q/s** | **<5ms** | This design |
-
-*Idle load = 4 dispatchers × (1 query / 60s fallback) = 0.067 q/s*
-
-## Dependencies
-
-Add to `Cargo.toml`:
-
-```toml
-[dependencies]
-async-channel = "2.0"  # MPMC channel with Clone receiver
-```
+---
 
 ## Test Plan
 
 ### Unit Tests
 
-1. **Trigger creation**: Verify triggers exist after migration
-2. **NOTIFY emission**: Insert row, verify notification received
-3. **Payload parsing**: Verify `visible_at_ms` correctly parsed
+#### 1. Notifier NOTIFY Handling
+
+| Test | Setup | Action | Expected |
+|------|-------|--------|----------|
+| `notify_immediate_work_wakes_dispatchers` | Notifier running | NOTIFY with visible_at = now | `notify_waiters()` called immediately |
+| `notify_future_timer_adds_to_heap` | Notifier running, next_refresh = 60s | NOTIFY with visible_at = now + 30s | Timer added to heap at 30.1s |
+| `notify_beyond_window_ignored` | Notifier running, next_refresh = 60s | NOTIFY with visible_at = now + 90s | Timer NOT added (refresh will catch) |
+| `notify_invalid_payload_treated_as_immediate` | Notifier running | NOTIFY with payload = "garbage" | `notify_waiters()` called (default to 0) |
+| `notify_empty_payload_treated_as_immediate` | Notifier running | NOTIFY with payload = "" | `notify_waiters()` called |
+
+#### 2. Timer Heap Management
+
+| Test | Setup | Action | Expected |
+|------|-------|--------|----------|
+| `timer_fires_at_visible_at_plus_grace` | Timer at t=10s in heap | Advance to t=10.1s | `notify_waiters()` called |
+| `timer_does_not_fire_early` | Timer at t=10s in heap | Advance to t=9.9s | No wake |
+| `multiple_timers_fire_in_order` | Timers at t=5s, t=10s, t=15s | Advance time | Wakes at 5.1s, 10.1s, 15.1s |
+| `expired_timers_popped_in_batch` | Timers at t=5s, t=6s, t=7s | Advance to t=10s | All three fire, heap empty |
+| `orch_and_worker_timers_separate` | Orch timer at t=5s, worker at t=10s | Advance time | Correct notify channel woken |
+
+#### 3. Refresh Query
+
+| Test | Setup | Action | Expected |
+|------|-------|--------|----------|
+| `refresh_queries_correct_window` | next_refresh = now | Trigger refresh | Query for visible_at in (now, now+60s) |
+| `refresh_adds_timers_to_heap` | DB has timers at t+10s, t+30s | Refresh completes | Both timers in heap |
+| `refresh_skips_already_passed_timers` | DB has timer at t-5s | Refresh completes | Timer NOT added to heap |
+| `refresh_is_non_blocking` | - | Start refresh, receive NOTIFY | NOTIFY processed immediately |
+| `refresh_updates_next_refresh_time` | next_refresh = t | Refresh completes | next_refresh = t + 60s |
+| `concurrent_refresh_prevented` | Refresh in progress | Trigger refresh again | Second refresh ignored |
+
+#### 4. Dispatcher Fetch Logic
+
+| Test | Setup | Action | Expected |
+|------|-------|--------|----------|
+| `fetch_returns_immediately_when_work_exists` | Work in queue | Call fetch() | Returns work, no wait |
+| `fetch_waits_for_notify_when_no_work` | No work, notify channel | Call fetch() | Blocks until notify |
+| `fetch_times_out_after_poll_timeout` | No work, no notify | Call fetch(poll_timeout=1s) | Returns None after 1s |
+| `fetch_works_without_notify_channel` | Long-poll disabled | Call fetch() | Returns immediately (old behavior) |
+| `fetch_finds_work_after_wake` | No work initially | Insert work, notify, check fetch | Returns the new work |
 
 ### Integration Tests
 
-4. **Immediate wake**: Insert work → dispatcher wakes < 10ms
-5. **Timer wake**: Insert future timer → dispatcher wakes at correct time
-6. **Competing consumer**: 4 dispatchers, 1 work item → only 1 queries DB
-7. **Fallback**: Disable NOTIFY → still wakes within fallback interval
-8. **Timer update**: Schedule timer, then earlier timer → wakes at earlier time
+#### 5. End-to-End NOTIFY Flow
 
-### Stress Tests
+| Test | Setup | Action | Expected |
+|------|-------|--------|----------|
+| `e2e_immediate_work_detected` | Provider with long-poll | INSERT into orch queue | Dispatcher wakes within 100ms |
+| `e2e_timer_fires_correctly` | Provider with long-poll | INSERT with visible_at = now + 5s | Dispatcher wakes at 5.1s |
+| `e2e_multiple_dispatchers_wake` | 3 dispatchers waiting | INSERT immediate work | All 3 wake, 1 gets work |
+| `e2e_worker_and_orch_separate` | Dispatchers for both queues | INSERT into worker queue | Only worker dispatchers wake |
 
-9. **Throughput**: Verify no regression vs short-polling
-10. **Idle load**: Measure query count over 60s idle period
+#### 6. Resilience Tests
 
-## Summary
+| Test | Setup | Action | Expected |
+|------|-------|--------|----------|
+| `resilience_notifier_dead` | Kill notifier thread | INSERT work, wait poll_timeout | Dispatcher finds work via timeout |
+| `resilience_connection_drop` | Drop PgListener connection | Wait for reconnect, INSERT | Work detected after reconnect |
+| `resilience_notify_during_busy` | All dispatchers processing | INSERT immediate work | Next free dispatcher finds work |
+| `resilience_work_before_startup` | INSERT work before provider | Start provider | Dispatcher finds work on first fetch |
+| `resilience_slow_refresh_query` | Mock 5s query latency | NOTIFY during refresh | NOTIFY processed immediately |
 
-This design provides efficient push-based work detection with:
-- **LISTEN/NOTIFY** for immediate work → ONE dispatcher wakes initially
-- **Timer Task** for scheduled work → ONE dispatcher wakes initially
-- **Wake chain** for parallel draining → finding work wakes another dispatcher
-- **Fallback interval** as safety net
-- **Self-regulating** - scales dispatchers to match queue depth automatically
-- **Competing consumer** pattern eliminates thundering herd
-- **Under load**: All dispatchers in tight fetch loops, no NOTIFY overhead
+#### 7. Timer Precision Tests
 
+| Test | Setup | Action | Expected |
+|------|-------|--------|----------|
+| `timer_precision_100ms_grace` | - | INSERT with visible_at = now + 1s | Wake at 1.1s ± 50ms |
+| `timer_precision_many_timers` | 100 timers at 100ms intervals | Wait for all | All fire within 50ms of expected |
+| `timer_precision_under_load` | High insert rate | Measure timer accuracy | 95th percentile < 200ms error |
+
+### Performance Tests
+
+#### 8. Query Load Verification
+
+| Test | Setup | Action | Expected |
+|------|-------|--------|----------|
+| `perf_idle_query_count` | Provider with long-poll, idle | Count queries over 5 min | < 10 queries total |
+| `perf_no_polling_when_idle` | Provider with long-poll, idle | Monitor for 1 min | 0 fetch queries |
+| `perf_immediate_work_latency` | Provider with long-poll | Measure INSERT to fetch time | p99 < 50ms |
+
+#### 9. High Query Latency Tests
+
+These tests verify the system handles slow database queries gracefully (up to 5s latency).
+
+| Test | Setup | Action | Expected |
+|------|-------|--------|----------|
+| `latency_refresh_does_not_block_notify` | Inject 5s refresh query delay | NOTIFY during refresh | NOTIFY processed < 100ms |
+| `latency_refresh_does_not_block_timers` | Inject 5s refresh query delay | Timer should fire during refresh | Timer fires on schedule |
+| `latency_multiple_refreshes_not_stacked` | Inject 3s delay, 1s refresh interval | Wait 5s | Only 1 refresh query runs at a time |
+| `latency_refresh_result_applied_correctly` | Inject 2s delay | Check heap after refresh | Timers added correctly despite delay |
+| `latency_stale_refresh_data_handled` | Inject 5s delay | Insert timer at t+3s during query | Timer caught by NOTIFY, not duplicate |
+| `latency_fetch_timeout_independent` | Inject 5s refresh delay | Dispatcher with 1s poll_timeout | Dispatcher times out correctly |
+
+**Latency Simulation Approach:**
+
+```rust
+/// Wrapper to inject latency into database queries
+struct LatencyInjector {
+    base_pool: PgPool,
+    refresh_delay: AtomicU64,  // milliseconds
+    fetch_delay: AtomicU64,
+}
+
+impl LatencyInjector {
+    fn set_refresh_delay(&self, delay: Duration) {
+        self.refresh_delay.store(delay.as_millis() as u64, Ordering::Relaxed);
+    }
+    
+    fn set_fetch_delay(&self, delay: Duration) {
+        self.fetch_delay.store(delay.as_millis() as u64, Ordering::Relaxed);
+    }
+    
+    async fn execute_refresh_query(&self, query: &str) -> Result<Vec<i64>> {
+        let delay = self.refresh_delay.load(Ordering::Relaxed);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        sqlx::query_scalar(query).fetch_all(&self.base_pool).await
+    }
+}
+```
+
+**Test Scenarios with Latency:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              Scenario: 5s Refresh Latency with Concurrent NOTIFY            │
+│                                                                             │
+│   t=0:      Refresh starts (will take 5s)                                   │
+│   t=1s:     NOTIFY arrives (immediate work)                                 │
+│             → Main loop NOT blocked                                         │
+│             → notify_waiters() called immediately ✓                         │
+│   t=2s:     NOTIFY arrives (timer at t+3s = 5s)                             │
+│             → Timer added to heap for t=5.1s ✓                              │
+│   t=5s:     Refresh completes                                               │
+│             → Process results, schedule next refresh                        │
+│   t=5.1s:   Timer fires → wake dispatchers ✓                                │
+│                                                                             │
+│   Verification:                                                             │
+│   • NOTIFY at t=1s woke dispatchers at t=1s (not t=5s)                      │
+│   • Timer at t=5s fired at t=5.1s (not delayed by refresh)                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              Scenario: Slow Fetch Query (Dispatcher Side)                    │
+│                                                                             │
+│   t=0:      Dispatcher calls fetch(), starts query (will take 3s)           │
+│   t=1s:     NOTIFY arrives                                                  │
+│             → Dispatcher still in query, not waiting on notify              │
+│             → Notification "lost" for this dispatcher                       │
+│   t=3s:     Fetch query completes → returns work                            │
+│   t=3s+ε:   Dispatcher returns, calls fetch() again                         │
+│             → do_fetch() finds any new work from t=1s ✓                     │
+│                                                                             │
+│   Key: Slow fetch is fine because:                                          │
+│   1. Dispatcher will call do_fetch() again after returning                  │
+│   2. Work is in DB, will be found on next fetch                             │
+│   3. Other dispatchers can pick up work                                     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 10. Stress Tests
+
+| Test | Setup | Action | Expected |
+|------|-------|--------|----------|
+| `stress_high_notify_rate` | Provider with long-poll | 1000 NOTIFY/sec for 1 min | No crashes, all work processed |
+| `stress_many_timers` | Provider with long-poll | INSERT 10000 timers, random visible_at | All fire correctly |
+| `stress_connection_flapping` | Provider with long-poll | Drop connection every 5s | Work still processed |
+
+#### 11. Clock Skew and Fault Injection Tests
+
+These tests verify correct behavior under clock anomalies and multi-node scenarios.
+
+| Test | Setup | Action | Expected |
+|------|-------|--------|----------|
+| `clock_skew_within_grace_period` | Mock clock 50ms ahead | Write timer, read from "other node" | Timer fires correctly (within grace) |
+| `clock_skew_exceeds_grace_period` | Mock clock 200ms behind | Write timer, advance, read | Timer may fire late; falls back to poll_timeout |
+| `clock_jump_forward_small` | Advance mock clock 50ms suddenly | Timer scheduled for near-future | Timer fires early; grace period absorbs |
+| `clock_jump_forward_large` | Advance mock clock 10s suddenly | Multiple pending timers | All pending timers fire immediately |
+| `clock_jump_backward` | Rewind mock clock 100ms | Timer scheduled | Timer delayed until clock catches up |
+| `multi_node_write_read` | Two providers (A, B) with offset clocks | A writes timer, B reads | Timer visible within grace period tolerance |
+
+**Fault Injection Scenarios:**
+
+| Test | Fault Injected | Expected Behavior |
+|------|----------------|-------------------|
+| `fault_notifier_panic` | Force panic in notifier thread | Dispatchers fall back to poll_timeout |
+| `fault_pg_listener_disconnect` | Close listener connection | Auto-reconnect, wake all, refresh heap |
+| `fault_refresh_query_timeout` | Query hangs for 30s | Main loop continues processing NOTIFY/timers |
+| `fault_refresh_query_error` | Query returns error | Retry on next interval, log warning |
+| `fault_notify_channel_full` | N/A (Notify has no buffer) | Implicit test - ensure no deadlock |
+| `fault_heap_corruption` | Insert timer with negative delay | Timer fires immediately (no crash) |
+| `fault_db_connection_pool_exhausted` | Max out pool connections | Refresh query waits, NOTIFY still works |
+
+**Clock Injection Implementation:**
+
+```rust
+/// Injectable clock for testing clock skew scenarios
+pub trait Clock: Send + Sync {
+    fn now_ms(&self) -> i64;
+}
+
+/// Real system clock (production)
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ms(&self) -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    }
+}
+
+/// Controllable clock for testing
+pub struct MockClock {
+    offset_ms: AtomicI64,  // Offset from real time
+    base: SystemClock,
+}
+
+impl MockClock {
+    pub fn new() -> Self {
+        Self {
+            offset_ms: AtomicI64::new(0),
+            base: SystemClock,
+        }
+    }
+    
+    /// Simulate clock skew (positive = ahead, negative = behind)
+    pub fn set_skew(&self, skew: Duration, ahead: bool) {
+        let ms = skew.as_millis() as i64;
+        self.offset_ms.store(if ahead { ms } else { -ms }, Ordering::SeqCst);
+    }
+    
+    /// Simulate sudden clock jump
+    pub fn jump(&self, amount: Duration, forward: bool) {
+        let delta = amount.as_millis() as i64;
+        if forward {
+            self.offset_ms.fetch_add(delta, Ordering::SeqCst);
+        } else {
+            self.offset_ms.fetch_sub(delta, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Clock for MockClock {
+    fn now_ms(&self) -> i64 {
+        self.base.now_ms() + self.offset_ms.load(Ordering::SeqCst)
+    }
+}
+```
+
+**Multi-Node Simulation:**
+
+```rust
+/// Simulate two nodes with different clocks
+#[tokio::test]
+async fn test_multi_node_clock_skew() {
+    let db_url = test_database_url();
+    
+    // Node A: 100ms behind
+    let clock_a = Arc::new(MockClock::new());
+    clock_a.set_skew(Duration::from_millis(100), false);
+    let provider_a = PostgresProvider::new_with_clock(&db_url, clock_a.clone()).await.unwrap();
+    
+    // Node B: Real time
+    let clock_b = Arc::new(MockClock::new());
+    let provider_b = PostgresProvider::new_with_clock(&db_url, clock_b.clone()).await.unwrap();
+    
+    // Node A schedules a timer for "5 seconds from now" (A's now)
+    // A's now is actually 4.9s in real time, so visible_at = real_now + 4.9s
+    provider_a.enqueue_orchestrator_work(
+        "test-instance",
+        WorkItem::TimerFired { instance: "test".into(), fire_at_ms: clock_a.now_ms() as u64 + 5000 },
+        None,
+    ).await.unwrap();
+    
+    // Node B checks visibility using its clock (real time)
+    // Timer should be visible at real_now + 4.9s, which is 100ms earlier than B expects
+    // Grace period (100ms) should absorb this skew
+    
+    // Wait 5s (real time) + grace period
+    tokio::time::sleep(Duration::from_millis(5100)).await;
+    
+    // Node B should find the work
+    let result = provider_b.fetch_orchestration_item(
+        Duration::from_secs(30),
+        Duration::from_secs(1),
+    ).await.unwrap();
+    
+    assert!(result.is_some(), "Timer should be visible despite 100ms clock skew");
+}
+```
+
+### Test Utilities
+
+```rust
+/// Test helper to advance time in notifier
+struct MockClock {
+    current: AtomicI64,
+}
+
+impl MockClock {
+    fn advance(&self, duration: Duration) {
+        self.current.fetch_add(duration.as_millis() as i64, Ordering::Relaxed);
+    }
+    
+    fn now_ms(&self) -> i64 {
+        self.current.load(Ordering::Relaxed)
+    }
+}
+
+/// Test helper to capture wake events
+struct WakeRecorder {
+    wakes: Mutex<Vec<(Instant, QueueType)>>,
+}
+
+impl WakeRecorder {
+    fn record(&self, queue_type: QueueType) {
+        self.wakes.lock().unwrap().push((Instant::now(), queue_type));
+    }
+    
+    fn count(&self) -> usize {
+        self.wakes.lock().unwrap().len()
+    }
+    
+    fn last_wake(&self) -> Option<(Instant, QueueType)> {
+        self.wakes.lock().unwrap().last().copied()
+    }
+}
+
+/// Test helper to simulate slow queries
+async fn with_query_delay<T>(delay: Duration, query: impl Future<Output = T>) -> T {
+    tokio::time::sleep(delay).await;
+    query.await
+}
+```
+
+### Test Configuration
+
+```rust
+/// Fast config for testing (shorter intervals)
+fn test_long_poll_config() -> LongPollConfig {
+    LongPollConfig {
+        enabled: true,
+        notifier_poll_interval: Duration::from_secs(5),  // 5s instead of 60s
+        timer_grace_period: Duration::from_millis(10),   // 10ms instead of 100ms
+    }
+}
+```
+
+### Test Execution Order
+
+1. **Unit tests first** - Fast, no database required for most
+2. **Integration tests** - Require PostgreSQL, use test schema
+3. **Resilience tests** - May be flaky, run with retries
+4. **Performance tests** - Run separately, require stable environment
+5. **Stress tests** - Run in CI nightly, not on every commit
+
+### Coverage Goals
+
+| Component | Target Coverage |
+|-----------|-----------------|
+| Notifier NOTIFY handling | 100% |
+| Timer heap operations | 100% |
+| Refresh query logic | 90% |
+| Dispatcher fetch paths | 100% |
+| Error handling / reconnect | 80% |
+| Edge cases (payload parsing) | 100% |

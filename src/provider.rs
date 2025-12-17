@@ -365,12 +365,15 @@ impl Provider for PostgresProvider {
             "output": metadata.output,
         });
 
+        let now_ms = Self::now_millis();
+
         for attempt in 0..=MAX_RETRIES {
             let result = sqlx::query(&format!(
-                "SELECT {}.ack_orchestration_item($1, $2, $3, $4, $5, $6)",
+                "SELECT {}.ack_orchestration_item($1, $2, $3, $4, $5, $6, $7)",
                 self.schema_name
             ))
             .bind(lock_token)
+            .bind(now_ms)
             .bind(execution_id as i64)
             .bind(&history_delta_json)
             .bind(&worker_items_json)
@@ -442,13 +445,15 @@ impl Provider for PostgresProvider {
         ignore_attempt: bool,
     ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
+        let now_ms = Self::now_millis();
         let delay_param: Option<i64> = delay.map(|d| d.as_millis() as i64);
 
         let instance_id = match sqlx::query_scalar::<_, String>(&format!(
-            "SELECT {}.abandon_orchestration_item($1, $2, $3)",
+            "SELECT {}.abandon_orchestration_item($1, $2, $3, $4)",
             self.schema_name
         ))
         .bind(lock_token)
+        .bind(now_ms)
         .bind(delay_param)
         .bind(ignore_attempt)
         .fetch_one(&*self.pool)
@@ -591,11 +596,14 @@ impl Provider for PostgresProvider {
             )
         })?;
 
+        let now_ms = Self::now_millis();
+
         sqlx::query(&format!(
-            "SELECT {}.enqueue_worker_work($1)",
+            "SELECT {}.enqueue_worker_work($1, $2)",
             self.schema_name
         ))
         .bind(work_item)
+        .bind(now_ms)
         .execute(&*self.pool)
         .await
         .map_err(|e| {
@@ -708,14 +716,17 @@ impl Provider for PostgresProvider {
             ProviderError::permanent("ack_worker", format!("Failed to serialize completion: {e}"))
         })?;
 
+        let now_ms = Self::now_millis();
+
         // Call stored procedure to atomically delete worker item and enqueue completion
         sqlx::query(&format!(
-            "SELECT {}.ack_worker($1, $2, $3)",
+            "SELECT {}.ack_worker($1, $2, $3, $4)",
             self.schema_name
         ))
         .bind(token)
         .bind(instance_id)
         .bind(completion_json)
+        .bind(now_ms)
         .execute(&*self.pool)
         .await
         .map_err(|e| {
@@ -812,13 +823,15 @@ impl Provider for PostgresProvider {
         ignore_attempt: bool,
     ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
+        let now_ms = Self::now_millis();
         let delay_param: Option<i64> = delay.map(|d| d.as_millis() as i64);
 
         match sqlx::query(&format!(
-            "SELECT {}.abandon_work_item($1, $2, $3)",
+            "SELECT {}.abandon_work_item($1, $2, $3, $4)",
             self.schema_name
         ))
         .bind(token)
+        .bind(now_ms)
         .bind(delay_param)
         .bind(ignore_attempt)
         .execute(&*self.pool)
@@ -1001,12 +1014,13 @@ impl Provider for PostgresProvider {
 
         // Call stored procedure to enqueue work
         sqlx::query(&format!(
-            "SELECT {}.enqueue_orchestrator_work($1, $2, $3, $4, $5, $6)",
+            "SELECT {}.enqueue_orchestrator_work($1, $2, $3, $4, $5, $6, $7)",
             self.schema_name
         ))
         .bind(instance_id)
         .bind(&work_item)
         .bind(visible_at)
+        .bind(now_ms)  // p_now_ms - for created_at
         .bind::<Option<String>>(None) // orchestration_name - NULL
         .bind::<Option<String>>(None) // orchestration_version - NULL
         .bind::<Option<i64>>(None) // execution_id - NULL
