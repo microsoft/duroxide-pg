@@ -232,7 +232,7 @@ Case 3: Node B writes timer, Node A reads
 /// Configuration for long-polling behavior
 pub struct LongPollConfig {
     /// Enable long-polling (LISTEN/NOTIFY based)
-    /// Default: false (for backward compatibility)
+    /// Default: true
     pub enabled: bool,
     
     /// Interval for querying upcoming timers from the database.
@@ -241,17 +241,17 @@ pub struct LongPollConfig {
     /// Default: 60 seconds
     pub notifier_poll_interval: Duration,
     
-    /// Grace period added before firing timers.
-    /// Accounts for clock skew between nodes in a multi-node deployment.
-    /// Timers fire at (visible_at + timer_grace_period).
-    /// Default: 100ms (sufficient for NTP-synced servers)
+    /// Grace period added to timer delays to ensure we never wake early.
+    /// Accounts for tokio timer jitter and processing overhead.
+    /// delay = (visible_at - now) + timer_grace_period
+    /// Default: 100ms
     pub timer_grace_period: Duration,
 }
 
 impl Default for LongPollConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             notifier_poll_interval: Duration::from_secs(60),
             timer_grace_period: Duration::from_millis(100),
         }
@@ -301,6 +301,47 @@ struct RefreshResult {
 - `oneshot::Receiver` is consumed on receive (no stale results)
 - `pending_refresh: Option<...>` replaces the `refresh_in_progress` bool
 - Cleaner semantics: `Some(rx)` = refresh in progress, `None` = idle
+
+### Construction and Connection
+
+```rust
+impl Notifier {
+    async fn new(
+        pool: PgPool,
+        schema_name: String,
+        orch_notify: Arc<Notify>,
+        worker_notify: Arc<Notify>,
+        config: LongPollConfig,
+    ) -> Result<Self, Error> {
+        let mut notifier = Self {
+            pg_listener: PgListener::connect_with(&pool).await?,
+            pool,
+            schema_name,
+            orch_heap: BinaryHeap::new(),
+            worker_heap: BinaryHeap::new(),
+            orch_notify,
+            worker_notify,
+            next_refresh: Instant::now(), // Immediate first refresh
+            pending_refresh: None,
+            config,
+        };
+        
+        notifier.subscribe_channels().await?;
+        Ok(notifier)
+    }
+    
+    /// Subscribe to NOTIFY channels. Used by new() and handle_reconnect().
+    async fn subscribe_channels(&mut self) -> Result<(), Error> {
+        self.pg_listener
+            .listen(&format!("{}_orch_work", self.schema_name))
+            .await?;
+        self.pg_listener
+            .listen(&format!("{}_worker_work", self.schema_name))
+            .await?;
+        Ok(())
+    }
+}
+```
 
 ### Main Loop
 
@@ -383,12 +424,21 @@ impl Notifier {
             // so the row is already queryable.
             self.wake_dispatchers(is_orch);
         } else if visible_at_ms <= window_end_ms {
-            // Future timer within current window → add to timer heap
-            // Add 100ms grace period AFTER visible_at to account for:
-            // - Clock skew between application and database
-            // - Ensure row is definitely visible when we query
-            let fire_at_ms = visible_at_ms + self.config.timer_grace_period.as_millis() as i64;
-            let fire_at = epoch_ms_to_instant(fire_at_ms);
+            // Future timer within current window → schedule a timer
+            // 
+            // We add grace_period to the DELAY (not to visible_at) to ensure
+            // the timer fires slightly after visible_at, even if tokio fires
+            // a few ms early due to timer jitter.
+            //
+            // delay = (visible_at - now) + grace_period
+            //
+            // Example with Node B 100ms ahead:
+            //   now_ms = T+0.1, visible_at = T+5, grace = 100ms
+            //   delay = (T+5 - T+0.1) + 0.1 = 5.0 seconds
+            //   fires at T+5.1 (Node B clock) → definitely past T+5
+            //
+            let delay_ms = (visible_at_ms - now_ms) + self.config.timer_grace_period.as_millis() as i64;
+            let fire_at = Instant::now() + Duration::from_millis(delay_ms as u64);
             
             if is_orch {
                 self.orch_heap.push(Reverse(fire_at));
@@ -456,20 +506,22 @@ impl Notifier {
         
         let pool = self.pool.clone();
         let schema = self.schema_name.clone();
-        let window_end = self.next_refresh + self.config.notifier_poll_interval;
-        let window_end_ts = instant_to_timestamp(window_end);
+        let now_ms = current_epoch_ms();  // Rust clock
+        let window_end_ms = now_ms + self.config.notifier_poll_interval.as_millis() as i64;
         
         tokio::spawn(async move {
             // Query for upcoming timers in both queues
+            // Use Rust clock ($1) for "now" comparison, not database NOW()
             let orch_timers = sqlx::query_scalar::<_, i64>(&format!(
                 "SELECT (EXTRACT(EPOCH FROM visible_at) * 1000)::BIGINT
                  FROM {}.orchestrator_queue
-                 WHERE visible_at > NOW()
-                   AND visible_at <= $1
+                 WHERE (EXTRACT(EPOCH FROM visible_at) * 1000)::BIGINT > $1
+                   AND (EXTRACT(EPOCH FROM visible_at) * 1000)::BIGINT <= $2
                    AND locked_until IS NULL",
                 schema
             ))
-            .bind(window_end_ts)
+            .bind(now_ms)
+            .bind(window_end_ms)
             .fetch_all(&pool)
             .await
             .unwrap_or_default();
@@ -477,12 +529,13 @@ impl Notifier {
             let worker_timers = sqlx::query_scalar::<_, i64>(&format!(
                 "SELECT (EXTRACT(EPOCH FROM visible_at) * 1000)::BIGINT
                  FROM {}.worker_queue
-                 WHERE visible_at > NOW()
-                   AND visible_at <= $1
+                 WHERE (EXTRACT(EPOCH FROM visible_at) * 1000)::BIGINT > $1
+                   AND (EXTRACT(EPOCH FROM visible_at) * 1000)::BIGINT <= $2
                    AND locked_until IS NULL",
                 schema
             ))
-            .bind(window_end_ts)
+            .bind(now_ms)
+            .bind(window_end_ms)
             .fetch_all(&pool)
             .await
             .unwrap_or_default();
@@ -493,30 +546,31 @@ impl Notifier {
     }
     
     fn handle_refresh_result(&mut self, result: RefreshResult) {
-        let now = Instant::now();
         let now_ms = current_epoch_ms();
         let grace_ms = self.config.timer_grace_period.as_millis() as i64;
         
         // Add orchestrator timers
         for visible_at_ms in result.orch_timers {
-            let fire_at_ms = visible_at_ms + grace_ms;
-            if fire_at_ms > now_ms {
-                let delay = Duration::from_millis((fire_at_ms - now_ms) as u64);
-                self.orch_heap.push(Reverse(now + delay));
+            // delay = (visible_at - now) + grace_period
+            let delay_ms = (visible_at_ms - now_ms) + grace_ms;
+            if delay_ms > 0 {
+                let fire_at = Instant::now() + Duration::from_millis(delay_ms as u64);
+                self.orch_heap.push(Reverse(fire_at));
             }
         }
         
         // Add worker timers
         for visible_at_ms in result.worker_timers {
-            let fire_at_ms = visible_at_ms + grace_ms;
-            if fire_at_ms > now_ms {
-                let delay = Duration::from_millis((fire_at_ms - now_ms) as u64);
-                self.worker_heap.push(Reverse(now + delay));
+            // delay = (visible_at - now) + grace_period
+            let delay_ms = (visible_at_ms - now_ms) + grace_ms;
+            if delay_ms > 0 {
+                let fire_at = Instant::now() + Duration::from_millis(delay_ms as u64);
+                self.worker_heap.push(Reverse(fire_at));
             }
         }
         
         // pending_refresh already set to None in select! branch
-        self.next_refresh = now + self.config.notifier_poll_interval;
+        self.next_refresh = Instant::now() + self.config.notifier_poll_interval;
     }
 }
 ```
@@ -526,26 +580,23 @@ impl Notifier {
 ```rust
 impl Notifier {
     async fn handle_reconnect(&mut self) {
-        // Backoff and reconnect
+        // Backoff before reconnect attempt
         tokio::time::sleep(Duration::from_secs(1)).await;
         
+        // Reconnect and resubscribe (reuses subscribe_channels from new())
         if let Ok(listener) = PgListener::connect_with(&self.pool).await {
             self.pg_listener = listener;
             
-            let _ = self.pg_listener
-                .listen(&format!("{}_orch_work", self.schema_name))
-                .await;
-            let _ = self.pg_listener
-                .listen(&format!("{}_worker_work", self.schema_name))
-                .await;
-            
-            // Wake all dispatchers to catch any missed NOTIFYs
-            self.orch_notify.notify_waiters();
-            self.worker_notify.notify_waiters();
-            
-            // Force a refresh to rebuild timer heaps
-            self.next_refresh = Instant::now();
+            if self.subscribe_channels().await.is_ok() {
+                // Wake all dispatchers to catch any missed NOTIFYs during disconnect
+                self.orch_notify.notify_waiters();
+                self.worker_notify.notify_waiters();
+                
+                // Force immediate refresh to rebuild timer heaps
+                self.next_refresh = Instant::now();
+            }
         }
+        // If reconnect fails, loop will call handle_reconnect again on next recv() error
     }
 }
 ```
@@ -572,15 +623,15 @@ impl PostgresProvider {
         if let Some(notify) = &self.orch_notify {
             select! {
                 _ = notify.notified() => {
-                    // Woken by notifier (NOTIFY or timer)
+                    // Woken by notifier (NOTIFY or timer) - fetch now
+                    return self.do_fetch_orchestration_item(lock_timeout).await;
                 }
                 _ = tokio::time::sleep(poll_timeout) => {
-                    // Timeout - safety net polling
+                    // Timeout - return None, let runtime handle idle sleep
+                    // Next call will do_fetch() as first step anyway
+                    return Ok(None);
                 }
             }
-            
-            // Step 3: Fetch again after wake
-            return self.do_fetch_orchestration_item(lock_timeout).await;
         }
         
         // Long-poll disabled - return immediately (old behavior)
@@ -601,10 +652,13 @@ impl PostgresProvider {
         
         if let Some(notify) = &self.worker_notify {
             select! {
-                _ = notify.notified() => {}
-                _ = tokio::time::sleep(poll_timeout) => {}
+                _ = notify.notified() => {
+                    return self.do_fetch_work_item(lock_timeout).await;
+                }
+                _ = tokio::time::sleep(poll_timeout) => {
+                    return Ok(None);
+                }
             }
-            return self.do_fetch_work_item(lock_timeout).await;
         }
         
         Ok(None)
@@ -944,7 +998,8 @@ impl Drop for PostgresProvider {
 | Test | Setup | Action | Expected |
 |------|-------|--------|----------|
 | `notify_immediate_work_wakes_dispatchers` | Notifier running | NOTIFY with visible_at = now | `notify_waiters()` called immediately |
-| `notify_future_timer_adds_to_heap` | Notifier running, next_refresh = 60s | NOTIFY with visible_at = now + 30s | Timer added to heap at 30.1s |
+| `notify_past_visible_at_wakes_immediately` | Notifier running | NOTIFY with visible_at = now - 5s | `notify_waiters()` called immediately (already visible) |
+| `notify_future_timer_adds_to_heap` | Notifier running, next_refresh = 60s | NOTIFY with visible_at = now + 30s | Timer added to heap, fires at now + 30.1s |
 | `notify_beyond_window_ignored` | Notifier running, next_refresh = 60s | NOTIFY with visible_at = now + 90s | Timer NOT added (refresh will catch) |
 | `notify_invalid_payload_treated_as_immediate` | Notifier running | NOTIFY with payload = "garbage" | `notify_waiters()` called (default to 0) |
 | `notify_empty_payload_treated_as_immediate` | Notifier running | NOTIFY with payload = "" | `notify_waiters()` called |
