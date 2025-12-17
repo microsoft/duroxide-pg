@@ -114,9 +114,4 @@ Migrations are automatically applied when creating a `PostgresProvider`. Each te
 
 | Version | Name | Description |
 |---------|------|-------------|
-| 0001 | initial_schema | Creates core tables: instances, executions, history, orchestrator_queue, worker_queue, instance_locks |
-| 0002 | create_stored_procedures | Creates all stored procedures for atomic operations |
-| 0003 | add_attempt_count | Adds attempt_count column to queues for poison message detection |
-| 0004 | update_stored_procedures_for_attempt_count | Updates stored procedures to handle attempt_count |
-| 0005 | rust_clock_only | **BREAKING**: Removes all DB-generated timestamps. All timestamps now provided by Rust provider via `p_now_ms` parameter. This ensures single clock source across all nodes. |
-| 0006 | enforce_not_null_timestamps | Adds NOT NULL constraints and removes DEFAULT clauses from timestamp columns. Existing NULL values backfilled with NOW(). |
+| 0001 | initial_schema | Complete schema with all tables, indexes, and stored procedures. All timestamps are NOT NULL and provided by Rust provider via `p_now_ms` parameter (single clock source). Includes attempt_count for poison message detection. |

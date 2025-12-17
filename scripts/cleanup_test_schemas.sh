@@ -72,6 +72,15 @@ BEGIN
         EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', schema_name);
         RAISE NOTICE 'Dropped schema: %', schema_name;
     END LOOP;
+    
+    -- Drop regression_test schemas
+    FOR schema_name IN 
+        SELECT nspname FROM pg_namespace 
+        WHERE nspname LIKE 'regression_test_%'
+    LOOP
+        EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', schema_name);
+        RAISE NOTICE 'Dropped schema: %', schema_name;
+    END LOOP;
 END \$\$;
 
 -- Show remaining test schemas (if any)
@@ -84,6 +93,7 @@ WHERE nspname = 'e2e_test'
    OR nspname LIKE 'validation_test_%'
    OR nspname LIKE 'stress_test_%'
    OR nspname LIKE 'timing_test_%'
+   OR nspname LIKE 'regression_test_%'
    OR (nspname LIKE 'test_%' AND nspname != 'test');
 EOF
 

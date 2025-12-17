@@ -563,14 +563,16 @@ impl Provider for PostgresProvider {
         }
 
         let events_json = serde_json::Value::Array(events_payload);
+        let now_ms = Self::now_millis();
 
         sqlx::query(&format!(
-            "SELECT {}.append_history($1, $2, $3)",
+            "SELECT {}.append_history($1, $2, $3, $4)",
             self.schema_name
         ))
         .bind(instance)
         .bind(execution_id as i64)
         .bind(events_json)
+        .bind(now_ms)
         .execute(&*self.pool)
         .await
         .map_err(|e| Self::sqlx_to_provider_error("append_with_execution", e))?;
