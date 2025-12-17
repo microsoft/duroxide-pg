@@ -119,3 +119,4 @@ Migrations are automatically applied when creating a `PostgresProvider`. Each te
 | 0003 | add_attempt_count | Adds attempt_count column to queues for poison message detection |
 | 0004 | update_stored_procedures_for_attempt_count | Updates stored procedures to handle attempt_count |
 | 0005 | rust_clock_only | **BREAKING**: Removes all DB-generated timestamps. All timestamps now provided by Rust provider via `p_now_ms` parameter. This ensures single clock source across all nodes. |
+| 0006 | enforce_not_null_timestamps | Adds NOT NULL constraints and removes DEFAULT clauses from timestamp columns. Existing NULL values backfilled with NOW(). |
