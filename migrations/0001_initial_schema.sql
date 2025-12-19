@@ -88,6 +88,54 @@ CREATE TABLE IF NOT EXISTS _duroxide_migrations (
 );
 
 -- ============================================================================
+-- NOTIFY Triggers for Long-Polling
+-- Triggers fire on INSERT to notify waiting dispatchers of new work.
+-- Payload contains visible_at as epoch milliseconds for timer scheduling.
+-- NOTE: We use TG_TABLE_SCHEMA (the schema of the table being modified) 
+-- instead of current_schema() because current_schema() returns the first 
+-- schema in the session's search_path, which may not be our schema.
+-- ============================================================================
+
+-- Trigger function for orchestrator queue
+CREATE OR REPLACE FUNCTION notify_orch_work()
+RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_notify(
+        TG_TABLE_SCHEMA || '_orch_work',
+        (EXTRACT(EPOCH FROM NEW.visible_at) * 1000)::BIGINT::TEXT
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger function for worker queue
+-- Worker queue items are always immediately available (no visible_at)
+-- Send created_at as the timestamp for consistency
+CREATE OR REPLACE FUNCTION notify_worker_work()
+RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_notify(
+        TG_TABLE_SCHEMA || '_worker_work',
+        (EXTRACT(EPOCH FROM NEW.created_at) * 1000)::BIGINT::TEXT
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Attach triggers to queues
+DROP TRIGGER IF EXISTS trg_notify_orch_work ON orchestrator_queue;
+CREATE TRIGGER trg_notify_orch_work
+    AFTER INSERT ON orchestrator_queue
+    FOR EACH ROW
+    EXECUTE FUNCTION notify_orch_work();
+
+DROP TRIGGER IF EXISTS trg_notify_worker_work ON worker_queue;
+CREATE TRIGGER trg_notify_worker_work
+    AFTER INSERT ON worker_queue
+    FOR EACH ROW
+    EXECUTE FUNCTION notify_worker_work();
+
+-- ============================================================================
 -- Stored Procedures
 -- ============================================================================
 

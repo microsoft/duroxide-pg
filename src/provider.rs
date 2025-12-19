@@ -9,10 +9,16 @@ use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::migrations::MigrationRunner;
+use crate::notifier::{LongPollConfig, Notifier};
+
+#[cfg(feature = "test-fault-injection")]
+use crate::fault_injection::FaultInjector;
 
 /// PostgreSQL-based provider for Duroxide durable orchestrations.
 ///
@@ -39,14 +45,30 @@ use crate::migrations::MigrationRunner;
 pub struct PostgresProvider {
     pool: Arc<PgPool>,
     schema_name: String,
+
+    // Long-poll infrastructure (None if disabled)
+    orch_notify: Option<Arc<Notify>>,
+    worker_notify: Option<Arc<Notify>>,
+    notifier_handle: Option<JoinHandle<()>>,
 }
 
 impl PostgresProvider {
+    /// Create a new provider with default settings (long-poll enabled).
     pub async fn new(database_url: &str) -> Result<Self> {
-        Self::new_with_schema(database_url, None).await
+        Self::new_with_options(database_url, None, LongPollConfig::default()).await
     }
 
+    /// Create a new provider with a custom schema.
     pub async fn new_with_schema(database_url: &str, schema_name: Option<&str>) -> Result<Self> {
+        Self::new_with_options(database_url, schema_name, LongPollConfig::default()).await
+    }
+
+    /// Create a new provider with full configuration options.
+    pub async fn new_with_options(
+        database_url: &str,
+        schema_name: Option<&str>,
+        config: LongPollConfig,
+    ) -> Result<Self> {
         let max_connections = std::env::var("DUROXIDE_PG_POOL_MAX")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -59,18 +81,161 @@ impl PostgresProvider {
             .connect(database_url)
             .await?;
 
+        // TODO: Remove this pre-warming once duroxide fixes the timing of the
+        // test_multi_threaded_lock_expiration_recovery validation test.
+        // Pre-warm additional connections when long-poll is enabled.
+        // This avoids connection-establishment latency affecting ordering in
+        // concurrency-sensitive validation tests.
+        if config.enabled {
+            let mut warm = Vec::new();
+            for _ in 0..4 {
+                warm.push(pool.acquire().await?);
+            }
+            drop(warm);
+        }
+
         let schema_name = schema_name.unwrap_or("public").to_string();
 
-        let provider = Self {
-            pool: Arc::new(pool),
-            schema_name: schema_name.clone(),
-        };
-
         // Run migrations to initialize schema
-        let migration_runner = MigrationRunner::new(provider.pool.clone(), schema_name.clone());
+        let migration_runner = MigrationRunner::new(Arc::new(pool.clone()), schema_name.clone());
         migration_runner.migrate().await?;
 
-        Ok(provider)
+        // Start notifier thread if long-polling is enabled
+        let (orch_notify, worker_notify, notifier_handle) = if config.enabled {
+            let orch_notify = Arc::new(Notify::new());
+            let worker_notify = Arc::new(Notify::new());
+
+            let mut notifier = Notifier::new(
+                pool.clone(),
+                schema_name.clone(),
+                orch_notify.clone(),
+                worker_notify.clone(),
+                config.clone(),
+            )
+            .await?;
+
+            let handle = tokio::spawn(async move {
+                notifier.run().await;
+            });
+
+            info!(
+                target = "duroxide::providers::postgres",
+                schema = %schema_name,
+                "Long-polling enabled"
+            );
+
+            (Some(orch_notify), Some(worker_notify), Some(handle))
+        } else {
+            debug!(
+                target = "duroxide::providers::postgres",
+                schema = %schema_name,
+                "Long-polling disabled"
+            );
+            (None, None, None)
+        };
+
+        Ok(Self {
+            pool: Arc::new(pool),
+            schema_name,
+            orch_notify,
+            worker_notify,
+            notifier_handle,
+        })
+    }
+
+    /// Create a new provider with fault injection for testing.
+    ///
+    /// This constructor allows injecting faults to test resilience scenarios.
+    /// The FaultInjector can be used to disable the notifier thread.
+    #[cfg(feature = "test-fault-injection")]
+    pub async fn new_with_fault_injection(
+        database_url: &str,
+        schema_name: Option<&str>,
+        config: LongPollConfig,
+        fault_injector: Arc<FaultInjector>,
+    ) -> Result<Self> {
+        let max_connections = std::env::var("DUROXIDE_PG_POOL_MAX")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(10);
+
+        // Check fault injection: if notifier is disabled, skip starting it
+        let notifier_disabled = fault_injector.is_notifier_disabled();
+
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .min_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(30))
+            .connect(database_url)
+            .await?;
+
+        // TODO: Remove this pre-warming once duroxide fixes the timing of the
+        // test_multi_threaded_lock_expiration_recovery validation test.
+        // Pre-warm additional connections when long-poll is enabled and the
+        // notifier is active.
+        if config.enabled && !notifier_disabled {
+            let mut warm = Vec::new();
+            for _ in 0..4 {
+                warm.push(pool.acquire().await?);
+            }
+            drop(warm);
+        }
+
+        let schema_name = schema_name.unwrap_or("public").to_string();
+
+        // Run migrations to initialize schema
+        let migration_runner = MigrationRunner::new(Arc::new(pool.clone()), schema_name.clone());
+        migration_runner.migrate().await?;
+
+        // Start notifier thread if long-polling is enabled AND not disabled by fault injection
+        let (orch_notify, worker_notify, notifier_handle) = if config.enabled && !notifier_disabled {
+            let orch_notify = Arc::new(Notify::new());
+            let worker_notify = Arc::new(Notify::new());
+
+            let mut notifier = Notifier::new(
+                pool.clone(),
+                schema_name.clone(),
+                orch_notify.clone(),
+                worker_notify.clone(),
+                config.clone(),
+            )
+            .await?;
+
+            let handle = tokio::spawn(async move {
+                notifier.run().await;
+            });
+
+            info!(
+                target = "duroxide::providers::postgres",
+                schema = %schema_name,
+                "Long-polling enabled"
+            );
+
+            (Some(orch_notify), Some(worker_notify), Some(handle))
+        } else {
+            if notifier_disabled {
+                warn!(
+                    target = "duroxide::providers::postgres",
+                    schema = %schema_name,
+                    "Long-polling disabled by fault injection"
+                );
+            } else {
+                debug!(
+                    target = "duroxide::providers::postgres",
+                    schema = %schema_name,
+                    "Long-polling disabled"
+                );
+            }
+            (None, None, None)
+        };
+
+        Ok(Self {
+            pool: Arc::new(pool),
+            schema_name,
+            orch_notify,
+            worker_notify,
+            notifier_handle,
+        })
     }
 
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
@@ -86,7 +251,7 @@ impl PostgresProvider {
     fn now_millis() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as i64
     }
 
@@ -162,23 +327,11 @@ impl PostgresProvider {
 
         Ok(())
     }
-}
 
-#[async_trait::async_trait]
-impl Provider for PostgresProvider {
-    fn name(&self) -> &str {
-        "duroxide-pg"
-    }
-
-    fn version(&self) -> &str {
-        env!("CARGO_PKG_VERSION")
-    }
-
-    #[instrument(skip(self), target = "duroxide::providers::postgres")]
-    async fn fetch_orchestration_item(
+    /// Internal fetch logic for orchestration items with retries
+    async fn do_fetch_orchestration_item(
         &self,
         lock_timeout: Duration,
-        _poll_timeout: Duration,
     ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
         let start = std::time::Instant::now();
 
@@ -297,6 +450,143 @@ impl Provider for PostgresProvider {
 
         Ok(None)
     }
+
+    /// Internal fetch logic for work items
+    async fn do_fetch_work_item(
+        &self,
+        lock_timeout: Duration,
+    ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
+        let start = std::time::Instant::now();
+
+        // Convert Duration to milliseconds
+        let lock_timeout_ms = lock_timeout.as_millis() as i64;
+
+        let row = match sqlx::query_as::<_, (String, String, i32)>(&format!(
+            "SELECT * FROM {}.fetch_work_item($1, $2)",
+            self.schema_name
+        ))
+        .bind(Self::now_millis())
+        .bind(lock_timeout_ms)
+        .fetch_optional(&*self.pool)
+        .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                return Err(Self::sqlx_to_provider_error("fetch_work_item", e));
+            }
+        };
+
+        let (work_item_json, lock_token, attempt_count) = match row {
+            Some(row) => row,
+            None => return Ok(None),
+        };
+
+        let work_item: WorkItem = serde_json::from_str(&work_item_json).map_err(|e| {
+            ProviderError::permanent(
+                "fetch_work_item",
+                format!("Failed to deserialize worker item: {e}"),
+            )
+        })?;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Extract instance for logging - different work item types have different structures
+        let instance_id = match &work_item {
+            WorkItem::ActivityExecute { instance, .. } => instance.as_str(),
+            WorkItem::ActivityCompleted { instance, .. } => instance.as_str(),
+            WorkItem::ActivityFailed { instance, .. } => instance.as_str(),
+            WorkItem::StartOrchestration { instance, .. } => instance.as_str(),
+            WorkItem::TimerFired { instance, .. } => instance.as_str(),
+            WorkItem::ExternalRaised { instance, .. } => instance.as_str(),
+            WorkItem::CancelInstance { instance, .. } => instance.as_str(),
+            WorkItem::ContinueAsNew { instance, .. } => instance.as_str(),
+            WorkItem::SubOrchCompleted {
+                parent_instance, ..
+            } => parent_instance.as_str(),
+            WorkItem::SubOrchFailed {
+                parent_instance, ..
+            } => parent_instance.as_str(),
+        };
+
+        debug!(
+            target = "duroxide::providers::postgres",
+            operation = "fetch_work_item",
+            instance_id = %instance_id,
+            attempt_count = attempt_count,
+            duration_ms = duration_ms,
+            "Fetched activity work item via stored procedure"
+        );
+
+        Ok(Some((work_item, lock_token, attempt_count as u32)))
+    }
+}
+
+impl Drop for PostgresProvider {
+    fn drop(&mut self) {
+        // Abort the notifier thread when the provider is dropped
+        if let Some(handle) = self.notifier_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for PostgresProvider {
+    fn name(&self) -> &str {
+        "duroxide-pg"
+    }
+
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
+    #[instrument(skip(self), target = "duroxide::providers::postgres")]
+    async fn fetch_orchestration_item(
+        &self,
+        lock_timeout: Duration,
+        poll_timeout: Duration,
+    ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
+        // Fast path: Duration::ZERO means "do not wait".
+        // Avoid long-poll notifier bookkeeping to keep behavior deterministic
+        // and reduce contention/overhead on hot paths.
+        if poll_timeout.is_zero() {
+            return self.do_fetch_orchestration_item(lock_timeout).await;
+        }
+
+        // Long-poll pattern: register interest BEFORE checking to avoid race
+        if let Some(notify) = &self.orch_notify {
+            // Step 1: Create the notification future and enable it
+            // enable() registers interest immediately, so any notify_one()
+            // after this point will wake us up (or store a permit if we're not waiting yet).
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            // Step 2: Try to fetch
+            let result = self.do_fetch_orchestration_item(lock_timeout).await?;
+            if result.is_some() {
+                return Ok(result);
+            }
+
+            // Step 3: No work - wait for wake signal or timeout
+            // Because we called enable() BEFORE checking, any notify_one()
+            // that happened after step 1 will still wake us up.
+            tokio::select! {
+                _ = &mut notified => {
+                    // Woken by notifier (NOTIFY or timer) - fetch now
+                    return self.do_fetch_orchestration_item(lock_timeout).await;
+                }
+                _ = tokio::time::sleep(poll_timeout) => {
+                    // Timeout - return None, let runtime handle idle sleep
+                    return Ok(None);
+                }
+            }
+        }
+
+        // Long-poll disabled - try once and return immediately (old behavior)
+        self.do_fetch_orchestration_item(lock_timeout).await
+    }
+
     #[instrument(skip(self), fields(lock_token = %lock_token, execution_id = execution_id), target = "duroxide::providers::postgres")]
     async fn ack_orchestration_item(
         &self,
@@ -626,70 +916,36 @@ impl Provider for PostgresProvider {
     async fn fetch_work_item(
         &self,
         lock_timeout: Duration,
-        _poll_timeout: Duration,
+        poll_timeout: Duration,
     ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
-        let start = std::time::Instant::now();
+        // Long-poll pattern: register interest BEFORE checking to avoid race
+        if let Some(notify) = &self.worker_notify {
+            // Step 1: Create the notification future and enable it
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
 
-        // Convert Duration to milliseconds
-        let lock_timeout_ms = lock_timeout.as_millis() as i64;
-
-        let row = match sqlx::query_as::<_, (String, String, i32)>(&format!(
-            "SELECT * FROM {}.fetch_work_item($1, $2)",
-            self.schema_name
-        ))
-        .bind(Self::now_millis())
-        .bind(lock_timeout_ms)
-        .fetch_optional(&*self.pool)
-        .await
-        {
-            Ok(row) => row,
-            Err(e) => {
-                return Err(Self::sqlx_to_provider_error("fetch_work_item", e));
+            // Step 2: Try to fetch
+            let result = self.do_fetch_work_item(lock_timeout).await?;
+            if result.is_some() {
+                return Ok(result);
             }
-        };
 
-        let (work_item_json, lock_token, attempt_count) = match row {
-            Some(row) => row,
-            None => return Ok(None),
-        };
+            // Step 3: No work - wait for wake signal or timeout
+            tokio::select! {
+                _ = &mut notified => {
+                    // Woken by notifier (NOTIFY or timer) - fetch now
+                    return self.do_fetch_work_item(lock_timeout).await;
+                }
+                _ = tokio::time::sleep(poll_timeout) => {
+                    // Timeout - return None, let runtime handle idle sleep
+                    return Ok(None);
+                }
+            }
+        }
 
-        let work_item: WorkItem = serde_json::from_str(&work_item_json).map_err(|e| {
-            ProviderError::permanent(
-                "fetch_work_item",
-                format!("Failed to deserialize worker item: {e}"),
-            )
-        })?;
-
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        // Extract instance for logging - different work item types have different structures
-        let instance_id = match &work_item {
-            WorkItem::ActivityExecute { instance, .. } => instance.as_str(),
-            WorkItem::ActivityCompleted { instance, .. } => instance.as_str(),
-            WorkItem::ActivityFailed { instance, .. } => instance.as_str(),
-            WorkItem::StartOrchestration { instance, .. } => instance.as_str(),
-            WorkItem::TimerFired { instance, .. } => instance.as_str(),
-            WorkItem::ExternalRaised { instance, .. } => instance.as_str(),
-            WorkItem::CancelInstance { instance, .. } => instance.as_str(),
-            WorkItem::ContinueAsNew { instance, .. } => instance.as_str(),
-            WorkItem::SubOrchCompleted {
-                parent_instance, ..
-            } => parent_instance.as_str(),
-            WorkItem::SubOrchFailed {
-                parent_instance, ..
-            } => parent_instance.as_str(),
-        };
-
-        debug!(
-            target = "duroxide::providers::postgres",
-            operation = "fetch_work_item",
-            instance_id = %instance_id,
-            attempt_count = attempt_count,
-            duration_ms = duration_ms,
-            "Fetched activity work item via stored procedure"
-        );
-
-        Ok(Some((work_item, lock_token, attempt_count as u32)))
+        // Long-poll disabled - try once and return immediately (old behavior)
+        self.do_fetch_work_item(lock_timeout).await
     }
 
     #[instrument(skip(self), fields(token = %token), target = "duroxide::providers::postgres")]

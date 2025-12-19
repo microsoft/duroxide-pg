@@ -42,14 +42,54 @@
 //! |---------------------|-------------|---------|
 //! | `DUROXIDE_PG_POOL_MAX` | Maximum connection pool size | `10` |
 //!
+//! ## Long-Polling
+//!
+//! The provider supports long-polling via PostgreSQL LISTEN/NOTIFY to reduce idle query load:
+//!
+//! ```rust,no_run
+//! use duroxide_pg::{PostgresProvider, LongPollConfig};
+//! use std::time::Duration;
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! let config = LongPollConfig {
+//!     enabled: true,
+//!     notifier_poll_interval: Duration::from_secs(60),
+//!     timer_grace_period: Duration::from_millis(100),
+//! };
+//!
+//! let provider = PostgresProvider::new_with_options(
+//!     "postgres://user:password@localhost:5432/mydb",
+//!     Some("my_schema"),
+//!     config,
+//! ).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! ## Features
 //!
 //! - Automatic schema migration on startup
 //! - Connection pooling via sqlx
 //! - Custom schema support for multi-tenant isolation
+//! - Long-polling via LISTEN/NOTIFY for reduced database load
 //! - Full implementation of the Duroxide `Provider` and `ProviderAdmin` traits
+//!
+//! ## Fault Injection (Testing)
+//!
+//! For testing resilience scenarios, enable the `test-fault-injection` feature:
+//!
+//! ```toml
+//! [dev-dependencies]
+//! duroxide-pg = { version = "0.1", features = ["test-fault-injection"] }
+//! ```
 
+#[cfg(feature = "test-fault-injection")]
+pub mod fault_injection;
 pub mod migrations;
+pub mod notifier;
 pub mod provider;
 
+#[cfg(feature = "test-fault-injection")]
+pub use fault_injection::FaultInjector;
+pub use notifier::LongPollConfig;
 pub use provider::PostgresProvider;

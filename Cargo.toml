@@ -43,5 +43,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 semver = "1.0"
 include_dir = "0.7"
 
+[features]
+default = ["test-fault-injection"]
+test-fault-injection = []
+
 [dev-dependencies]
 duroxide-pg-stress = { path = "pg-stress" }
