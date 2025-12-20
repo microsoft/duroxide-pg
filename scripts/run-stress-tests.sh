@@ -46,9 +46,17 @@ run_continue_as_new_stress() {
 }
 
 run_general_stress() {
-    echo "=== General Stress Tests ==="
+    echo "=== General Stress Tests (excluding longpoll comparison tests) ==="
     echo ""
-    cargo test --test stress_tests -- --ignored --nocapture 2>/dev/null || true
+    # Run all stress tests EXCEPT the longpoll comparison tests (they need single-thread for metrics)
+    cargo test --test stress_tests -- --ignored --nocapture --skip stress_test_longpoll_comparison 2>/dev/null || true
+}
+
+run_longpoll_comparison_stress() {
+    echo "=== Long-Poll Comparison Stress Tests (single-threaded for metrics) ==="
+    echo ""
+    # These tests use the global metrics recorder and must run single-threaded
+    cargo test --test stress_tests stress_test_longpoll_comparison --features db-metrics -- --ignored --nocapture --test-threads=1
 }
 
 case "$1" in
@@ -61,6 +69,9 @@ case "$1" in
     "general")
         run_general_stress
         ;;
+    "comparison"|"longpoll_comparison")
+        run_longpoll_comparison_stress
+        ;;
     "")
         # Run all stress tests
         echo "Running ALL stress tests..."
@@ -70,6 +81,8 @@ case "$1" in
         run_continue_as_new_stress
         echo ""
         run_general_stress
+        echo ""
+        run_longpoll_comparison_stress
         ;;
     *)
         # Run specific test by name

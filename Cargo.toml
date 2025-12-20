@@ -43,9 +43,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 semver = "1.0"
 include_dir = "0.7"
 
+# Metrics (optional, for database operation instrumentation)
+metrics = { version = "0.24", optional = true }
+
 [features]
 default = ["test-fault-injection"]
 test-fault-injection = []
+db-metrics = ["metrics"]
 
 [dev-dependencies]
 duroxide-pg-stress = { path = "pg-stress" }
+metrics-util = { version = "0.19", features = ["debugging"] }

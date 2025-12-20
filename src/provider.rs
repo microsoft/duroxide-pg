@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, error, info, instrument, warn};
 
+use crate::db_metrics::{record_fetch_attempt, record_fetch_success, DbCallTimer, DbOperation, FetchType};
 use crate::migrations::MigrationRunner;
 use crate::notifier::{LongPollConfig, Notifier};
 
@@ -308,6 +309,7 @@ impl PostgresProvider {
     /// Only drops the schema if it's a custom schema (not "public").
     pub async fn cleanup_schema(&self) -> Result<()> {
         // Call the stored procedure to drop all tables
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("cleanup_schema"));
         sqlx::query(&format!("SELECT {}.cleanup_schema()", self.schema_name))
             .execute(&*self.pool)
             .await?;
@@ -315,6 +317,7 @@ impl PostgresProvider {
         // SAFETY: Never drop the "public" schema - it's a PostgreSQL system schema
         // Only drop custom schemas created for testing
         if self.schema_name != "public" {
+            let _timer = DbCallTimer::new(DbOperation::Ddl, None);
             sqlx::query(&format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE",
                 self.schema_name
@@ -334,6 +337,9 @@ impl PostgresProvider {
         &self,
         lock_timeout: Duration,
     ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
+        // Record fetch attempt for long-poll effectiveness tracking
+        record_fetch_attempt(FetchType::Orchestration);
+
         let start = std::time::Instant::now();
 
         const MAX_RETRIES: u32 = 3;
@@ -346,6 +352,7 @@ impl PostgresProvider {
         for attempt in 0..=MAX_RETRIES {
             let now_ms = Self::now_millis();
 
+            let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("fetch_orchestration_item"));
             let result: Result<
                 Option<(
                     String,
@@ -430,6 +437,9 @@ impl PostgresProvider {
                     "Fetched orchestration item via stored procedure"
                 );
 
+                // Record fetch success for long-poll effectiveness tracking
+                record_fetch_success(FetchType::Orchestration, 1);
+
                 return Ok(Some((
                     OrchestrationItem {
                         instance: instance_id,
@@ -457,11 +467,15 @@ impl PostgresProvider {
         &self,
         lock_timeout: Duration,
     ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
+        // Record fetch attempt for long-poll effectiveness tracking
+        record_fetch_attempt(FetchType::WorkItem);
+
         let start = std::time::Instant::now();
 
         // Convert Duration to milliseconds
         let lock_timeout_ms = lock_timeout.as_millis() as i64;
 
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("fetch_work_item"));
         let row = match sqlx::query_as::<_, (String, String, i32)>(&format!(
             "SELECT * FROM {}.fetch_work_item($1, $2)",
             self.schema_name
@@ -517,6 +531,9 @@ impl PostgresProvider {
             duration_ms = duration_ms,
             "Fetched activity work item via stored procedure"
         );
+
+        // Record fetch success for long-poll effectiveness tracking
+        record_fetch_success(FetchType::WorkItem, 1);
 
         Ok(Some((work_item, lock_token, attempt_count as u32)))
     }
@@ -659,6 +676,7 @@ impl Provider for PostgresProvider {
         let now_ms = Self::now_millis();
 
         for attempt in 0..=MAX_RETRIES {
+            let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("ack_orchestration_item"));
             let result = sqlx::query(&format!(
                 "SELECT {}.ack_orchestration_item($1, $2, $3, $4, $5, $6, $7)",
                 self.schema_name
@@ -739,6 +757,7 @@ impl Provider for PostgresProvider {
         let now_ms = Self::now_millis();
         let delay_param: Option<i64> = delay.map(|d| d.as_millis() as i64);
 
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("abandon_orchestration_item"));
         let instance_id = match sqlx::query_scalar::<_, String>(&format!(
             "SELECT {}.abandon_orchestration_item($1, $2, $3, $4)",
             self.schema_name
@@ -789,6 +808,7 @@ impl Provider for PostgresProvider {
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
     async fn read(&self, instance: &str) -> Result<Vec<Event>, ProviderError> {
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("fetch_history"));
         let event_data_rows: Vec<String> = sqlx::query_scalar(&format!(
             "SELECT out_event_data FROM {}.fetch_history($1)",
             self.schema_name
@@ -856,6 +876,7 @@ impl Provider for PostgresProvider {
         let events_json = serde_json::Value::Array(events_payload);
         let now_ms = Self::now_millis();
 
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("append_history"));
         sqlx::query(&format!(
             "SELECT {}.append_history($1, $2, $3, $4)",
             self.schema_name
@@ -891,6 +912,7 @@ impl Provider for PostgresProvider {
 
         let now_ms = Self::now_millis();
 
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("enqueue_worker_work"));
         sqlx::query(&format!(
             "SELECT {}.enqueue_worker_work($1, $2)",
             self.schema_name
@@ -978,6 +1000,7 @@ impl Provider for PostgresProvider {
         let now_ms = Self::now_millis();
 
         // Call stored procedure to atomically delete worker item and enqueue completion
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("ack_worker"));
         sqlx::query(&format!(
             "SELECT {}.ack_worker($1, $2, $3, $4)",
             self.schema_name
@@ -1032,6 +1055,7 @@ impl Provider for PostgresProvider {
         // Convert Duration to seconds for the stored procedure
         let extend_secs = extend_for.as_secs() as i64;
 
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("renew_work_item_lock"));
         match sqlx::query(&format!(
             "SELECT {}.renew_work_item_lock($1, $2, $3)",
             self.schema_name
@@ -1085,6 +1109,7 @@ impl Provider for PostgresProvider {
         let now_ms = Self::now_millis();
         let delay_param: Option<i64> = delay.map(|d| d.as_millis() as i64);
 
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("abandon_work_item"));
         match sqlx::query(&format!(
             "SELECT {}.abandon_work_item($1, $2, $3, $4)",
             self.schema_name
@@ -1147,6 +1172,7 @@ impl Provider for PostgresProvider {
         // Convert Duration to seconds for the stored procedure
         let extend_secs = extend_for.as_secs() as i64;
 
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("renew_orchestration_item_lock"));
         match sqlx::query(&format!(
             "SELECT {}.renew_orchestration_item_lock($1, $2, $3)",
             self.schema_name
@@ -1272,6 +1298,7 @@ impl Provider for PostgresProvider {
         // Pass NULL for orchestration_name, orchestration_version, execution_id parameters
 
         // Call stored procedure to enqueue work
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("enqueue_orchestrator_work"));
         sqlx::query(&format!(
             "SELECT {}.enqueue_orchestrator_work($1, $2, $3, $4, $5, $6, $7)",
             self.schema_name
@@ -1314,6 +1341,7 @@ impl Provider for PostgresProvider {
         instance: &str,
         execution_id: u64,
     ) -> Result<Vec<Event>, ProviderError> {
+        let _timer = DbCallTimer::new(DbOperation::Select, None);
         let event_data_rows: Vec<String> = sqlx::query_scalar(&format!(
             "SELECT event_data FROM {} WHERE instance_id = $1 AND execution_id = $2 ORDER BY event_id",
             self.table_name("history")
@@ -1340,6 +1368,7 @@ impl Provider for PostgresProvider {
 impl ProviderAdmin for PostgresProvider {
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
     async fn list_instances(&self) -> Result<Vec<String>, ProviderError> {
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("list_instances"));
         sqlx::query_scalar(&format!(
             "SELECT instance_id FROM {}.list_instances()",
             self.schema_name
@@ -1351,6 +1380,7 @@ impl ProviderAdmin for PostgresProvider {
 
     #[instrument(skip(self), fields(status = %status), target = "duroxide::providers::postgres")]
     async fn list_instances_by_status(&self, status: &str) -> Result<Vec<String>, ProviderError> {
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("list_instances_by_status"));
         sqlx::query_scalar(&format!(
             "SELECT instance_id FROM {}.list_instances_by_status($1)",
             self.schema_name
@@ -1363,6 +1393,7 @@ impl ProviderAdmin for PostgresProvider {
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
     async fn list_executions(&self, instance: &str) -> Result<Vec<u64>, ProviderError> {
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("list_executions"));
         let execution_ids: Vec<i64> = sqlx::query_scalar(&format!(
             "SELECT execution_id FROM {}.list_executions($1)",
             self.schema_name
@@ -1381,6 +1412,7 @@ impl ProviderAdmin for PostgresProvider {
         instance: &str,
         execution_id: u64,
     ) -> Result<Vec<Event>, ProviderError> {
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("fetch_history_with_execution"));
         let event_data_rows: Vec<String> = sqlx::query_scalar(&format!(
             "SELECT out_event_data FROM {}.fetch_history_with_execution($1, $2)",
             self.schema_name
@@ -1409,6 +1441,7 @@ impl ProviderAdmin for PostgresProvider {
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
     async fn latest_execution_id(&self, instance: &str) -> Result<u64, ProviderError> {
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("latest_execution_id"));
         sqlx::query_scalar(&format!(
             "SELECT {}.latest_execution_id($1)",
             self.schema_name
@@ -1423,6 +1456,7 @@ impl ProviderAdmin for PostgresProvider {
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
     async fn get_instance_info(&self, instance: &str) -> Result<InstanceInfo, ProviderError> {
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("get_instance_info"));
         let row: Option<(
             String,
             String,
@@ -1473,6 +1507,7 @@ impl ProviderAdmin for PostgresProvider {
         instance: &str,
         execution_id: u64,
     ) -> Result<ExecutionInfo, ProviderError> {
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("get_execution_info"));
         let row: Option<(
             i64,
             String,
@@ -1505,6 +1540,7 @@ impl ProviderAdmin for PostgresProvider {
 
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
     async fn get_system_metrics(&self) -> Result<SystemMetrics, ProviderError> {
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("get_system_metrics"));
         let row: Option<(i64, i64, i64, i64, i64, i64)> = sqlx::query_as(&format!(
             "SELECT * FROM {}.get_system_metrics()",
             self.schema_name
@@ -1538,6 +1574,7 @@ impl ProviderAdmin for PostgresProvider {
     async fn get_queue_depths(&self) -> Result<QueueDepths, ProviderError> {
         let now_ms = Self::now_millis();
 
+        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("get_queue_depths"));
         let row: Option<(i64, i64)> = sqlx::query_as(&format!(
             "SELECT * FROM {}.get_queue_depths($1)",
             self.schema_name
