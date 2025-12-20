@@ -1,6 +1,6 @@
 use duroxide::providers::{ExecutionMetadata, Provider, WorkItem};
 use duroxide::{Event, EventKind};
-use duroxide_pg::PostgresProvider;
+use duroxide_pg_opt::PostgresProvider;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc as StdArc;
 use std::time::{Duration, Instant};

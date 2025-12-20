@@ -16,7 +16,7 @@ use duroxide::provider_stress_tests::parallel_orchestrations::{
 };
 use duroxide::provider_stress_tests::StressTestConfig;
 use duroxide::providers::Provider;
-use duroxide_pg::PostgresProvider;
+use duroxide_pg_opt::{LongPollConfig, PostgresProvider};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
@@ -28,6 +28,7 @@ pub use duroxide::provider_stress_tests::{StressTestConfig as Config, StressTest
 pub struct PostgresStressFactory {
     database_url: String,
     use_unique_schemas: bool,
+    long_poll_enabled: bool,
 }
 
 impl PostgresStressFactory {
@@ -35,12 +36,19 @@ impl PostgresStressFactory {
         Self {
             database_url,
             use_unique_schemas: true,
+            long_poll_enabled: true,
         }
     }
 
     #[allow(dead_code)]
     pub fn with_shared_schema(mut self) -> Self {
         self.use_unique_schemas = false;
+        self
+    }
+
+    /// Disable long-polling for stress testing
+    pub fn with_long_poll_disabled(mut self) -> Self {
+        self.long_poll_enabled = false;
         self
     }
 }
@@ -56,10 +64,15 @@ impl ProviderStressFactory for PostgresStressFactory {
             "stress_test_shared".to_string()
         };
 
-        info!("Creating PostgreSQL provider with schema: {}", schema_name);
+        info!("Creating PostgreSQL provider with schema: {}, long_poll: {}", schema_name, self.long_poll_enabled);
+
+        let config = LongPollConfig {
+            enabled: self.long_poll_enabled,
+            ..Default::default()
+        };
 
         Arc::new(
-            PostgresProvider::new_with_schema(&self.database_url, Some(&schema_name))
+            PostgresProvider::new_with_options(&self.database_url, Some(&schema_name), config)
                 .await
                 .expect("Failed to create PostgreSQL provider for stress test"),
         )

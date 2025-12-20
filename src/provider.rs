@@ -28,7 +28,7 @@ use crate::fault_injection::FaultInjector;
 /// # Example
 ///
 /// ```rust,no_run
-/// use duroxide_pg::PostgresProvider;
+/// use duroxide_pg_opt::PostgresProvider;
 ///
 /// # async fn example() -> anyhow::Result<()> {
 /// // Connect using DATABASE_URL or explicit connection string
@@ -192,12 +192,13 @@ impl PostgresProvider {
             let orch_notify = Arc::new(Notify::new());
             let worker_notify = Arc::new(Notify::new());
 
-            let mut notifier = Notifier::new(
+            let mut notifier = Notifier::new_with_fault_injection(
                 pool.clone(),
                 schema_name.clone(),
                 orch_notify.clone(),
                 worker_notify.clone(),
                 config.clone(),
+                fault_injector,
             )
             .await?;
 

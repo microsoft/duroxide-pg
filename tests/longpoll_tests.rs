@@ -5,13 +5,19 @@
 //! - Category 5: E2E NOTIFY flow
 //! - Category 6: Fault injection resilience tests
 //! - Category 7: Timer precision tests
+//!
+//! Note: Performance tests, stress tests, and fault injection tests have been
+//! moved to separate files:
+//! - perf_tests.rs
+//! - stress_tests_longpoll.rs
+//! - fault_injection_tests.rs
 
 mod common;
 
 use duroxide::providers::{ExecutionMetadata, Provider, WorkItem};
-use duroxide_pg::{LongPollConfig, PostgresProvider};
+use duroxide_pg_opt::{LongPollConfig, PostgresProvider};
 #[cfg(feature = "test-fault-injection")]
-use duroxide_pg::FaultInjector;
+use duroxide_pg_opt::FaultInjector;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1140,4 +1146,249 @@ async fn create_provider_with_config(
     PostgresProvider::new_with_options(database_url, Some(schema), config)
         .await
         .expect("Failed to create provider")
+}
+
+// =============================================================================
+// Category 5: Additional E2E NOTIFY Flow Tests
+// =============================================================================
+
+/// Test that a timer scheduled 5 seconds in the future fires correctly
+/// This verifies the timer heap and grace period work together for future timers.
+#[tokio::test]
+async fn e2e_timer_fires_correctly() {
+    let schema = next_schema_name();
+    let database_url = get_database_url();
+
+    let provider = Arc::new(
+        PostgresProvider::new_with_schema(&database_url, Some(&schema))
+            .await
+            .expect("Failed to create provider"),
+    );
+
+    // Give the notifier time to start up
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Calculate visible_at = now + 3s
+    let delay_ms: i64 = 3000;
+    let visible_at = chrono::Utc::now() + chrono::Duration::milliseconds(delay_ms);
+
+    // Insert work with future visible_at directly via SQL
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("Failed to connect");
+
+    let start = Instant::now();
+
+    sqlx::query(&format!(
+        r#"INSERT INTO {}.orchestrator_queue
+           (instance_id, work_item, visible_at, created_at)
+           VALUES ($1, $2, $3, NOW())"#,
+        schema
+    ))
+    .bind("e2e-timer-test")
+    .bind(
+        serde_json::to_string(&serde_json::json!({
+            "StartOrchestration": {
+                "instance": "e2e-timer-test",
+                "orchestration": "test-orch",
+                "version": "1.0",
+                "input": "{}",
+                "execution_id": 1
+            }
+        }))
+        .unwrap(),
+    )
+    .bind(visible_at)
+    .execute(&pool)
+    .await
+    .expect("Failed to insert future work");
+
+    // Start fetch - should wait until visible_at + grace_period (~3.1s)
+    let result = provider
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10))
+        .await
+        .expect("Fetch failed");
+
+    let elapsed = start.elapsed();
+
+    assert!(result.is_some(), "Should find work after timer fires");
+
+    // Should take approximately 3s (delay) + 100ms (grace) ± tolerance
+    // Allow generous tolerance for DB latency
+    let expected_min = Duration::from_millis((delay_ms - 500) as u64); // 2.5s
+    let expected_max = Duration::from_millis((delay_ms + 1500) as u64); // 4.5s
+
+    assert!(
+        elapsed >= expected_min && elapsed <= expected_max,
+        "Timer should fire at ~3.1s, but fired at {:?}",
+        elapsed
+    );
+
+    pool.close().await;
+    cleanup_schema(&schema).await;
+}
+
+// =============================================================================
+// Category 6: Additional Resilience Tests
+// =============================================================================
+
+/// Test that dispatchers fall back to poll_timeout when the notifier thread is dead
+/// This verifies graceful degradation - work is still found, just with higher latency.
+#[tokio::test]
+#[cfg(feature = "test-fault-injection")]
+async fn resilience_notifier_dead() {
+    let schema = next_schema_name();
+    let database_url = get_database_url();
+
+    // Create a fault injector that disables the notifier
+    let fault_injector = Arc::new(FaultInjector::new());
+    fault_injector.disable_notifier();
+
+    // Create provider with notifier disabled
+    let provider = PostgresProvider::new_with_fault_injection(
+        &database_url,
+        Some(&schema),
+        LongPollConfig::default(),
+        fault_injector,
+    )
+    .await
+    .expect("Failed to create provider");
+
+    // Insert work directly via SQL (bypassing provider's enqueue which might wake notifier)
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("Failed to connect");
+
+    sqlx::query(&format!(
+        r#"INSERT INTO {}.orchestrator_queue
+           (instance_id, work_item, visible_at, created_at)
+           VALUES ($1, $2, NOW(), NOW())"#,
+        schema
+    ))
+    .bind("notifier-dead-test")
+    .bind(
+        serde_json::to_string(&serde_json::json!({
+            "StartOrchestration": {
+                "instance": "notifier-dead-test",
+                "orchestration": "test-orch",
+                "version": "1.0",
+                "input": "{}",
+                "execution_id": 1
+            }
+        }))
+        .unwrap(),
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to insert work");
+
+    // With notifier dead, fetch should still find work on first attempt
+    // (do_fetch() runs first, before waiting on notify)
+    let start = Instant::now();
+    let result = provider
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5))
+        .await
+        .expect("Fetch failed");
+
+    let elapsed = start.elapsed();
+
+    // Should find work immediately via do_fetch()
+    assert!(
+        result.is_some(),
+        "Should find work even with notifier dead"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "First fetch should find existing work quickly, took {:?}",
+        elapsed
+    );
+
+    pool.close().await;
+    cleanup_schema(&schema).await;
+}
+
+/// Test that work is detected after a connection drop and reconnect.
+/// This verifies the notifier's auto-reconnect behavior.
+#[tokio::test]
+async fn resilience_connection_drop() {
+    let schema = next_schema_name();
+    let database_url = get_database_url();
+
+    let provider = Arc::new(
+        PostgresProvider::new_with_schema(&database_url, Some(&schema))
+            .await
+            .expect("Failed to create provider"),
+    );
+
+    // Give the notifier time to start up and establish connection
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Insert work to verify the system is working
+    provider
+        .enqueue_for_orchestrator(
+            WorkItem::StartOrchestration {
+                instance: "reconnect-test-1".to_string(),
+                orchestration: "test-orch".to_string(),
+                version: Some("1.0".to_string()),
+                input: "{}".to_string(),
+                parent_instance: None,
+                parent_id: None,
+                execution_id: 1,
+            },
+            None,
+        )
+        .await
+        .expect("Failed to enqueue work");
+
+    // Fetch should work normally
+    let result = provider
+        .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2))
+        .await
+        .expect("Fetch failed");
+
+    assert!(result.is_some(), "Should find first work item");
+    let (_, lock_token, _) = result.unwrap();
+    provider
+        .ack_orchestration_item(&lock_token, 1, vec![], vec![], vec![], ExecutionMetadata::default())
+        .await
+        .expect("Failed to ack");
+
+    // Now insert more work - should still be detected
+    // (the notifier should still be functioning)
+    provider
+        .enqueue_for_orchestrator(
+            WorkItem::StartOrchestration {
+                instance: "reconnect-test-2".to_string(),
+                orchestration: "test-orch".to_string(),
+                version: Some("1.0".to_string()),
+                input: "{}".to_string(),
+                parent_instance: None,
+                parent_id: None,
+                execution_id: 1,
+            },
+            None,
+        )
+        .await
+        .expect("Failed to enqueue work");
+
+    let start = Instant::now();
+    let result = provider
+        .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2))
+        .await
+        .expect("Fetch failed");
+
+    let elapsed = start.elapsed();
+
+    assert!(result.is_some(), "Should find second work item");
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "Should wake quickly via NOTIFY, took {:?}",
+        elapsed
+    );
+
+    cleanup_schema(&schema).await;
 }

@@ -1,6 +1,6 @@
 use duroxide::providers::{ExecutionMetadata, Provider, WorkItem};
 use duroxide::{Event, EventKind, INITIAL_EVENT_ID, INITIAL_EXECUTION_ID};
-use duroxide_pg::PostgresProvider;
+use duroxide_pg_opt::PostgresProvider;
 use tracing_subscriber::EnvFilter;
 
 // Initialize tracing subscriber for tests with DEBUG level

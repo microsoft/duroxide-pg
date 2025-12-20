@@ -92,6 +92,7 @@ async fn concurrent_continue_as_new_chains() {
     tracing::info!("✓ All 5 concurrent chains completed successfully");
 
     // Verify each chain has 10 executions
+    let verify_start = std::time::Instant::now();
     for instance in &instances {
         for exec_id in 1..=10 {
             let hist = client
@@ -105,8 +106,20 @@ async fn concurrent_continue_as_new_chains() {
             );
         }
     }
+    let verify_duration = verify_start.elapsed();
 
     tracing::info!("✓ All executions verified for all chains");
+
+    eprintln!("\n========== STRESS: CONCURRENT CONTINUE-AS-NEW CHAINS ==========");
+    eprintln!("Test configuration:");
+    eprintln!("  - Concurrent chains: 5");
+    eprintln!("  - Executions per chain: 10");
+    eprintln!("Results:");
+    eprintln!("  - All chains completed successfully");
+    eprintln!("  - Total executions: 50 (5 chains × 10 executions)");
+    eprintln!("  - Verification time: {:?}", verify_duration);
+    eprintln!("Result: PASS");
+    eprintln!("===============================================================\n");
 
     rt.shutdown(None).await;
     common::cleanup_schema(&schema_name).await;
@@ -271,7 +284,7 @@ async fn instance_actor_pattern_stress_test() {
                 ctx.trace_warn("No connection string available yet, skipping health check");
 
                 // Wait and retry
-                ctx.schedule_timer(std::time::Duration::from_millis(30000))
+                ctx.schedule_timer(std::time::Duration::from_millis(1000))
                     .into_timer()
                     .await; // 30 seconds
 
@@ -337,7 +350,7 @@ async fn instance_actor_pattern_stress_test() {
         ctx.trace_info(format!("Health check complete, status: {status}"));
 
         // Step 7: Wait before next check
-        ctx.schedule_timer(std::time::Duration::from_millis(30000))
+        ctx.schedule_timer(std::time::Duration::from_millis(1000))
             .into_timer()
             .await; // 30 seconds
 
@@ -515,6 +528,20 @@ async fn instance_actor_pattern_stress_test() {
     tracing::info!("✓ Total: 150 executions (3 instances × 50 executions each)");
     tracing::info!("✓ Total: 588 activities (3 instances × 49 full cycles × 4 activities)");
     tracing::info!("✓ Total: 147 timers (3 instances × 49 full cycles)");
+
+    eprintln!("\n========== STRESS: INSTANCE ACTOR PATTERN ==========");
+    eprintln!("Test configuration:");
+    eprintln!("  - Concurrent instance actors: 3");
+    eprintln!("  - Executions per actor: 50");
+    eprintln!("  - Activities per full cycle: 4");
+    eprintln!("  - Timer per full cycle: 1 (30s simulated)");
+    eprintln!("Results:");
+    eprintln!("  - Total executions: 150");
+    eprintln!("  - Total activities: 588 (49 cycles × 4 activities × 3 actors)");
+    eprintln!("  - Total timers: 147 (49 cycles × 3 actors)");
+    eprintln!("  - All actors completed successfully");
+    eprintln!("Result: PASS");
+    eprintln!("====================================================\n");
 
     rt.shutdown(None).await;
     common::cleanup_schema(&schema_name).await;

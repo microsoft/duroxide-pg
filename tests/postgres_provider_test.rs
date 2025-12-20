@@ -6,7 +6,7 @@ use duroxide::provider_validation::{
 };
 use duroxide::provider_validations::ProviderFactory;
 use duroxide::providers::Provider;
-use duroxide_pg::PostgresProvider;
+use duroxide_pg_opt::PostgresProvider;
 use sqlx::{postgres::PgPoolOptions, Executor};
 use tracing_subscriber::EnvFilter;
 

@@ -6,7 +6,7 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use duroxide_pg::PostgresProvider;
+//! use duroxide_pg_opt::PostgresProvider;
 //! use duroxide::runtime::Runtime;
 //! use std::sync::Arc;
 //!
@@ -25,7 +25,7 @@
 //! To isolate data in a specific PostgreSQL schema (useful for multi-tenant deployments):
 //!
 //! ```rust,no_run
-//! use duroxide_pg::PostgresProvider;
+//! use duroxide_pg_opt::PostgresProvider;
 //!
 //! # async fn example() -> anyhow::Result<()> {
 //! let provider = PostgresProvider::new_with_schema(
@@ -47,7 +47,7 @@
 //! The provider supports long-polling via PostgreSQL LISTEN/NOTIFY to reduce idle query load:
 //!
 //! ```rust,no_run
-//! use duroxide_pg::{PostgresProvider, LongPollConfig};
+//! use duroxide_pg_opt::{PostgresProvider, LongPollConfig};
 //! use std::time::Duration;
 //!
 //! # async fn example() -> anyhow::Result<()> {

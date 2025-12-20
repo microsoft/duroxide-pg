@@ -13,6 +13,9 @@ use tokio::sync::{oneshot, Notify};
 use tokio::time::sleep_until;
 use tracing::{debug, error, info, warn};
 
+#[cfg(feature = "test-fault-injection")]
+use crate::fault_injection::FaultInjector;
+
 /// Configuration for long-polling behavior.
 #[derive(Debug, Clone)]
 pub struct LongPollConfig {
@@ -72,6 +75,10 @@ pub struct Notifier {
 
     /// Configuration
     config: LongPollConfig,
+
+    /// Fault injector for testing (only available with test-fault-injection feature)
+    #[cfg(feature = "test-fault-injection")]
+    fault_injector: Option<Arc<FaultInjector>>,
 }
 
 impl Notifier {
@@ -82,6 +89,47 @@ impl Notifier {
         orch_notify: Arc<Notify>,
         worker_notify: Arc<Notify>,
         config: LongPollConfig,
+    ) -> Result<Self, sqlx::Error> {
+        Self::new_internal(
+            pool,
+            schema_name,
+            orch_notify,
+            worker_notify,
+            config,
+            #[cfg(feature = "test-fault-injection")]
+            None,
+        )
+        .await
+    }
+
+    /// Create a new notifier with fault injection for testing.
+    #[cfg(feature = "test-fault-injection")]
+    pub async fn new_with_fault_injection(
+        pool: PgPool,
+        schema_name: String,
+        orch_notify: Arc<Notify>,
+        worker_notify: Arc<Notify>,
+        config: LongPollConfig,
+        fault_injector: Arc<FaultInjector>,
+    ) -> Result<Self, sqlx::Error> {
+        Self::new_internal(
+            pool,
+            schema_name,
+            orch_notify,
+            worker_notify,
+            config,
+            Some(fault_injector),
+        )
+        .await
+    }
+
+    async fn new_internal(
+        pool: PgPool,
+        schema_name: String,
+        orch_notify: Arc<Notify>,
+        worker_notify: Arc<Notify>,
+        config: LongPollConfig,
+        #[cfg(feature = "test-fault-injection")] fault_injector: Option<Arc<FaultInjector>>,
     ) -> Result<Self, sqlx::Error> {
         let pg_listener = PgListener::connect_with(&pool).await?;
 
@@ -96,6 +144,8 @@ impl Notifier {
             next_refresh: Instant::now(), // Immediate first refresh
             pending_refresh: None,
             config,
+            #[cfg(feature = "test-fault-injection")]
+            fault_injector,
         };
 
         notifier.subscribe_channels().await?;
@@ -130,6 +180,22 @@ impl Notifier {
     /// Main loop - runs until the notifier is dropped.
     pub async fn run(&mut self) {
         loop {
+            // Check for fault injection: should we panic?
+            #[cfg(feature = "test-fault-injection")]
+            if let Some(ref fi) = self.fault_injector {
+                if fi.should_notifier_panic() {
+                    panic!("Fault injection: notifier panic triggered");
+                }
+                if fi.should_reconnect() {
+                    warn!(
+                        target = "duroxide::providers::postgres::notifier",
+                        "Fault injection: forcing reconnect"
+                    );
+                    self.handle_reconnect().await;
+                    continue;
+                }
+            }
+
             // Calculate next wake time
             let next_timer = self.earliest_timer();
             let refresh_in_progress = self.pending_refresh.is_some();
@@ -292,6 +358,10 @@ impl Notifier {
         let now_ms = current_epoch_ms();
         let window_end_ms = now_ms + self.config.notifier_poll_interval.as_millis() as i64;
 
+        // Get fault injection parameters before spawning
+        #[cfg(feature = "test-fault-injection")]
+        let fault_injector = self.fault_injector.clone();
+
         debug!(
             target = "duroxide::providers::postgres::notifier",
             now_ms = now_ms,
@@ -300,6 +370,32 @@ impl Notifier {
         );
 
         tokio::spawn(async move {
+            // Check for fault injection: add delay before refresh
+            #[cfg(feature = "test-fault-injection")]
+            if let Some(ref fi) = fault_injector {
+                let delay = fi.get_refresh_delay();
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+
+            // Check for fault injection: should refresh error?
+            #[cfg(feature = "test-fault-injection")]
+            if let Some(ref fi) = fault_injector {
+                if fi.should_refresh_error() {
+                    warn!(
+                        target = "duroxide::providers::postgres::notifier",
+                        "Fault injection: simulating refresh error"
+                    );
+                    // Send empty result to simulate error recovery
+                    let _ = tx.send(RefreshResult {
+                        orch_timers: Vec::new(),
+                        worker_timers: Vec::new(),
+                    });
+                    return;
+                }
+            }
+
             // Query for upcoming timers in both queues
             // Use Rust clock ($1) for "now" comparison, not database NOW()
             let orch_timers = sqlx::query_scalar::<_, i64>(&format!(

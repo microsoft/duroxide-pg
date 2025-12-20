@@ -2,8 +2,8 @@
 members = [".", "pg-stress"]
 
 [package]
-name = "duroxide-pg"
-version = "0.1.5"
+name = "duroxide-pg-opt"
+version = "0.1.0"
 edition = "2021"
 authors = ["Affan Dar <affandar@gmail.com>"]
 description = "A PostgreSQL-based provider implementation for Duroxide, a durable task orchestration framework"

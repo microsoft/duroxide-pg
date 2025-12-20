@@ -6,7 +6,7 @@
 use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::runtime::{self, RuntimeOptions};
 use duroxide::{ActivityContext, Client, OrchestrationContext, OrchestrationRegistry};
-use duroxide_pg::PostgresProvider;
+use duroxide_pg_opt::PostgresProvider;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use std::time::Duration;
