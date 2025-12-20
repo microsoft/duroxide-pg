@@ -43,8 +43,12 @@ struct DbMetricsSummary {
     // Fetch effectiveness metrics
     orch_fetch_attempts: u64,
     orch_fetch_items: u64,
+    orch_fetch_loaded: u64,
+    orch_fetch_empty: u64,
     work_fetch_attempts: u64,
     work_fetch_items: u64,
+    work_fetch_loaded: u64,
+    work_fetch_empty: u64,
 }
 
 #[cfg(feature = "db-metrics")]
@@ -62,8 +66,12 @@ impl DbMetricsSummary {
         // Fetch effectiveness counters
         let mut orch_fetch_attempts = 0u64;
         let mut orch_fetch_items = 0u64;
+        let mut orch_fetch_loaded = 0u64;
+        let mut orch_fetch_empty = 0u64;
         let mut work_fetch_attempts = 0u64;
         let mut work_fetch_items = 0u64;
+        let mut work_fetch_loaded = 0u64;
+        let mut work_fetch_empty = 0u64;
 
         for (key, _, _, value) in &data {
             if key.kind() != MetricKind::Counter {
@@ -121,6 +129,30 @@ impl DbMetricsSummary {
                         }
                     }
                 }
+            } else if name == "duroxide.fetch.loaded" {
+                if let DebugValue::Counter(v) = value {
+                    for label in key.key().labels() {
+                        if label.key() == "fetch_type" {
+                            match label.value().as_ref() {
+                                "orchestration" => orch_fetch_loaded += v,
+                                "work_item" => work_fetch_loaded += v,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            } else if name == "duroxide.fetch.empty" {
+                if let DebugValue::Counter(v) = value {
+                    for label in key.key().labels() {
+                        if label.key() == "fetch_type" {
+                            match label.value().as_ref() {
+                                "orchestration" => orch_fetch_empty += v,
+                                "work_item" => work_fetch_empty += v,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -138,8 +170,12 @@ impl DbMetricsSummary {
             calls_by_sp_name,
             orch_fetch_attempts,
             orch_fetch_items,
+            orch_fetch_loaded,
+            orch_fetch_empty,
             work_fetch_attempts,
             work_fetch_items,
+            work_fetch_loaded,
+            work_fetch_empty,
         }
     }
 
@@ -199,6 +235,18 @@ impl DbMetricsSummary {
             self.orch_fetch_attempts + self.work_fetch_attempts,
             self.total_fetch_effectiveness());
         
+        println!("\n--- Loaded vs Empty Fetches ---");
+        println!("  Orchestration: {:>6} loaded / {:>6} empty ({:.1}% loaded)",
+            self.orch_fetch_loaded, self.orch_fetch_empty,
+            if self.orch_fetch_attempts > 0 { 
+                self.orch_fetch_loaded as f64 / self.orch_fetch_attempts as f64 * 100.0 
+            } else { 0.0 });
+        println!("  Work Items:    {:>6} loaded / {:>6} empty ({:.1}% loaded)",
+            self.work_fetch_loaded, self.work_fetch_empty,
+            if self.work_fetch_attempts > 0 { 
+                self.work_fetch_loaded as f64 / self.work_fetch_attempts as f64 * 100.0 
+            } else { 0.0 });
+        
         println!("\nCalls by operation:");
         for (op, count) in &self.calls_by_operation {
             println!("  {:20} {:>10}", op, count);
@@ -218,8 +266,12 @@ impl DbMetricsSummary {
         let sp_calls = self.sp_calls.saturating_sub(baseline.sp_calls);
         let orch_fetch_attempts = self.orch_fetch_attempts.saturating_sub(baseline.orch_fetch_attempts);
         let orch_fetch_items = self.orch_fetch_items.saturating_sub(baseline.orch_fetch_items);
+        let orch_fetch_loaded = self.orch_fetch_loaded.saturating_sub(baseline.orch_fetch_loaded);
+        let orch_fetch_empty = self.orch_fetch_empty.saturating_sub(baseline.orch_fetch_empty);
         let work_fetch_attempts = self.work_fetch_attempts.saturating_sub(baseline.work_fetch_attempts);
         let work_fetch_items = self.work_fetch_items.saturating_sub(baseline.work_fetch_items);
+        let work_fetch_loaded = self.work_fetch_loaded.saturating_sub(baseline.work_fetch_loaded);
+        let work_fetch_empty = self.work_fetch_empty.saturating_sub(baseline.work_fetch_empty);
 
         // Compute delta for operation maps
         let baseline_ops: std::collections::HashMap<_, _> = baseline.calls_by_operation.iter().cloned().collect();
@@ -248,8 +300,12 @@ impl DbMetricsSummary {
             calls_by_sp_name,
             orch_fetch_attempts,
             orch_fetch_items,
+            orch_fetch_loaded,
+            orch_fetch_empty,
             work_fetch_attempts,
             work_fetch_items,
+            work_fetch_loaded,
+            work_fetch_empty,
         }
     }
 }

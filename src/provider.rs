@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::db_metrics::{record_fetch_attempt, record_fetch_success, DbCallTimer, DbOperation, FetchType};
+use crate::db_metrics::{record_fetch_result, DbCallTimer, DbOperation, FetchType};
 use crate::migrations::MigrationRunner;
 use crate::notifier::{LongPollConfig, Notifier};
 
@@ -51,6 +51,10 @@ pub struct PostgresProvider {
     orch_notify: Option<Arc<Notify>>,
     worker_notify: Option<Arc<Notify>>,
     notifier_handle: Option<JoinHandle<()>>,
+
+    // Fault injection (only present when feature is enabled)
+    #[cfg(feature = "test-fault-injection")]
+    fault_injector: Option<Arc<FaultInjector>>,
 }
 
 impl PostgresProvider {
@@ -141,6 +145,8 @@ impl PostgresProvider {
             orch_notify,
             worker_notify,
             notifier_handle,
+            #[cfg(feature = "test-fault-injection")]
+            fault_injector: None,
         })
     }
 
@@ -189,7 +195,7 @@ impl PostgresProvider {
         migration_runner.migrate().await?;
 
         // Start notifier thread if long-polling is enabled AND not disabled by fault injection
-        let (orch_notify, worker_notify, notifier_handle) = if config.enabled && !notifier_disabled {
+        let (orch_notify, worker_notify, notifier_handle, fi) = if config.enabled && !notifier_disabled {
             let orch_notify = Arc::new(Notify::new());
             let worker_notify = Arc::new(Notify::new());
 
@@ -199,7 +205,7 @@ impl PostgresProvider {
                 orch_notify.clone(),
                 worker_notify.clone(),
                 config.clone(),
-                fault_injector,
+                fault_injector.clone(),
             )
             .await?;
 
@@ -213,7 +219,7 @@ impl PostgresProvider {
                 "Long-polling enabled"
             );
 
-            (Some(orch_notify), Some(worker_notify), Some(handle))
+            (Some(orch_notify), Some(worker_notify), Some(handle), Some(fault_injector))
         } else {
             if notifier_disabled {
                 warn!(
@@ -228,7 +234,7 @@ impl PostgresProvider {
                     "Long-polling disabled"
                 );
             }
-            (None, None, None)
+            (None, None, None, Some(fault_injector))
         };
 
         Ok(Self {
@@ -237,6 +243,7 @@ impl PostgresProvider {
             orch_notify,
             worker_notify,
             notifier_handle,
+            fault_injector: fi,
         })
     }
 
@@ -249,12 +256,38 @@ impl PostgresProvider {
         Ok(())
     }
 
-    /// Get current timestamp in milliseconds (Unix epoch)
-    fn now_millis() -> i64 {
+    /// Get current timestamp in milliseconds (Unix epoch) - static version.
+    ///
+    /// This is the base time calculation without any fault injection adjustments.
+    fn now_millis_base() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64
+    }
+
+    /// Get current timestamp in milliseconds, with optional clock skew adjustment.
+    ///
+    /// When fault injection is enabled and a clock skew is configured, the skew
+    /// is added to the current time. This allows simulating nodes with clocks
+    /// that are ahead (positive skew) or behind (negative skew).
+    ///
+    /// When fault injection is disabled, this is zero-cost and equivalent to
+    /// `now_millis_base()`.
+    #[cfg(feature = "test-fault-injection")]
+    fn now_millis(&self) -> i64 {
+        let base = Self::now_millis_base();
+        if let Some(ref fi) = self.fault_injector {
+            base + fi.get_clock_skew_ms()
+        } else {
+            base
+        }
+    }
+
+    /// Get current timestamp in milliseconds (no fault injection).
+    #[cfg(not(feature = "test-fault-injection"))]
+    fn now_millis(&self) -> i64 {
+        Self::now_millis_base()
     }
 
     /// Get schema-qualified table name
@@ -337,9 +370,6 @@ impl PostgresProvider {
         &self,
         lock_timeout: Duration,
     ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
-        // Record fetch attempt for long-poll effectiveness tracking
-        record_fetch_attempt(FetchType::Orchestration);
-
         let start = std::time::Instant::now();
 
         const MAX_RETRIES: u32 = 3;
@@ -350,7 +380,7 @@ impl PostgresProvider {
         let mut _last_error: Option<ProviderError> = None;
 
         for attempt in 0..=MAX_RETRIES {
-            let now_ms = Self::now_millis();
+            let now_ms = self.now_millis();
 
             let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("fetch_orchestration_item"));
             let result: Result<
@@ -423,7 +453,7 @@ impl PostgresProvider {
                         )
                     })?;
 
-                let duration_ms = start.elapsed().as_millis() as u64;
+                let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
                 debug!(
                     target = "duroxide::providers::postgres",
                     operation = "fetch_orchestration_item",
@@ -437,8 +467,8 @@ impl PostgresProvider {
                     "Fetched orchestration item via stored procedure"
                 );
 
-                // Record fetch success for long-poll effectiveness tracking
-                record_fetch_success(FetchType::Orchestration, 1);
+                // Record loaded fetch with timing
+                record_fetch_result(FetchType::Orchestration, 1, duration_ms);
 
                 return Ok(Some((
                     OrchestrationItem {
@@ -459,6 +489,10 @@ impl PostgresProvider {
             }
         }
 
+        // Record empty fetch with timing
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        record_fetch_result(FetchType::Orchestration, 0, duration_ms);
+
         Ok(None)
     }
 
@@ -467,9 +501,6 @@ impl PostgresProvider {
         &self,
         lock_timeout: Duration,
     ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
-        // Record fetch attempt for long-poll effectiveness tracking
-        record_fetch_attempt(FetchType::WorkItem);
-
         let start = std::time::Instant::now();
 
         // Convert Duration to milliseconds
@@ -480,7 +511,7 @@ impl PostgresProvider {
             "SELECT * FROM {}.fetch_work_item($1, $2)",
             self.schema_name
         ))
-        .bind(Self::now_millis())
+        .bind(self.now_millis())
         .bind(lock_timeout_ms)
         .fetch_optional(&*self.pool)
         .await
@@ -493,7 +524,12 @@ impl PostgresProvider {
 
         let (work_item_json, lock_token, attempt_count) = match row {
             Some(row) => row,
-            None => return Ok(None),
+            None => {
+                // Record empty fetch with timing
+                let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+                record_fetch_result(FetchType::WorkItem, 0, duration_ms);
+                return Ok(None);
+            }
         };
 
         let work_item: WorkItem = serde_json::from_str(&work_item_json).map_err(|e| {
@@ -503,7 +539,7 @@ impl PostgresProvider {
             )
         })?;
 
-        let duration_ms = start.elapsed().as_millis() as u64;
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         // Extract instance for logging - different work item types have different structures
         let instance_id = match &work_item {
@@ -532,8 +568,8 @@ impl PostgresProvider {
             "Fetched activity work item via stored procedure"
         );
 
-        // Record fetch success for long-poll effectiveness tracking
-        record_fetch_success(FetchType::WorkItem, 1);
+        // Record loaded fetch with timing
+        record_fetch_result(FetchType::WorkItem, 1, duration_ms);
 
         Ok(Some((work_item, lock_token, attempt_count as u32)))
     }
@@ -673,7 +709,7 @@ impl Provider for PostgresProvider {
             "output": metadata.output,
         });
 
-        let now_ms = Self::now_millis();
+        let now_ms = self.now_millis();
 
         for attempt in 0..=MAX_RETRIES {
             let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("ack_orchestration_item"));
@@ -754,7 +790,7 @@ impl Provider for PostgresProvider {
         ignore_attempt: bool,
     ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
-        let now_ms = Self::now_millis();
+        let now_ms = self.now_millis();
         let delay_param: Option<i64> = delay.map(|d| d.as_millis() as i64);
 
         let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("abandon_orchestration_item"));
@@ -874,7 +910,7 @@ impl Provider for PostgresProvider {
         }
 
         let events_json = serde_json::Value::Array(events_payload);
-        let now_ms = Self::now_millis();
+        let now_ms = self.now_millis();
 
         let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("append_history"));
         sqlx::query(&format!(
@@ -910,7 +946,7 @@ impl Provider for PostgresProvider {
             )
         })?;
 
-        let now_ms = Self::now_millis();
+        let now_ms = self.now_millis();
 
         let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("enqueue_worker_work"));
         sqlx::query(&format!(
@@ -997,7 +1033,7 @@ impl Provider for PostgresProvider {
             ProviderError::permanent("ack_worker", format!("Failed to serialize completion: {e}"))
         })?;
 
-        let now_ms = Self::now_millis();
+        let now_ms = self.now_millis();
 
         // Call stored procedure to atomically delete worker item and enqueue completion
         let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("ack_worker"));
@@ -1050,7 +1086,7 @@ impl Provider for PostgresProvider {
         let start = std::time::Instant::now();
 
         // Get current time from application for consistent time reference
-        let now_ms = Self::now_millis();
+        let now_ms = self.now_millis();
 
         // Convert Duration to seconds for the stored procedure
         let extend_secs = extend_for.as_secs() as i64;
@@ -1106,7 +1142,7 @@ impl Provider for PostgresProvider {
         ignore_attempt: bool,
     ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
-        let now_ms = Self::now_millis();
+        let now_ms = self.now_millis();
         let delay_param: Option<i64> = delay.map(|d| d.as_millis() as i64);
 
         let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("abandon_work_item"));
@@ -1167,7 +1203,7 @@ impl Provider for PostgresProvider {
         let start = std::time::Instant::now();
 
         // Get current time from application for consistent time reference
-        let now_ms = Self::now_millis();
+        let now_ms = self.now_millis();
 
         // Convert Duration to seconds for the stored procedure
         let extend_secs = extend_for.as_secs() as i64;
@@ -1261,7 +1297,7 @@ impl Provider for PostgresProvider {
         };
 
         // Determine visible_at: use max of fire_at_ms (for TimerFired) and delay
-        let now_ms = Self::now_millis();
+        let now_ms = self.now_millis();
 
         let visible_at_ms = if let WorkItem::TimerFired { fire_at_ms, .. } = &item {
             if *fire_at_ms > 0 {
@@ -1572,7 +1608,7 @@ impl ProviderAdmin for PostgresProvider {
 
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
     async fn get_queue_depths(&self) -> Result<QueueDepths, ProviderError> {
-        let now_ms = Self::now_millis();
+        let now_ms = self.now_millis();
 
         let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("get_queue_depths"));
         let row: Option<(i64, i64)> = sqlx::query_as(&format!(

@@ -11,7 +11,7 @@
 //! - `refresh_should_error`: Makes the next refresh query fail
 //! - `notifier_should_panic`: Simulates a panic in the notifier thread
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Fault injector for testing resilience scenarios.
@@ -34,6 +34,11 @@ pub struct FaultInjector {
 
     /// If true, simulates a panic in the notifier thread
     notifier_should_panic: AtomicBool,
+
+    /// Clock skew offset in milliseconds (can be positive or negative).
+    /// This value is added to all time calculations in the provider,
+    /// simulating a node whose clock is ahead (positive) or behind (negative).
+    clock_skew_ms: AtomicI64,
 }
 
 impl FaultInjector {
@@ -106,6 +111,52 @@ impl FaultInjector {
     pub fn should_reconnect(&self) -> bool {
         self.force_reconnect.swap(false, Ordering::SeqCst)
     }
+
+    // =========================================================================
+    // Clock Skew Simulation
+    // =========================================================================
+
+    /// Set clock skew offset in milliseconds.
+    ///
+    /// Positive values simulate a clock that is ahead (future timestamps).
+    /// Negative values simulate a clock that is behind (past timestamps).
+    ///
+    /// This offset is added to all `now_millis()` calculations in the provider,
+    /// allowing simulation of clock drift between nodes.
+    ///
+    /// # Example
+    /// ```
+    /// use duroxide_pg_opt::FaultInjector;
+    /// use std::time::Duration;
+    ///
+    /// let fi = FaultInjector::new();
+    /// // Simulate clock 500ms ahead
+    /// fi.set_clock_skew(Duration::from_millis(500));
+    ///
+    /// // Simulate clock 200ms behind
+    /// fi.set_clock_skew_signed(-200);
+    /// ```
+    pub fn set_clock_skew(&self, skew: Duration) {
+        self.clock_skew_ms.store(skew.as_millis() as i64, Ordering::SeqCst);
+    }
+
+    /// Set clock skew offset in milliseconds (signed).
+    ///
+    /// Positive values simulate a clock that is ahead.
+    /// Negative values simulate a clock that is behind.
+    pub fn set_clock_skew_signed(&self, skew_ms: i64) {
+        self.clock_skew_ms.store(skew_ms, Ordering::SeqCst);
+    }
+
+    /// Get the current clock skew offset in milliseconds.
+    pub fn get_clock_skew_ms(&self) -> i64 {
+        self.clock_skew_ms.load(Ordering::SeqCst)
+    }
+
+    /// Clear the clock skew (reset to 0).
+    pub fn clear_clock_skew(&self) {
+        self.clock_skew_ms.store(0, Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -162,5 +213,23 @@ mod tests {
         assert!(fi.should_notifier_panic());
         // Flag should be consumed
         assert!(!fi.should_notifier_panic());
+    }
+
+    #[test]
+    fn test_clock_skew() {
+        let fi = FaultInjector::new();
+        assert_eq!(fi.get_clock_skew_ms(), 0);
+
+        // Positive skew (clock ahead)
+        fi.set_clock_skew(Duration::from_millis(500));
+        assert_eq!(fi.get_clock_skew_ms(), 500);
+
+        // Negative skew (clock behind)
+        fi.set_clock_skew_signed(-200);
+        assert_eq!(fi.get_clock_skew_ms(), -200);
+
+        // Clear
+        fi.clear_clock_skew();
+        assert_eq!(fi.get_clock_skew_ms(), 0);
     }
 }

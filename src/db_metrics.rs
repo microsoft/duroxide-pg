@@ -33,6 +33,14 @@
 //!   - Labels: `fetch_type` (orchestration, work_item)
 //! - `duroxide.fetch.items` (counter): Number of items successfully fetched
 //!   - Labels: `fetch_type` (orchestration, work_item)
+//! - `duroxide.fetch.loaded` (counter): Number of fetches that returned items
+//!   - Labels: `fetch_type` (orchestration, work_item)
+//! - `duroxide.fetch.empty` (counter): Number of fetches that returned no items
+//!   - Labels: `fetch_type` (orchestration, work_item)
+//! - `duroxide.fetch.loaded_duration_ms` (histogram): Duration of fetches that returned items
+//!   - Labels: `fetch_type` (orchestration, work_item)
+//! - `duroxide.fetch.empty_duration_ms` (histogram): Duration of fetches that returned no items
+//!   - Labels: `fetch_type` (orchestration, work_item)
 
 /// Types of database operations for metrics classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +165,47 @@ pub fn record_fetch_success(fetch_type: FetchType, count: u64) {
 #[cfg(not(feature = "db-metrics"))]
 #[inline(always)]
 pub fn record_fetch_success(_fetch_type: FetchType, _count: u64) {
+    // Compiles to nothing when db-metrics feature is disabled
+}
+
+/// Record a fetch result with timing. Zero-cost when `db-metrics` feature is disabled.
+///
+/// This is the preferred way to record fetch metrics as it separates "loaded" fetches
+/// (which return items) from "empty" fetches (which return nothing). This distinction
+/// is important because:
+/// - Empty fetches typically execute much faster (no rows to lock/serialize)
+/// - Loaded fetches have row locking, serialization, and data transfer overhead
+/// - Averaging them together skews performance analysis
+///
+/// # Arguments
+///
+/// * `fetch_type` - The type of fetch operation (Orchestration or WorkItem)
+/// * `items_fetched` - Number of items returned (0 for empty fetch)
+/// * `duration_ms` - Duration of the fetch operation in milliseconds
+#[cfg(feature = "db-metrics")]
+#[inline]
+pub fn record_fetch_result(fetch_type: FetchType, items_fetched: u64, duration_ms: f64) {
+    use metrics::{counter, histogram};
+
+    // Always record the attempt
+    counter!("duroxide.fetch.attempts", "fetch_type" => fetch_type.as_str()).increment(1);
+
+    if items_fetched > 0 {
+        // Loaded fetch - got items
+        counter!("duroxide.fetch.items", "fetch_type" => fetch_type.as_str()).increment(items_fetched);
+        counter!("duroxide.fetch.loaded", "fetch_type" => fetch_type.as_str()).increment(1);
+        histogram!("duroxide.fetch.loaded_duration_ms", "fetch_type" => fetch_type.as_str()).record(duration_ms);
+    } else {
+        // Empty fetch - no items
+        counter!("duroxide.fetch.empty", "fetch_type" => fetch_type.as_str()).increment(1);
+        histogram!("duroxide.fetch.empty_duration_ms", "fetch_type" => fetch_type.as_str()).record(duration_ms);
+    }
+}
+
+/// Record a fetch result with timing. Zero-cost no-op when `db-metrics` feature is disabled.
+#[cfg(not(feature = "db-metrics"))]
+#[inline(always)]
+pub fn record_fetch_result(_fetch_type: FetchType, _items_fetched: u64, _duration_ms: f64) {
     // Compiles to nothing when db-metrics feature is disabled
 }
 
