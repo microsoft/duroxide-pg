@@ -109,3 +109,31 @@ If metrics don't show significant differences:
 1. Ensure `activity_delay_ms` is high enough (1000ms+) to create idle periods
 2. Verify `max_concurrent` is low (3-5) so work is not always immediately available
 3. Check that the `db-metrics` feature is enabled in the cargo test command
+
+## Saving Results
+
+After completing the analysis, ask the user:
+
+> **Would you like to save these results as a snapshot?**
+>
+> I can create a timestamped results file in `perf_results/` folder with:
+> - Test configuration parameters
+> - Current git commit hash
+> - Full metrics comparison table
+> - Raw test output
+>
+> File will be named: `longpoll-comparison-YYYY-MM-DD-{local|remote}.md`
+>
+> Please specify if you're using a **local** or **remote** PostgreSQL database.
+
+If the user wants to save results, create the file at:
+```
+perf_results/longpoll-comparison-YYYY-MM-DD-{local|remote}.md
+```
+
+Include in the file:
+1. Date and git commit hash (run `git rev-parse HEAD`)
+2. Test configuration table (max_concurrent, duration_secs, tasks_per_instance, activity_delay_ms, etc.)
+3. Results comparison table
+4. Full raw output from both tests
+5. Key findings summary
