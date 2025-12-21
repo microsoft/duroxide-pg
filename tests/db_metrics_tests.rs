@@ -3,7 +3,7 @@
 //! These tests verify that database operations are properly instrumented
 //! when the `db-metrics` feature is enabled.
 
-use duroxide_pg_opt::db_metrics::{record_db_call, record_fetch_attempt, record_fetch_success, DbCallTimer, DbOperation, FetchType};
+use duroxide_pg_opt::db_metrics::{record_db_call, DbCallTimer, DbOperation};
 
 #[test]
 fn test_operation_types() {
