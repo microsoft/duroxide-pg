@@ -1,0 +1,129 @@
+# Copilot Instructions for duroxide-pg-opt
+
+## Project Overview
+
+PostgreSQL provider for [Duroxide](https://github.com/affandar/duroxide) durable workflow framework. Implements `Provider` and `ProviderAdmin` traits using PostgreSQL with atomic stored procedures and LISTEN/NOTIFY long-polling.
+
+## Architecture
+
+### Core Components
+
+- **[src/provider.rs](../src/provider.rs)**: `PostgresProvider` - implements duroxide `Provider` trait, all DB operations use stored procedures for atomicity
+- **[src/notifier.rs](../src/notifier.rs)**: Long-polling via PostgreSQL LISTEN/NOTIFY with timer heaps for scheduled work wake-up
+- **[src/migrations.rs](../src/migrations.rs)**: Auto-migration on provider creation, embedded SQL from `migrations/`
+- **[src/fault_injection.rs](../src/fault_injection.rs)**: Testing resilience (clock skew, notifier disable, query delays)
+- **[src/db_metrics.rs](../src/db_metrics.rs)**: Zero-cost metrics instrumentation (enabled via `db-metrics` feature)
+
+### Database Schema
+
+All tables live in a configurable PostgreSQL schema (default: `public`). Key tables: `instances`, `executions`, `history`, `orchestrator_queue`, `worker_queue`, `instance_locks`. See [migrations/0001_initial_schema.sql](../migrations/0001_initial_schema.sql) for complete schema with triggers and stored procedures.
+
+### Test Schema Isolation
+
+Tests create unique schemas (`test_{uuid_suffix}`, `e2e_test_{uuid_suffix}`) for isolation. Always call `provider.cleanup_schema()` after tests. See [tests/common/mod.rs](../tests/common/mod.rs) for helpers.
+
+## Development Workflow
+
+### Environment Setup
+
+```bash
+# Required: DATABASE_URL in .env or environment
+DATABASE_URL=postgres://user:pass@localhost:5432/duroxide_test
+```
+
+### Localhost vs Remote Database Testing
+
+Tests frequently switch between local PostgreSQL (Docker) and cloud-hosted PostgreSQL with ~200-300ms latency. Latency-sensitive tests use `is_localhost()` to adjust timing thresholds:
+
+```rust
+fn is_localhost() -> bool {
+    let url = get_database_url();
+    url.contains("localhost") || url.contains("127.0.0.1")
+}
+
+// Example: Adjust lock timeout and sleep durations
+let (lock_timeout, sleep_duration) = if is_localhost() {
+    (Duration::from_secs(1), Duration::from_millis(400))   // Tight timing
+} else {
+    (Duration::from_secs(5), Duration::from_millis(2000))  // Relaxed for latency
+};
+```
+
+See [tests/postgres_provider_test.rs](../tests/postgres_provider_test.rs) `test_worker_lock_renewal_extends_timeout` for a real example.
+
+### Running Tests
+
+```bash
+# Basic tests (requires PostgreSQL)
+cargo test
+
+# Stress tests (marked #[ignore], require explicit run)
+./scripts/run-stress-tests.sh
+
+# Performance tests
+./scripts/run-perf-tests.sh
+
+# Fault injection tests (require feature flag)
+cargo test --test fault_injection_tests --features test-fault-injection -- --ignored
+
+# With metrics for long-poll comparison (single-threaded required)
+cargo test --features db-metrics -- --test-threads=1
+```
+
+### Key Cargo Features
+
+- `test-fault-injection` (default): Enables `FaultInjector` for testing clock skew, notifier failures
+- `db-metrics`: Enables database operation instrumentation (not default)
+
+## Conventions
+
+### Error Handling
+
+Use `ProviderError` with proper classification in [provider.rs](../src/provider.rs#L300):
+- `ProviderError::retryable()` - deadlocks (40P01), pool timeouts, I/O errors
+- `ProviderError::permanent()` - constraint violations (23505, 23503), serialization failures
+
+### Stored Procedures
+
+All provider operations use schema-qualified stored procedures (e.g., `schema.fetch_orchestration_item`). This ensures atomicity and allows the database to handle locking. Add new procedures in [migrations/](../migrations/) and update the migration runner.
+
+### Time Handling
+
+All timestamps use Unix epoch milliseconds (`i64`). The `now_millis()` method in provider supports clock skew injection for testing. Never use `chrono` types directly in provider logic.
+
+### Long-Polling Pattern
+
+The notifier thread (`Notifier::run()`) handles LISTEN/NOTIFY and timer scheduling. Dispatchers call `fetch_*` which internally waits on `tokio::sync::Notify`. See [docs/LONG_POLLING_DESIGN.md](../docs/LONG_POLLING_DESIGN.md) for architecture details.
+
+## Integration with Duroxide
+
+This crate implements traits from `duroxide::providers`:
+- `Provider` - core work item fetching, history management, locking
+- `ProviderAdmin` - schema management, observability
+
+### Provider Validation Tests
+
+Duroxide provides a comprehensive validation test suite via `duroxide::provider_validation` that all providers must pass. See [tests/postgres_provider_test.rs](../tests/postgres_provider_test.rs) for the pattern:
+
+```rust
+use duroxide::provider_validation::{atomicity, error_handling, instance_locking, ...};
+use duroxide::provider_validations::ProviderFactory;
+
+// Implement ProviderFactory trait for your provider
+impl ProviderFactory for PostgresProviderFactory {
+    async fn create_provider(&self) -> Arc<dyn Provider> { ... }
+    fn lock_timeout(&self) -> Duration { ... }
+}
+
+// Use macro to generate test wrappers
+provider_validation_test!(atomicity::test_atomicity_failure_rollback);
+```
+
+Test categories: `atomicity`, `error_handling`, `instance_creation`, `instance_locking`, `lock_expiration`, `management`, `multi_execution`, `queue_semantics`. Currently 61 validation tests passing.
+
+## Workspace Structure
+
+- **[pg-stress/](../pg-stress/)**: Stress test binary and `PostgresStressFactory` for duroxide stress test infrastructure
+- **[tests/](../tests/)**: Integration tests (basic, stress, perf, fault injection, longpoll)
+- **[scripts/](../scripts/)**: Test runners and performance measurement helpers
+- **[docs/](../docs/)**: Design documents for long-polling, performance analysis, proposals

@@ -196,82 +196,8 @@ mod lock_expiration_tests {
     provider_validation_test!(lock_expiration::test_worker_lock_renewal_success);
     provider_validation_test!(lock_expiration::test_worker_lock_renewal_invalid_token);
     provider_validation_test!(lock_expiration::test_worker_lock_renewal_after_expiration);
-    // Note: test_worker_lock_renewal_extends_timeout is implemented below with
-    // configurable timing to support high-latency remote database connections.
-    // The duroxide library's version uses hardcoded 1s timeout and 800ms sleep,
-    // which is incompatible with ~300ms network latency.
+    provider_validation_test!(lock_expiration::test_worker_lock_renewal_extends_timeout);
     provider_validation_test!(lock_expiration::test_worker_lock_renewal_after_ack);
-
-    /// Custom implementation of test_worker_lock_renewal_extends_timeout
-    /// with timing adjusted for both localhost and remote databases.
-    /// 
-    /// The duroxide library's test uses hardcoded 1s timeout and 800ms pre-renewal sleep,
-    /// which fails with >200ms network latency. This implementation uses:
-    /// - localhost: 1s timeout, 400ms sleep (original tight timing)
-    /// - remote: 5s timeout, 2000ms sleep (accounts for ~300ms latency per operation)
-    #[tokio::test]
-    async fn test_worker_lock_renewal_extends_timeout() {
-        use duroxide::providers::WorkItem;
-        
-        let factory = PostgresProviderFactory::new();
-        let provider = std::sync::Arc::new(factory.create_postgres_provider().await);
-        
-        // Timing configuration based on localhost vs remote
-        let (lock_timeout, pre_renewal_sleep, post_renewal_sleep) = if is_localhost() {
-            // Localhost: tight timing (matches original test)
-            (
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_millis(400),
-                std::time::Duration::from_millis(400),
-            )
-        } else {
-            // Remote: relaxed timing to account for ~300ms latency per operation
-            (
-                std::time::Duration::from_secs(5),
-                std::time::Duration::from_millis(2000),
-                std::time::Duration::from_millis(2000),
-            )
-        };
-        
-        tracing::info!("→ Testing worker lock renewal: renewal extends timeout (custom timing)");
-        
-        // Enqueue work item
-        provider
-            .enqueue_for_worker(WorkItem::ActivityExecute {
-                instance: "test-instance".to_string(),
-                execution_id: 1,
-                id: 1,
-                name: "TestActivity".to_string(),
-                input: "test".to_string(),
-            })
-            .await
-            .unwrap();
-        
-        // Fetch with configured timeout
-        let (_item, token, _) = provider
-            .fetch_work_item(lock_timeout, std::time::Duration::ZERO)
-            .await
-            .unwrap()
-            .unwrap();
-        tracing::info!("Fetched work item with {:?} timeout", lock_timeout);
-        
-        // Wait before expiration
-        tokio::time::sleep(pre_renewal_sleep).await;
-        
-        // Renew lock
-        provider.renew_work_item_lock(&token, lock_timeout).await.unwrap();
-        tracing::info!("Renewed lock at {:?} mark", pre_renewal_sleep);
-        
-        // Wait again after renewal
-        tokio::time::sleep(post_renewal_sleep).await;
-        
-        // Item should still be locked (because we renewed before expiration)
-        let result = provider.fetch_work_item(lock_timeout, std::time::Duration::ZERO).await.unwrap();
-        assert!(result.is_none(), "Item should still be locked after renewal");
-        
-        tracing::info!("✓ Test passed: lock timeout extension verified");
-        factory.cleanup_schema().await;
-    }
 }
 
 mod multi_execution_tests {
@@ -292,6 +218,8 @@ mod queue_semantics_tests {
     provider_validation_test!(queue_semantics::test_worker_ack_atomicity);
     provider_validation_test!(queue_semantics::test_timer_delayed_visibility);
     provider_validation_test!(queue_semantics::test_lost_lock_token_handling);
+    provider_validation_test!(queue_semantics::test_worker_item_immediate_visibility);
+    provider_validation_test!(queue_semantics::test_worker_delayed_visibility_skips_future_items);
 }
 
 mod management_tests {

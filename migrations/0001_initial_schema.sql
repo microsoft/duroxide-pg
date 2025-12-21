@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_queue (
 CREATE TABLE IF NOT EXISTS worker_queue (
     id BIGSERIAL PRIMARY KEY,
     work_item TEXT NOT NULL, -- JSON serialized WorkItem
+    visible_at TIMESTAMPTZ NOT NULL, -- When the item becomes available for processing
     lock_token TEXT,
     locked_until BIGINT, -- Unix timestamp in milliseconds
     created_at TIMESTAMPTZ NOT NULL,
@@ -76,6 +77,7 @@ CREATE TABLE IF NOT EXISTS instance_locks (
 CREATE INDEX IF NOT EXISTS idx_orch_visible ON orchestrator_queue(visible_at, lock_token);
 CREATE INDEX IF NOT EXISTS idx_orch_instance ON orchestrator_queue(instance_id);
 CREATE INDEX IF NOT EXISTS idx_orch_lock ON orchestrator_queue(lock_token);
+CREATE INDEX IF NOT EXISTS idx_worker_visible ON worker_queue(visible_at, lock_token);
 CREATE INDEX IF NOT EXISTS idx_worker_available ON worker_queue(lock_token, id);
 CREATE INDEX IF NOT EXISTS idx_instance_locks_locked_until ON instance_locks(locked_until);
 CREATE INDEX IF NOT EXISTS idx_history_lookup ON history(instance_id, execution_id, event_id);
@@ -109,14 +111,14 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Trigger function for worker queue
--- Worker queue items are always immediately available (no visible_at)
--- Send created_at as the timestamp for consistency
+-- Worker queue items now have visible_at for delayed visibility
+-- Send visible_at timestamp for timer scheduling
 CREATE OR REPLACE FUNCTION notify_worker_work()
 RETURNS TRIGGER AS $$
 BEGIN
     PERFORM pg_notify(
         TG_TABLE_SCHEMA || '_worker_work',
-        (EXTRACT(EPOCH FROM NEW.created_at) * 1000)::BIGINT::TEXT
+        (EXTRACT(EPOCH FROM NEW.visible_at) * 1000)::BIGINT::TEXT
     );
     RETURN NEW;
 END;
@@ -324,6 +326,7 @@ BEGIN
        v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: get_queue_depths
+    -- Returns count of items available for processing (visible and unlocked/lock expired)
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.get_queue_depths(p_now_ms BIGINT)
         RETURNS TABLE(
@@ -334,9 +337,11 @@ BEGIN
             RETURN QUERY
             SELECT 
                 (SELECT COUNT(*)::BIGINT FROM %I.orchestrator_queue 
-                 WHERE lock_token IS NULL OR locked_until <= p_now_ms) as orchestrator_queue,
+                 WHERE visible_at <= TO_TIMESTAMP(p_now_ms / 1000.0)
+                   AND (lock_token IS NULL OR locked_until <= p_now_ms)) as orchestrator_queue,
                 (SELECT COUNT(*)::BIGINT FROM %I.worker_queue 
-                 WHERE lock_token IS NULL OR locked_until <= p_now_ms) as worker_queue;
+                 WHERE visible_at <= TO_TIMESTAMP(p_now_ms / 1000.0)
+                   AND (lock_token IS NULL OR locked_until <= p_now_ms)) as worker_queue;
         END;
         $get_queue_depths$ LANGUAGE plpgsql;
     ', v_schema_name, v_schema_name, v_schema_name);
@@ -353,9 +358,12 @@ BEGIN
             p_now_ms BIGINT
         )
         RETURNS VOID AS $enq_worker$
+        DECLARE
+            v_now_ts TIMESTAMPTZ;
         BEGIN
-            INSERT INTO %I.worker_queue (work_item, created_at)
-            VALUES (p_work_item, TO_TIMESTAMP(p_now_ms / 1000.0));
+            v_now_ts := TO_TIMESTAMP(p_now_ms / 1000.0);
+            INSERT INTO %I.worker_queue (work_item, visible_at, created_at)
+            VALUES (p_work_item, v_now_ts, v_now_ts);
         END;
         $enq_worker$ LANGUAGE plpgsql;
     ', v_schema_name, v_schema_name);
@@ -417,6 +425,9 @@ BEGIN
     ', v_schema_name, v_schema_name);
 
     -- Procedure: fetch_work_item
+    -- Item is available if:
+    -- 1. visible_at <= now (not delayed)
+    -- 2. AND (lock_token IS NULL OR locked_until <= now) (not locked or lock expired)
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.fetch_work_item(
             p_now_ms BIGINT,
@@ -432,7 +443,8 @@ BEGIN
         BEGIN
             SELECT q.id INTO v_id
             FROM %I.worker_queue q
-            WHERE q.lock_token IS NULL OR q.locked_until <= p_now_ms
+            WHERE q.visible_at <= TO_TIMESTAMP(p_now_ms / 1000.0)
+              AND (q.lock_token IS NULL OR q.locked_until <= p_now_ms)
             ORDER BY q.id
             LIMIT 1
             FOR UPDATE OF q SKIP LOCKED;
@@ -460,6 +472,8 @@ BEGIN
     ', v_schema_name, v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: abandon_work_item
+    -- Always clear lock_token and locked_until when abandoning.
+    -- Use visible_at to control when item becomes available again.
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.abandon_work_item(
             p_lock_token TEXT,
@@ -470,34 +484,30 @@ BEGIN
         RETURNS VOID AS $abandon_worker$
         DECLARE
             v_rows_affected INTEGER;
-            v_locked_until BIGINT;
+            v_visible_at TIMESTAMPTZ;
         BEGIN
+            -- Calculate visible_at based on delay using Rust-provided time
             IF p_delay_ms IS NOT NULL AND p_delay_ms > 0 THEN
-                v_locked_until := p_now_ms + p_delay_ms;
-                
-                IF p_ignore_attempt THEN
-                    UPDATE %I.worker_queue
-                    SET locked_until = v_locked_until,
-                        attempt_count = GREATEST(0, attempt_count - 1)
-                    WHERE lock_token = p_lock_token;
-                ELSE
-                    UPDATE %I.worker_queue
-                    SET locked_until = v_locked_until
-                    WHERE lock_token = p_lock_token;
-                END IF;
+                v_visible_at := TO_TIMESTAMP((p_now_ms + p_delay_ms) / 1000.0);
             ELSE
-                IF p_ignore_attempt THEN
-                    UPDATE %I.worker_queue
-                    SET lock_token = NULL,
-                        locked_until = NULL,
-                        attempt_count = GREATEST(0, attempt_count - 1)
-                    WHERE lock_token = p_lock_token;
-                ELSE
-                    UPDATE %I.worker_queue
-                    SET lock_token = NULL,
-                        locked_until = NULL
-                    WHERE lock_token = p_lock_token;
-                END IF;
+                v_visible_at := TO_TIMESTAMP(p_now_ms / 1000.0);
+            END IF;
+
+            -- Always clear lock_token and locked_until when abandoning
+            -- Use visible_at to control when item becomes available again
+            IF p_ignore_attempt THEN
+                UPDATE %I.worker_queue
+                SET lock_token = NULL,
+                    locked_until = NULL,
+                    visible_at = v_visible_at,
+                    attempt_count = GREATEST(0, attempt_count - 1)
+                WHERE lock_token = p_lock_token;
+            ELSE
+                UPDATE %I.worker_queue
+                SET lock_token = NULL,
+                    locked_until = NULL,
+                    visible_at = v_visible_at
+                WHERE lock_token = p_lock_token;
             END IF;
 
             GET DIAGNOSTICS v_rows_affected = ROW_COUNT;
@@ -507,7 +517,7 @@ BEGIN
             END IF;
         END;
         $abandon_worker$ LANGUAGE plpgsql;
-    ', v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name);
+    ', v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: enqueue_orchestrator_work
     EXECUTE format('
@@ -759,8 +769,8 @@ BEGIN
             END IF;
 
             IF p_worker_items IS NOT NULL AND JSONB_ARRAY_LENGTH(p_worker_items) > 0 THEN
-                INSERT INTO %I.worker_queue (work_item, created_at)
-                SELECT elem::TEXT, v_now_ts
+                INSERT INTO %I.worker_queue (work_item, visible_at, created_at)
+                SELECT elem::TEXT, v_now_ts, v_now_ts
                 FROM JSONB_ARRAY_ELEMENTS(p_worker_items) AS elem;
             END IF;
 
