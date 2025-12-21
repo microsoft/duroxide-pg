@@ -17,6 +17,7 @@
 
 mod common;
 
+use common::is_localhost;
 use duroxide::providers::{Provider, WorkItem};
 use duroxide_pg_opt::{LongPollConfig, PostgresProvider};
 use sqlx::postgres::PgPoolOptions;
@@ -242,9 +243,10 @@ async fn delayed_work_cross_node_visibility() {
     );
 
     // The fetch should have completed around the 50ms mark (500ms - 450ms)
-    // Allow some margin for timing jitter
+    // Allow some margin for timing jitter and remote DB latency (~100-200ms per query)
+    let threshold = if is_localhost() { Duration::from_millis(150) } else { Duration::from_millis(400) };
     assert!(
-        elapsed < Duration::from_millis(150),
+        elapsed < threshold,
         "Long-poll should have woken up quickly after work became visible, took {:?}",
         elapsed
     );
@@ -698,13 +700,15 @@ async fn multi_node_lock_race_longpoll() {
     );
 
     // The winner should have gotten it quickly (not waited full timeout)
+    // Note: On remote DBs with 100-200ms latency, this threshold needs to be larger
+    let winner_threshold = if is_localhost() { Duration::from_millis(200) } else { Duration::from_millis(500) };
     if let Some(Some((node_id, instance, elapsed))) = winners.first() {
         println!(
             "Winner: node {} got '{}' in {:?}",
             node_id, instance, elapsed
         );
         assert!(
-            *elapsed < Duration::from_millis(200),
+            *elapsed < winner_threshold,
             "Winner should get work quickly, not wait for timeout"
         );
     }
@@ -796,9 +800,11 @@ async fn multi_node_notify_propagation() {
     assert!(got_work_count >= 1, "At least one node should get the work");
 
     // All should have responded quickly (not waiting full 5s timeout)
+    // Note: On remote DBs with 100-200ms latency, allow more time
+    let response_threshold = if is_localhost() { Duration::from_secs(2) } else { Duration::from_secs(3) };
     for (name, _, elapsed) in &results {
         assert!(
-            *elapsed < Duration::from_secs(2),
+            *elapsed < response_threshold,
             "{} took too long: {:?} (NOTIFY may not have propagated)",
             name,
             elapsed

@@ -20,6 +20,12 @@ fn get_database_url() -> String {
     std::env::var("DATABASE_URL").expect("DATABASE_URL must be set")
 }
 
+/// Check if we're running against a localhost database.
+fn is_localhost() -> bool {
+    let url = get_database_url();
+    url.contains("localhost") || url.contains("127.0.0.1")
+}
+
 fn next_schema_name() -> String {
     let guid = uuid::Uuid::new_v4().to_string();
     let suffix = &guid[guid.len() - 8..];
@@ -260,15 +266,29 @@ async fn create_provider_with_skew(
 async fn fault_injection_clock_skew_late_visibility() {
     let schema = next_schema_name();
 
-    // Node A has clock 300ms ahead - work it schedules will appear LATE to others
-    // visible_at = (wall + 300) + delay = wall + 300 + delay
-    let (node_a, _fi_a) = create_provider_with_skew(&schema, false, 300).await;
+    // Use larger clock skew for remote DBs to account for network latency
+    // For remote DBs, use 4s to give plenty of margin for network latency
+    let clock_skew_ms = if is_localhost() { 1000 } else { 4000 };
+    
+    let (node_a, fi_a) = create_provider_with_skew(&schema, false, clock_skew_ms).await;
+    assert_eq!(
+        fi_a.get_clock_skew_ms(),
+        clock_skew_ms,
+        "Clock skew should be configured correctly"
+    );
 
     // Node B has correct time (no skew)
-    let (node_b, _fi_b) = create_provider_with_skew(&schema, false, 0).await;
+    let (node_b, fi_b) = create_provider_with_skew(&schema, false, 0).await;
+    assert_eq!(
+        fi_b.get_clock_skew_ms(),
+        0,
+        "Node B should have no clock skew"
+    );
 
-    // Node A schedules work for "300ms from now" (from A's perspective)
-    // visible_at = A_now + 300 = (wall + 300) + 300 = wall + 600ms
+    // Node A schedules work for 500ms from now (from A's perspective)
+    // visible_at = (wall + clock_skew) + 500
+    // For remote, use 1500ms delay to provide more margin
+    let delay_ms = if is_localhost() { 500 } else { 1500 };
     node_a
         .enqueue_for_orchestrator(
             WorkItem::StartOrchestration {
@@ -280,31 +300,36 @@ async fn fault_injection_clock_skew_late_visibility() {
                 parent_id: None,
                 execution_id: 1,
             },
-            Some(Duration::from_millis(300)),
+            Some(Duration::from_millis(delay_ms)),
         )
         .await
         .expect("Failed to enqueue delayed work");
 
-    // Wait 400ms wall clock - visible_at is at wall 600ms, so NOT visible yet
-    // (well before 600ms even with grace period)
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Wait - should be well before visible_at
+    // For remote, we have visible_at = now + 4000 + 1500 = now + 5500ms
+    // So waiting 2000ms should still be way before visible_at
+    let first_wait_ms = if is_localhost() { 800 } else { 2000 };
+    tokio::time::sleep(Duration::from_millis(first_wait_ms)).await;
 
+    // Use ZERO poll_timeout to check immediately without waiting
     let result = node_b
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(50))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::ZERO)
         .await
         .expect("Fetch failed");
 
-    // Work should NOT be visible yet because A's clock was ahead when scheduling
+    // Work should NOT be visible yet
     assert!(
         result.is_none(),
         "Delayed work should NOT be visible yet due to Node A's clock being ahead"
     );
 
-    // Wait another 300ms (total 700ms wall) - now it should definitely be visible
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Wait until past visible_at
+    // For remote: remaining wait should be ~5500 - 2000 = 3500ms, so wait 4000ms to be safe
+    let second_wait_ms = if is_localhost() { 900 } else { 4000 };
+    tokio::time::sleep(Duration::from_millis(second_wait_ms)).await;
 
     let result = node_b
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(100))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(200))
         .await
         .expect("Fetch failed");
 
@@ -433,7 +458,7 @@ async fn fault_injection_symmetric_clock_skew() {
     assert!(result.is_some(), "Node B should receive the work");
 
     // Node B should receive work around 700ms after enqueue (500ms delay + 200ms total skew)
-    // Allow 100ms margin for timing jitter and grace period
+    // Allow generous margin for timing jitter, network latency, and concurrent test load
     println!(
         "Symmetric clock skew test:\n\
          - Node A skew: +100ms (ahead)\n\
@@ -450,8 +475,11 @@ async fn fault_injection_symmetric_clock_skew() {
         "Work should NOT appear before ~700ms due to clock skew, but appeared at {:?}",
         time_since_enqueue
     );
+    
+    // Use tighter threshold for localhost, more generous for remote
+    let upper_bound_ms = if is_localhost() { 900 } else { 1500 };
     assert!(
-        time_since_enqueue < Duration::from_millis(900),
+        time_since_enqueue < Duration::from_millis(upper_bound_ms),
         "Work should appear around 700ms, not {:?}",
         time_since_enqueue
     );

@@ -14,6 +14,7 @@
 
 mod common;
 
+use common::is_localhost;
 use duroxide::providers::{ExecutionMetadata, Provider, WorkItem};
 use duroxide_pg_opt::{LongPollConfig, PostgresProvider};
 #[cfg(feature = "test-fault-injection")]
@@ -125,9 +126,10 @@ async fn fetch_times_out_after_poll_timeout() {
         "Should wait for poll_timeout, only waited {:?}",
         elapsed
     );
-    // But not too much longer (allow 1s for system jitter)
+    // But not too much longer (allow more slack for remote DB latency)
+    let slack = if is_localhost() { Duration::from_secs(1) } else { Duration::from_secs(2) };
     assert!(
-        elapsed < poll_timeout + Duration::from_secs(1),
+        elapsed < poll_timeout + slack,
         "Should not wait much longer than poll_timeout, waited {:?}",
         elapsed
     );
@@ -162,9 +164,10 @@ async fn fetch_works_without_long_poll_enabled() {
 
     assert!(result.is_none(), "Should not have found work");
     // Without long-poll, should return immediately (no waiting)
-    // Allow 1s for database query latency
+    // Allow more time for database query latency on remote DBs
+    let threshold = if is_localhost() { Duration::from_secs(1) } else { Duration::from_secs(2) };
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < threshold,
         "Without long-poll should return immediately, took {:?}",
         elapsed
     );
@@ -491,8 +494,10 @@ async fn resilience_work_before_startup() {
     let elapsed = start.elapsed();
 
     assert!(result.is_some(), "Should find pre-existing work");
+    // Allow more time for remote DBs with higher query latency
+    let threshold = if is_localhost() { Duration::from_millis(500) } else { Duration::from_secs(2) };
     assert!(
-        elapsed < Duration::from_millis(500),
+        elapsed < threshold,
         "Should find work immediately, took {:?}",
         elapsed
     );
@@ -792,8 +797,10 @@ async fn resilience_notifier_disabled_returns_immediately_when_empty() {
 
     assert!(result.is_none(), "Should not find work");
     // Without notifier, returns immediately instead of waiting for poll_timeout
+    // Allow more time for database query latency on remote DBs
+    let threshold = if is_localhost() { Duration::from_secs(1) } else { Duration::from_secs(2) };
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < threshold,
         "Without notifier should return immediately, took {:?}",
         elapsed
     );
@@ -867,8 +874,11 @@ async fn timer_precision_100ms_grace() {
     // Should take approximately 2s (visible_at delay) + 100ms (grace) ± tolerance
     // The work becomes visible at visible_at, and the timer fires at visible_at + grace
     // Allow generous tolerance for system timing variations
-    let expected_min = Duration::from_millis(delay_ms as u64 - 300); // 1.7s (allow 300ms early)
-    let expected_max = Duration::from_millis(delay_ms as u64 + 1000); // 3.0s (allow 1s late)
+    // For remote DBs, allow much more tolerance due to network latency
+    let early_tolerance_ms = if is_localhost() { 300 } else { 1000 };
+    let late_tolerance_ms = if is_localhost() { 1000 } else { 2000 };
+    let expected_min = Duration::from_millis(delay_ms as u64 - early_tolerance_ms);
+    let expected_max = Duration::from_millis(delay_ms as u64 + late_tolerance_ms);
 
     assert!(
         elapsed >= expected_min,
@@ -969,9 +979,12 @@ async fn timer_precision_many_timers() {
 
     // Verify items came in roughly the expected order and timing
     // Allow generous tolerance due to system timing variations
+    // For remote DBs, network latency adds significant overhead (multiple DB operations per timer)
+    let early_tolerance_ms = if is_localhost() { 400 } else { 1000 };
+    let late_tolerance_ms = if is_localhost() { 1000 } else { 3500 };
     for (i, (instance, elapsed)) in fetch_times.iter().enumerate() {
-        let expected_min = Duration::from_millis(((i + 1) * 500 - 400) as u64);
-        let expected_max = Duration::from_millis(((i + 1) * 500 + 1000) as u64);
+        let expected_min = Duration::from_millis(((i + 1) * 500).saturating_sub(early_tolerance_ms) as u64);
+        let expected_max = Duration::from_millis(((i + 1) * 500 + late_tolerance_ms) as u64);
 
         assert!(
             *elapsed >= expected_min,
@@ -994,11 +1007,14 @@ async fn timer_precision_many_timers() {
 }
 
 /// Test timer precision under high insert load
-/// Verifies that 95th percentile timer error is < 200ms
+/// Verifies that 95th percentile timer error is < 500ms
 #[tokio::test]
 async fn timer_precision_under_load() {
     let schema = next_schema_name();
     let database_url = get_database_url();
+    
+    // Use shorter delay for localhost (faster), longer for remote (needs more time)
+    let base_delay_ms: u64 = if is_localhost() { 1500 } else { 4000 };
 
     let provider = Arc::new(
         PostgresProvider::new_with_schema(&database_url, Some(&schema))
@@ -1016,7 +1032,6 @@ async fn timer_precision_under_load() {
         .expect("Failed to connect");
 
     let num_items = 20;
-    let base_delay_ms: u64 = 1500; // Start 1.5s from insert time (allow time for inserts to complete)
     let interval_ms: u64 = 100; // 100ms apart
 
     // Record the insert start time for calculating expected fetch times
@@ -1120,10 +1135,23 @@ async fn timer_precision_under_load() {
     // eprintln!("all errors (sorted): {:?}", timing_errors);
     // eprintln!("==================================================================\n");
 
-    // 95th percentile should be < 500ms (generous tolerance for CI environments)
+    // 95th percentile threshold:
+    // - Local DB: tight 500ms threshold
+    // - Remote DB: generous threshold to account for:
+    //   - Variable insert times (each insert ~100-200ms on remote)
+    //   - Sequential fetch latency accumulation (each fetch ~100ms on remote)
+    let p95_threshold: i64 = if is_localhost() {
+        500 // Local DB: tight tolerance
+    } else {
+        // Remote DB: allow for accumulated fetch latency
+        // ~100ms per fetch × 20 items = ~2000ms potential accumulation
+        500 + (base_delay_ms as i64 - 1500) + (num_items as i64 * 100)
+    };
+    
     assert!(
-        p95_error < 500,
-        "95th percentile timing error should be < 500ms, got {}ms. Errors: {:?}",
+        p95_error < p95_threshold,
+        "95th percentile timing error should be < {}ms, got {}ms. Errors: {:?}",
+        p95_threshold,
         p95_error,
         timing_errors
     );
@@ -1216,9 +1244,11 @@ async fn e2e_timer_fires_correctly() {
     assert!(result.is_some(), "Should find work after timer fires");
 
     // Should take approximately 3s (delay) + 100ms (grace) ± tolerance
-    // Allow generous tolerance for DB latency
-    let expected_min = Duration::from_millis((delay_ms - 500) as u64); // 2.5s
-    let expected_max = Duration::from_millis((delay_ms + 1500) as u64); // 4.5s
+    // Allow generous tolerance for DB latency and clock drift between test machine and DB server
+    // Lower bound is relaxed because timers can fire slightly early due to timing differences
+    let tolerance_ms = if is_localhost() { 500 } else { 1500 };
+    let expected_min = Duration::from_millis((delay_ms - tolerance_ms) as u64);
+    let expected_max = Duration::from_millis((delay_ms + tolerance_ms) as u64);
 
     assert!(
         elapsed >= expected_min && elapsed <= expected_max,

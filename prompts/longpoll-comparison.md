@@ -122,13 +122,13 @@ After completing the analysis, ask the user:
 > - Full metrics comparison table
 > - Raw test output
 >
-> File will be named: `longpoll-comparison-YYYY-MM-DD-{local|remote}.md`
+> File will be named: `lp-comp-YYYY-MM-DD-{local|remote}.md`
 >
 > Please specify if you're using a **local** or **remote** PostgreSQL database.
 
 If the user wants to save results, create the file at:
 ```
-perf_results/longpoll-comparison-YYYY-MM-DD-{local|remote}.md
+perf_results/lp-comp-YYYY-MM-DD-{local|remote}.md
 ```
 
 Include in the file:
@@ -137,3 +137,8 @@ Include in the file:
 3. Results comparison table
 4. Full raw output from both tests
 5. Key findings summary
+
+### Important Notes
+
+- **Do NOT commit** the perf_results file unless the user explicitly asks to commit it
+- **Privacy**: Do NOT include database hostname, connection string, or any identifying information about the database server. Only note whether it was "local" or "remote" in the filename suffix

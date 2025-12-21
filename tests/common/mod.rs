@@ -11,6 +11,14 @@ fn get_database_url() -> String {
     std::env::var("DATABASE_URL").expect("DATABASE_URL must be set")
 }
 
+/// Check if we're running against a localhost database.
+/// Remote databases have higher latency and need relaxed timing thresholds.
+#[allow(dead_code)]
+pub fn is_localhost() -> bool {
+    let url = get_database_url();
+    url.contains("localhost") || url.contains("127.0.0.1")
+}
+
 #[allow(dead_code)]
 fn next_schema_name() -> String {
     let guid = uuid::Uuid::new_v4().to_string();
