@@ -401,17 +401,14 @@ BEGIN
         CREATE OR REPLACE FUNCTION %I.renew_work_item_lock(
             p_lock_token TEXT,
             p_now_ms BIGINT,
-            p_extend_secs BIGINT
+            p_extend_ms BIGINT
         )
         RETURNS VOID AS $renew_lock$
         DECLARE
-            v_locked_until BIGINT;
             v_rows_affected INTEGER;
         BEGIN
-            v_locked_until := p_now_ms + (p_extend_secs * 1000);
-            
             UPDATE %I.worker_queue
-            SET locked_until = v_locked_until
+            SET locked_until = GREATEST(locked_until, p_now_ms) + p_extend_ms
             WHERE lock_token = p_lock_token
               AND locked_until > p_now_ms;
             
@@ -888,17 +885,14 @@ BEGIN
         CREATE OR REPLACE FUNCTION %I.renew_orchestration_item_lock(
             p_lock_token TEXT,
             p_now_ms BIGINT,
-            p_extend_secs BIGINT
+            p_extend_ms BIGINT
         )
         RETURNS VOID AS $renew_orch_lock$
         DECLARE
-            v_locked_until BIGINT;
             v_rows_affected INTEGER;
         BEGIN
-            v_locked_until := p_now_ms + (p_extend_secs * 1000);
-            
             UPDATE %I.instance_locks
-            SET locked_until = v_locked_until
+            SET locked_until = GREATEST(locked_until, p_now_ms) + p_extend_ms
             WHERE lock_token = p_lock_token
               AND locked_until > p_now_ms;
             
@@ -909,7 +903,7 @@ BEGIN
             END IF;
 
             UPDATE %I.orchestrator_queue
-            SET locked_until = v_locked_until
+            SET locked_until = GREATEST(locked_until, p_now_ms) + p_extend_ms
             WHERE lock_token = p_lock_token;
         END;
         $renew_orch_lock$ LANGUAGE plpgsql;

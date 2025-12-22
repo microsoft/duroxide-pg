@@ -1088,8 +1088,8 @@ impl Provider for PostgresProvider {
         // Get current time from application for consistent time reference
         let now_ms = self.now_millis();
 
-        // Convert Duration to seconds for the stored procedure
-        let extend_secs = extend_for.as_secs() as i64;
+        // Convert Duration to milliseconds for the stored procedure to avoid truncation
+        let extend_ms = extend_for.as_millis() as i64;
 
         let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("renew_work_item_lock"));
         match sqlx::query(&format!(
@@ -1098,7 +1098,7 @@ impl Provider for PostgresProvider {
         ))
         .bind(token)
         .bind(now_ms)
-        .bind(extend_secs)
+        .bind(extend_ms)
         .execute(&*self.pool)
         .await
         {
@@ -1108,7 +1108,7 @@ impl Provider for PostgresProvider {
                     target = "duroxide::providers::postgres",
                     operation = "renew_work_item_lock",
                     token = %token,
-                    extend_for_secs = extend_secs,
+                extend_for_ms = extend_ms,
                     duration_ms = duration_ms,
                     "Work item lock renewed successfully"
                 );
@@ -1205,8 +1205,8 @@ impl Provider for PostgresProvider {
         // Get current time from application for consistent time reference
         let now_ms = self.now_millis();
 
-        // Convert Duration to seconds for the stored procedure
-        let extend_secs = extend_for.as_secs() as i64;
+        // Convert Duration to milliseconds for the stored procedure to avoid truncation
+        let extend_ms = extend_for.as_millis() as i64;
 
         let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("renew_orchestration_item_lock"));
         match sqlx::query(&format!(
@@ -1215,7 +1215,7 @@ impl Provider for PostgresProvider {
         ))
         .bind(token)
         .bind(now_ms)
-        .bind(extend_secs)
+        .bind(extend_ms)
         .execute(&*self.pool)
         .await
         {
@@ -1225,7 +1225,7 @@ impl Provider for PostgresProvider {
                     target = "duroxide::providers::postgres",
                     operation = "renew_orchestration_item_lock",
                     token = %token,
-                    extend_for_secs = extend_secs,
+                extend_for_ms = extend_ms,
                     duration_ms = duration_ms,
                     "Orchestration item lock renewed successfully"
                 );
