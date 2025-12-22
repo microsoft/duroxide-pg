@@ -33,6 +33,7 @@ fn get_database_url() -> String {
 
 /// Check if we're running against a localhost database.
 /// Remote databases have higher latency and need relaxed timing thresholds.
+#[allow(dead_code)]
 fn is_localhost() -> bool {
     let url = get_database_url();
     url.contains("localhost") || url.contains("127.0.0.1")

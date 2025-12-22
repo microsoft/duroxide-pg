@@ -82,6 +82,7 @@
 //! [dev-dependencies]
 //! duroxide-pg = { version = "0.1", features = ["test-fault-injection"] }
 //! ```
+pub mod db_metrics;
 ///
 /// ## Database Metrics (Instrumentation)
 ///
@@ -94,10 +95,8 @@
 ///
 /// This enables zero-cost metrics collection for all database operations.
 /// See the [`db_metrics`] module for details.
-
 #[cfg(feature = "test-fault-injection")]
 pub mod fault_injection;
-pub mod db_metrics;
 pub mod migrations;
 pub mod notifier;
 pub mod provider;

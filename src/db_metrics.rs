@@ -192,13 +192,16 @@ pub fn record_fetch_result(fetch_type: FetchType, items_fetched: u64, duration_m
 
     if items_fetched > 0 {
         // Loaded fetch - got items
-        counter!("duroxide.fetch.items", "fetch_type" => fetch_type.as_str()).increment(items_fetched);
+        counter!("duroxide.fetch.items", "fetch_type" => fetch_type.as_str())
+            .increment(items_fetched);
         counter!("duroxide.fetch.loaded", "fetch_type" => fetch_type.as_str()).increment(1);
-        histogram!("duroxide.fetch.loaded_duration_ms", "fetch_type" => fetch_type.as_str()).record(duration_ms);
+        histogram!("duroxide.fetch.loaded_duration_ms", "fetch_type" => fetch_type.as_str())
+            .record(duration_ms);
     } else {
         // Empty fetch - no items
         counter!("duroxide.fetch.empty", "fetch_type" => fetch_type.as_str()).increment(1);
-        histogram!("duroxide.fetch.empty_duration_ms", "fetch_type" => fetch_type.as_str()).record(duration_ms);
+        histogram!("duroxide.fetch.empty_duration_ms", "fetch_type" => fetch_type.as_str())
+            .record(duration_ms);
     }
 }
 

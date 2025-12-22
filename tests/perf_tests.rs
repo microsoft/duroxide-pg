@@ -156,7 +156,10 @@ async fn perf_notify_wake_latency() {
     eprintln!("  - Dispatcher waited idle for 2s");
     eprintln!("  - Work inserted via enqueue_for_orchestrator");
     eprintln!("Results:");
-    eprintln!("  - Wake latency (insert -> fetch return): {:?}", wake_latency);
+    eprintln!(
+        "  - Wake latency (insert -> fetch return): {:?}",
+        wake_latency
+    );
     eprintln!("  - Work found: {}", result.is_some());
     eprintln!("Expected: Near-instant wake via NOTIFY (< 500ms)");
     eprintln!("===============================================\n");
@@ -237,7 +240,14 @@ async fn perf_immediate_work_latency() {
         // Ack to clean up
         if let Some((_, lock_token, _)) = fetch_result {
             let _ = provider
-                .ack_orchestration_item(&lock_token, 1, vec![], vec![], vec![], ExecutionMetadata::default())
+                .ack_orchestration_item(
+                    &lock_token,
+                    1,
+                    vec![],
+                    vec![],
+                    vec![],
+                    ExecutionMetadata::default(),
+                )
                 .await;
         }
     }
@@ -268,11 +278,7 @@ async fn perf_immediate_work_latency() {
 
     // With NOTIFY, we expect very low latency
     // Allow generous tolerance for CI environments
-    assert!(
-        p99 < 500,
-        "p99 latency should be < 500ms, got {}ms",
-        p99
-    );
+    assert!(p99 < 500, "p99 latency should be < 500ms, got {}ms", p99);
 
     cleanup_schema(&schema).await;
 }

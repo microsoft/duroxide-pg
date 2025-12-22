@@ -16,9 +16,9 @@ mod common;
 
 use common::is_localhost;
 use duroxide::providers::{ExecutionMetadata, Provider, WorkItem};
-use duroxide_pg_opt::{LongPollConfig, PostgresProvider};
 #[cfg(feature = "test-fault-injection")]
 use duroxide_pg_opt::FaultInjector;
+use duroxide_pg_opt::{LongPollConfig, PostgresProvider};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -127,7 +127,11 @@ async fn fetch_times_out_after_poll_timeout() {
         elapsed
     );
     // But not too much longer (allow more slack for remote DB latency)
-    let slack = if is_localhost() { Duration::from_secs(1) } else { Duration::from_secs(2) };
+    let slack = if is_localhost() {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(2)
+    };
     assert!(
         elapsed < poll_timeout + slack,
         "Should not wait much longer than poll_timeout, waited {:?}",
@@ -165,7 +169,11 @@ async fn fetch_works_without_long_poll_enabled() {
     assert!(result.is_none(), "Should not have found work");
     // Without long-poll, should return immediately (no waiting)
     // Allow more time for database query latency on remote DBs
-    let threshold = if is_localhost() { Duration::from_secs(1) } else { Duration::from_secs(2) };
+    let threshold = if is_localhost() {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(2)
+    };
     assert!(
         elapsed < threshold,
         "Without long-poll should return immediately, took {:?}",
@@ -495,7 +503,11 @@ async fn resilience_work_before_startup() {
 
     assert!(result.is_some(), "Should find pre-existing work");
     // Allow more time for remote DBs with higher query latency
-    let threshold = if is_localhost() { Duration::from_millis(500) } else { Duration::from_secs(2) };
+    let threshold = if is_localhost() {
+        Duration::from_millis(500)
+    } else {
+        Duration::from_secs(2)
+    };
     assert!(
         elapsed < threshold,
         "Should find work immediately, took {:?}",
@@ -798,7 +810,11 @@ async fn resilience_notifier_disabled_returns_immediately_when_empty() {
     assert!(result.is_none(), "Should not find work");
     // Without notifier, returns immediately instead of waiting for poll_timeout
     // Allow more time for database query latency on remote DBs
-    let threshold = if is_localhost() { Duration::from_secs(1) } else { Duration::from_secs(2) };
+    let threshold = if is_localhost() {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(2)
+    };
     assert!(
         elapsed < threshold,
         "Without notifier should return immediately, took {:?}",
@@ -847,15 +863,18 @@ async fn timer_precision_100ms_grace() {
         schema
     ))
     .bind("timer-test")
-    .bind(serde_json::to_string(&serde_json::json!({
-        "StartOrchestration": {
-            "instance": "timer-test",
-            "orchestration": "test-orch",
-            "version": "1.0",
-            "input": "{}",
-            "execution_id": 1
-        }
-    })).unwrap())
+    .bind(
+        serde_json::to_string(&serde_json::json!({
+            "StartOrchestration": {
+                "instance": "timer-test",
+                "orchestration": "test-orch",
+                "version": "1.0",
+                "input": "{}",
+                "execution_id": 1
+            }
+        }))
+        .unwrap(),
+    )
     .bind(visible_at)
     .execute(&pool)
     .await
@@ -983,7 +1002,8 @@ async fn timer_precision_many_timers() {
     let early_tolerance_ms = if is_localhost() { 400 } else { 1000 };
     let late_tolerance_ms = if is_localhost() { 1000 } else { 3500 };
     for (i, (instance, elapsed)) in fetch_times.iter().enumerate() {
-        let expected_min = Duration::from_millis(((i + 1) * 500).saturating_sub(early_tolerance_ms) as u64);
+        let expected_min =
+            Duration::from_millis(((i + 1) * 500).saturating_sub(early_tolerance_ms) as u64);
         let expected_max = Duration::from_millis(((i + 1) * 500 + late_tolerance_ms) as u64);
 
         assert!(
@@ -1012,7 +1032,7 @@ async fn timer_precision_many_timers() {
 async fn timer_precision_under_load() {
     let schema = next_schema_name();
     let database_url = get_database_url();
-    
+
     // Use shorter delay for localhost (faster), longer for remote (needs more time)
     let base_delay_ms: u64 = if is_localhost() { 1500 } else { 4000 };
 
@@ -1096,10 +1116,7 @@ async fn timer_precision_under_load() {
         // Record timing trace
         timing_traces.push(format!(
             "item={:20} expected={:5}ms actual={:5}ms error={:+5}ms",
-            item.instance,
-            expected_time_ms,
-            actual_ms,
-            error_ms
+            item.instance, expected_time_ms, actual_ms, error_ms
         ));
 
         // Collect lock token for ack after timing loop
@@ -1147,7 +1164,7 @@ async fn timer_precision_under_load() {
         // ~100ms per fetch × 20 items = ~2000ms potential accumulation
         500 + (base_delay_ms as i64 - 1500) + (num_items as i64 * 100)
     };
-    
+
     assert!(
         p95_error < p95_threshold,
         "95th percentile timing error should be < {}ms, got {}ms. Errors: {:?}",
@@ -1327,10 +1344,7 @@ async fn resilience_notifier_dead() {
     let elapsed = start.elapsed();
 
     // Should find work immediately via do_fetch()
-    assert!(
-        result.is_some(),
-        "Should find work even with notifier dead"
-    );
+    assert!(result.is_some(), "Should find work even with notifier dead");
     assert!(
         elapsed < Duration::from_secs(1),
         "First fetch should find existing work quickly, took {:?}",
@@ -1383,7 +1397,14 @@ async fn resilience_connection_drop() {
     assert!(result.is_some(), "Should find first work item");
     let (_, lock_token, _) = result.unwrap();
     provider
-        .ack_orchestration_item(&lock_token, 1, vec![], vec![], vec![], ExecutionMetadata::default())
+        .ack_orchestration_item(
+            &lock_token,
+            1,
+            vec![],
+            vec![],
+            vec![],
+            ExecutionMetadata::default(),
+        )
         .await
         .expect("Failed to ack");
 

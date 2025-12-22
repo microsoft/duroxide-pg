@@ -8,9 +8,19 @@
 //! Run the stress test binary:
 //!
 //! ```bash
-//! cargo run --release --package duroxide-pg-stress --bin pg-stress [DURATION]
+//! # Run parallel orchestrations stress test (default)
+//! cargo run --release --package duroxide-pg-stress --bin pg-stress
+//!
+//! # Run large payload stress test
+//! cargo run --release --package duroxide-pg-stress --bin pg-stress --test-type large-payload
+//!
+//! # Run all stress tests
+//! cargo run --release --package duroxide-pg-stress --bin pg-stress --test-type all
 //! ```
 
+use duroxide::provider_stress_tests::large_payload::{
+    run_large_payload_test_with_config, LargePayloadConfig,
+};
 use duroxide::provider_stress_tests::parallel_orchestrations::{
     run_parallel_orchestrations_test_with_config, ProviderStressFactory,
 };
@@ -23,6 +33,8 @@ use tracing::info;
 
 // Re-export the stress test infrastructure for convenience
 pub use duroxide::provider_stress_tests::{StressTestConfig as Config, StressTestResult};
+// Re-export LargePayloadConfig for external use
+pub use duroxide::provider_stress_tests::large_payload::LargePayloadConfig as LargePayloadConfigExport;
 
 /// Factory for creating PostgreSQL providers for stress testing
 pub struct PostgresStressFactory {
@@ -64,7 +76,10 @@ impl ProviderStressFactory for PostgresStressFactory {
             "stress_test_shared".to_string()
         };
 
-        info!("Creating PostgreSQL provider with schema: {}, long_poll: {}", schema_name, self.long_poll_enabled);
+        info!(
+            "Creating PostgreSQL provider with schema: {}, long_poll: {}",
+            schema_name, self.long_poll_enabled
+        );
 
         let config = LongPollConfig {
             enabled: self.long_poll_enabled,
@@ -342,4 +357,181 @@ fn mask_password(url: &str) -> String {
         }
     }
     url.to_string()
+}
+
+/// Available stress test types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StressTestType {
+    /// Parallel orchestrations test (fan-out/fan-in pattern)
+    Parallel,
+    /// Large payload test (memory and history management)
+    LargePayload,
+    /// All available stress tests
+    All,
+}
+
+impl std::str::FromStr for StressTestType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "parallel" => Ok(StressTestType::Parallel),
+            "large-payload" | "largepayload" | "large_payload" => Ok(StressTestType::LargePayload),
+            "all" => Ok(StressTestType::All),
+            _ => Err(format!(
+                "Unknown test type '{}'. Valid options: parallel, large-payload, all",
+                s
+            )),
+        }
+    }
+}
+
+/// Check if the database URL points to localhost
+fn is_localhost_db(database_url: &str) -> bool {
+    database_url.contains("localhost") || database_url.contains("127.0.0.1")
+}
+
+/// Run the large payload stress test suite for PostgreSQL
+///
+/// # Remote Database Limitations
+///
+/// For remote databases, this test uses reduced intensity settings to work around
+/// a hardcoded 60-second `wait_for_orchestration` timeout in duroxide's stress test
+/// framework (`src/provider_stress_test/core.rs`). With high-latency connections
+/// (200-300ms per query), the full test configuration can exceed this timeout.
+///
+/// TODO: Once duroxide makes the wait_for_orchestration timeout configurable in
+/// StressTestConfig or LargePayloadConfig, remove the local/remote distinction
+/// and use the full intensity settings for all databases.
+/// Tracking: https://github.com/affandar/duroxide - needs configurable timeout
+pub async fn run_large_payload_suite(
+    database_url: String,
+    duration_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let hostname = extract_hostname(&database_url);
+    let is_local = is_localhost_db(&database_url);
+
+    info!("=== Duroxide PostgreSQL Large Payload Stress Test ===");
+    info!("Database: {}", mask_password(&database_url));
+    info!("Hostname: {}", hostname);
+    info!("Duration: {} seconds", duration_secs);
+    info!(
+        "Mode: {}",
+        if is_local {
+            "Local (full intensity)"
+        } else {
+            "Remote (reduced intensity)"
+        }
+    );
+
+    let factory = PostgresStressFactory::new(database_url);
+
+    // Configure large payload test with custom duration
+    // Remote databases have higher latency, so reduce test intensity to avoid 60s timeout
+    // The duroxide stress test framework has a hardcoded 60s wait_for_orchestration timeout.
+    // With remote DBs (200-300ms latency), each fetch_history call takes 1-2s.
+    // 20 activities + 5 sub-orchs = ~80 events × large payloads = easily exceeds 60s.
+    let config = if is_local {
+        // Full intensity for local databases
+        LargePayloadConfig {
+            base: StressTestConfig {
+                max_concurrent: 5,
+                duration_secs,
+                tasks_per_instance: 1,
+                activity_delay_ms: 5,
+                orch_concurrency: 2,
+                worker_concurrency: 2,
+            },
+            small_payload_kb: 10,
+            medium_payload_kb: 50,
+            large_payload_kb: 100,
+            activity_count: 20,
+            sub_orch_count: 5,
+        }
+    } else {
+        // TODO: STOPGAP - Remove this reduced config once duroxide adds configurable timeout
+        // Reduced intensity for remote databases to complete within 60s timeout
+        // - Smaller payloads (5/20/50 KB instead of 10/50/100 KB)
+        // - Fewer activities (8 instead of 20)
+        // - Fewer sub-orchestrations (2 instead of 5)
+        // This keeps total history size manageable for high-latency connections
+        LargePayloadConfig {
+            base: StressTestConfig {
+                max_concurrent: 3,
+                duration_secs,
+                tasks_per_instance: 1,
+                activity_delay_ms: 5,
+                orch_concurrency: 2,
+                worker_concurrency: 2,
+            },
+            small_payload_kb: 5,
+            medium_payload_kb: 20,
+            large_payload_kb: 50,
+            activity_count: 8,
+            sub_orch_count: 2,
+        }
+    };
+
+    info!(
+        "\n--- Running Large Payload stress test (payloads: {}KB/{}KB/{}KB, activities: {}, sub-orchs: {}) ---",
+        config.small_payload_kb,
+        config.medium_payload_kb,
+        config.large_payload_kb,
+        config.activity_count,
+        config.sub_orch_count
+    );
+
+    let result = run_large_payload_test_with_config(&factory, config).await?;
+
+    info!(
+        "Completed: {}, Failed: {}, Success Rate: {:.2}%",
+        result.completed,
+        result.failed,
+        result.success_rate()
+    );
+    info!(
+        "Throughput: {:.2} orch/sec, {:.2} activities/sec",
+        result.orch_throughput, result.activity_throughput
+    );
+    info!("Average latency: {:.2}ms", result.avg_latency_ms);
+
+    // Print summary
+    info!("\n=== Large Payload Stress Test Results Summary ===\n");
+    let results = vec![(
+        "PostgreSQL-LargePayload".to_string(),
+        "2:2".to_string(),
+        result.clone(),
+    )];
+    duroxide::provider_stress_tests::print_comparison_table(&results);
+
+    // Validate test passed
+    if result.success_rate() < 99.0 {
+        return Err(format!(
+            "Large payload stress test had failures: {:.2}% success rate",
+            result.success_rate()
+        )
+        .into());
+    }
+
+    info!("\n✅ Large payload stress test passed!");
+    Ok(())
+}
+
+/// Run all stress tests (parallel orchestrations and large payload)
+pub async fn run_all_stress_tests(
+    database_url: String,
+    duration_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    info!("=== Running ALL Stress Tests ===\n");
+
+    // Run parallel orchestrations test
+    run_test_suite(database_url.clone(), duration_secs).await?;
+
+    info!("\n");
+
+    // Run large payload test
+    run_large_payload_suite(database_url, duration_secs).await?;
+
+    info!("\n✅ All stress tests completed successfully!");
+    Ok(())
 }

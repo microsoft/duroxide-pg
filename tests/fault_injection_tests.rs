@@ -8,9 +8,9 @@
 mod common;
 
 use duroxide::providers::{Provider, WorkItem};
-use duroxide_pg_opt::{LongPollConfig, PostgresProvider};
 #[cfg(feature = "test-fault-injection")]
 use duroxide_pg_opt::FaultInjector;
+use duroxide_pg_opt::{LongPollConfig, PostgresProvider};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -74,7 +74,7 @@ async fn fault_notifier_panic() {
     // Give time for panic to occur
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Insert work  
+    // Insert work
     provider
         .enqueue_for_orchestrator(
             WorkItem::StartOrchestration {
@@ -269,7 +269,7 @@ async fn fault_injection_clock_skew_late_visibility() {
     // Use larger clock skew for remote DBs to account for network latency
     // For remote DBs, use 4s to give plenty of margin for network latency
     let clock_skew_ms = if is_localhost() { 1000 } else { 4000 };
-    
+
     let (node_a, fi_a) = create_provider_with_skew(&schema, false, clock_skew_ms).await;
     assert_eq!(
         fi_a.get_clock_skew_ms(),
@@ -475,7 +475,7 @@ async fn fault_injection_symmetric_clock_skew() {
         "Work should NOT appear before ~700ms due to clock skew, but appeared at {:?}",
         time_since_enqueue
     );
-    
+
     // Use tighter threshold for localhost, more generous for remote
     let upper_bound_ms = if is_localhost() { 900 } else { 1500 };
     assert!(

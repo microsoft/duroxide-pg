@@ -195,47 +195,53 @@ impl PostgresProvider {
         migration_runner.migrate().await?;
 
         // Start notifier thread if long-polling is enabled AND not disabled by fault injection
-        let (orch_notify, worker_notify, notifier_handle, fi) = if config.enabled && !notifier_disabled {
-            let orch_notify = Arc::new(Notify::new());
-            let worker_notify = Arc::new(Notify::new());
+        let (orch_notify, worker_notify, notifier_handle, fi) =
+            if config.enabled && !notifier_disabled {
+                let orch_notify = Arc::new(Notify::new());
+                let worker_notify = Arc::new(Notify::new());
 
-            let mut notifier = Notifier::new_with_fault_injection(
-                pool.clone(),
-                schema_name.clone(),
-                orch_notify.clone(),
-                worker_notify.clone(),
-                config.clone(),
-                fault_injector.clone(),
-            )
-            .await?;
+                let mut notifier = Notifier::new_with_fault_injection(
+                    pool.clone(),
+                    schema_name.clone(),
+                    orch_notify.clone(),
+                    worker_notify.clone(),
+                    config.clone(),
+                    fault_injector.clone(),
+                )
+                .await?;
 
-            let handle = tokio::spawn(async move {
-                notifier.run().await;
-            });
+                let handle = tokio::spawn(async move {
+                    notifier.run().await;
+                });
 
-            info!(
-                target = "duroxide::providers::postgres",
-                schema = %schema_name,
-                "Long-polling enabled"
-            );
-
-            (Some(orch_notify), Some(worker_notify), Some(handle), Some(fault_injector))
-        } else {
-            if notifier_disabled {
-                warn!(
+                info!(
                     target = "duroxide::providers::postgres",
                     schema = %schema_name,
-                    "Long-polling disabled by fault injection"
+                    "Long-polling enabled"
                 );
+
+                (
+                    Some(orch_notify),
+                    Some(worker_notify),
+                    Some(handle),
+                    Some(fault_injector),
+                )
             } else {
-                debug!(
-                    target = "duroxide::providers::postgres",
-                    schema = %schema_name,
-                    "Long-polling disabled"
-                );
-            }
-            (None, None, None, Some(fault_injector))
-        };
+                if notifier_disabled {
+                    warn!(
+                        target = "duroxide::providers::postgres",
+                        schema = %schema_name,
+                        "Long-polling disabled by fault injection"
+                    );
+                } else {
+                    debug!(
+                        target = "duroxide::providers::postgres",
+                        schema = %schema_name,
+                        "Long-polling disabled"
+                    );
+                }
+                (None, None, None, Some(fault_injector))
+            };
 
         Ok(Self {
             pool: Arc::new(pool),
@@ -382,7 +388,11 @@ impl PostgresProvider {
         for attempt in 0..=MAX_RETRIES {
             let now_ms = self.now_millis();
 
-            let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("fetch_orchestration_item"));
+            let _timer = DbCallTimer::new(
+                DbOperation::StoredProcedure,
+                Some("fetch_orchestration_item"),
+            );
+            #[allow(clippy::type_complexity)]
             let result: Result<
                 Option<(
                     String,
@@ -587,7 +597,7 @@ impl Drop for PostgresProvider {
 #[async_trait::async_trait]
 impl Provider for PostgresProvider {
     fn name(&self) -> &str {
-        "duroxide-pg"
+        env!("CARGO_PKG_NAME")
     }
 
     fn version(&self) -> &str {
@@ -712,7 +722,8 @@ impl Provider for PostgresProvider {
         let now_ms = self.now_millis();
 
         for attempt in 0..=MAX_RETRIES {
-            let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("ack_orchestration_item"));
+            let _timer =
+                DbCallTimer::new(DbOperation::StoredProcedure, Some("ack_orchestration_item"));
             let result = sqlx::query(&format!(
                 "SELECT {}.ack_orchestration_item($1, $2, $3, $4, $5, $6, $7)",
                 self.schema_name
@@ -793,7 +804,10 @@ impl Provider for PostgresProvider {
         let now_ms = self.now_millis();
         let delay_param: Option<i64> = delay.map(|d| d.as_millis() as i64);
 
-        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("abandon_orchestration_item"));
+        let _timer = DbCallTimer::new(
+            DbOperation::StoredProcedure,
+            Some("abandon_orchestration_item"),
+        );
         let instance_id = match sqlx::query_scalar::<_, String>(&format!(
             "SELECT {}.abandon_orchestration_item($1, $2, $3, $4)",
             self.schema_name
@@ -1208,7 +1222,10 @@ impl Provider for PostgresProvider {
         // Convert Duration to milliseconds for the stored procedure to avoid truncation
         let extend_ms = extend_for.as_millis() as i64;
 
-        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("renew_orchestration_item_lock"));
+        let _timer = DbCallTimer::new(
+            DbOperation::StoredProcedure,
+            Some("renew_orchestration_item_lock"),
+        );
         match sqlx::query(&format!(
             "SELECT {}.renew_orchestration_item_lock($1, $2, $3)",
             self.schema_name
@@ -1334,7 +1351,10 @@ impl Provider for PostgresProvider {
         // Pass NULL for orchestration_name, orchestration_version, execution_id parameters
 
         // Call stored procedure to enqueue work
-        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("enqueue_orchestrator_work"));
+        let _timer = DbCallTimer::new(
+            DbOperation::StoredProcedure,
+            Some("enqueue_orchestrator_work"),
+        );
         sqlx::query(&format!(
             "SELECT {}.enqueue_orchestrator_work($1, $2, $3, $4, $5, $6, $7)",
             self.schema_name
@@ -1342,7 +1362,7 @@ impl Provider for PostgresProvider {
         .bind(instance_id)
         .bind(&work_item)
         .bind(visible_at)
-        .bind(now_ms)  // p_now_ms - for created_at
+        .bind(now_ms) // p_now_ms - for created_at
         .bind::<Option<String>>(None) // orchestration_name - NULL
         .bind::<Option<String>>(None) // orchestration_version - NULL
         .bind::<Option<i64>>(None) // execution_id - NULL
@@ -1416,7 +1436,10 @@ impl ProviderAdmin for PostgresProvider {
 
     #[instrument(skip(self), fields(status = %status), target = "duroxide::providers::postgres")]
     async fn list_instances_by_status(&self, status: &str) -> Result<Vec<String>, ProviderError> {
-        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("list_instances_by_status"));
+        let _timer = DbCallTimer::new(
+            DbOperation::StoredProcedure,
+            Some("list_instances_by_status"),
+        );
         sqlx::query_scalar(&format!(
             "SELECT instance_id FROM {}.list_instances_by_status($1)",
             self.schema_name
@@ -1448,7 +1471,10 @@ impl ProviderAdmin for PostgresProvider {
         instance: &str,
         execution_id: u64,
     ) -> Result<Vec<Event>, ProviderError> {
-        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("fetch_history_with_execution"));
+        let _timer = DbCallTimer::new(
+            DbOperation::StoredProcedure,
+            Some("fetch_history_with_execution"),
+        );
         let event_data_rows: Vec<String> = sqlx::query_scalar(&format!(
             "SELECT out_event_data FROM {}.fetch_history_with_execution($1, $2)",
             self.schema_name

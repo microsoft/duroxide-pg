@@ -62,7 +62,7 @@ impl DbMetricsSummary {
             std::collections::HashMap::new();
         let mut calls_by_sp_name: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
-        
+
         // Fetch effectiveness counters
         let mut orch_fetch_attempts = 0u64;
         let mut orch_fetch_items = 0u64;
@@ -108,7 +108,7 @@ impl DbMetricsSummary {
                     // Extract fetch_type label
                     for label in key.key().labels() {
                         if label.key() == "fetch_type" {
-                            match label.value().as_ref() {
+                            match label.value() {
                                 "orchestration" => orch_fetch_attempts += v,
                                 "work_item" => work_fetch_attempts += v,
                                 _ => {}
@@ -121,7 +121,7 @@ impl DbMetricsSummary {
                     // Extract fetch_type label
                     for label in key.key().labels() {
                         if label.key() == "fetch_type" {
-                            match label.value().as_ref() {
+                            match label.value() {
                                 "orchestration" => orch_fetch_items += v,
                                 "work_item" => work_fetch_items += v,
                                 _ => {}
@@ -133,7 +133,7 @@ impl DbMetricsSummary {
                 if let DebugValue::Counter(v) = value {
                     for label in key.key().labels() {
                         if label.key() == "fetch_type" {
-                            match label.value().as_ref() {
+                            match label.value() {
                                 "orchestration" => orch_fetch_loaded += v,
                                 "work_item" => work_fetch_loaded += v,
                                 _ => {}
@@ -145,7 +145,7 @@ impl DbMetricsSummary {
                 if let DebugValue::Counter(v) = value {
                     for label in key.key().labels() {
                         if label.key() == "fetch_type" {
-                            match label.value().as_ref() {
+                            match label.value() {
                                 "orchestration" => orch_fetch_empty += v,
                                 "work_item" => work_fetch_empty += v,
                                 _ => {}
@@ -224,29 +224,49 @@ impl DbMetricsSummary {
         println!("Total activities:         {}", total_activities);
         println!("Total DB calls:           {}", self.total_db_calls);
         println!("DB calls per orch:        {:.1}", db_calls_per_orch);
-        
+
         println!("\n--- Long-Poll Effectiveness ---");
-        println!("  Orchestration: {:>6} items / {:>6} attempts = {:.3} effectiveness",
-            self.orch_fetch_items, self.orch_fetch_attempts, self.orch_fetch_effectiveness());
-        println!("  Work Items:    {:>6} items / {:>6} attempts = {:.3} effectiveness",
-            self.work_fetch_items, self.work_fetch_attempts, self.work_fetch_effectiveness());
-        println!("  Combined:      {:>6} items / {:>6} attempts = {:.3} effectiveness",
+        println!(
+            "  Orchestration: {:>6} items / {:>6} attempts = {:.3} effectiveness",
+            self.orch_fetch_items,
+            self.orch_fetch_attempts,
+            self.orch_fetch_effectiveness()
+        );
+        println!(
+            "  Work Items:    {:>6} items / {:>6} attempts = {:.3} effectiveness",
+            self.work_fetch_items,
+            self.work_fetch_attempts,
+            self.work_fetch_effectiveness()
+        );
+        println!(
+            "  Combined:      {:>6} items / {:>6} attempts = {:.3} effectiveness",
             self.orch_fetch_items + self.work_fetch_items,
             self.orch_fetch_attempts + self.work_fetch_attempts,
-            self.total_fetch_effectiveness());
-        
+            self.total_fetch_effectiveness()
+        );
+
         println!("\n--- Loaded vs Empty Fetches ---");
-        println!("  Orchestration: {:>6} loaded / {:>6} empty ({:.1}% loaded)",
-            self.orch_fetch_loaded, self.orch_fetch_empty,
-            if self.orch_fetch_attempts > 0 { 
-                self.orch_fetch_loaded as f64 / self.orch_fetch_attempts as f64 * 100.0 
-            } else { 0.0 });
-        println!("  Work Items:    {:>6} loaded / {:>6} empty ({:.1}% loaded)",
-            self.work_fetch_loaded, self.work_fetch_empty,
-            if self.work_fetch_attempts > 0 { 
-                self.work_fetch_loaded as f64 / self.work_fetch_attempts as f64 * 100.0 
-            } else { 0.0 });
-        
+        println!(
+            "  Orchestration: {:>6} loaded / {:>6} empty ({:.1}% loaded)",
+            self.orch_fetch_loaded,
+            self.orch_fetch_empty,
+            if self.orch_fetch_attempts > 0 {
+                self.orch_fetch_loaded as f64 / self.orch_fetch_attempts as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
+        println!(
+            "  Work Items:    {:>6} loaded / {:>6} empty ({:.1}% loaded)",
+            self.work_fetch_loaded,
+            self.work_fetch_empty,
+            if self.work_fetch_attempts > 0 {
+                self.work_fetch_loaded as f64 / self.work_fetch_attempts as f64 * 100.0
+            } else {
+                0.0
+            }
+        );
+
         println!("\nCalls by operation:");
         for (op, count) in &self.calls_by_operation {
             println!("  {:20} {:>10}", op, count);
@@ -264,18 +284,37 @@ impl DbMetricsSummary {
         // Compute delta for simple counters
         let total_db_calls = self.total_db_calls.saturating_sub(baseline.total_db_calls);
         let sp_calls = self.sp_calls.saturating_sub(baseline.sp_calls);
-        let orch_fetch_attempts = self.orch_fetch_attempts.saturating_sub(baseline.orch_fetch_attempts);
-        let orch_fetch_items = self.orch_fetch_items.saturating_sub(baseline.orch_fetch_items);
-        let orch_fetch_loaded = self.orch_fetch_loaded.saturating_sub(baseline.orch_fetch_loaded);
-        let orch_fetch_empty = self.orch_fetch_empty.saturating_sub(baseline.orch_fetch_empty);
-        let work_fetch_attempts = self.work_fetch_attempts.saturating_sub(baseline.work_fetch_attempts);
-        let work_fetch_items = self.work_fetch_items.saturating_sub(baseline.work_fetch_items);
-        let work_fetch_loaded = self.work_fetch_loaded.saturating_sub(baseline.work_fetch_loaded);
-        let work_fetch_empty = self.work_fetch_empty.saturating_sub(baseline.work_fetch_empty);
+        let orch_fetch_attempts = self
+            .orch_fetch_attempts
+            .saturating_sub(baseline.orch_fetch_attempts);
+        let orch_fetch_items = self
+            .orch_fetch_items
+            .saturating_sub(baseline.orch_fetch_items);
+        let orch_fetch_loaded = self
+            .orch_fetch_loaded
+            .saturating_sub(baseline.orch_fetch_loaded);
+        let orch_fetch_empty = self
+            .orch_fetch_empty
+            .saturating_sub(baseline.orch_fetch_empty);
+        let work_fetch_attempts = self
+            .work_fetch_attempts
+            .saturating_sub(baseline.work_fetch_attempts);
+        let work_fetch_items = self
+            .work_fetch_items
+            .saturating_sub(baseline.work_fetch_items);
+        let work_fetch_loaded = self
+            .work_fetch_loaded
+            .saturating_sub(baseline.work_fetch_loaded);
+        let work_fetch_empty = self
+            .work_fetch_empty
+            .saturating_sub(baseline.work_fetch_empty);
 
         // Compute delta for operation maps
-        let baseline_ops: std::collections::HashMap<_, _> = baseline.calls_by_operation.iter().cloned().collect();
-        let calls_by_operation: Vec<_> = self.calls_by_operation.iter()
+        let baseline_ops: std::collections::HashMap<_, _> =
+            baseline.calls_by_operation.iter().cloned().collect();
+        let calls_by_operation: Vec<_> = self
+            .calls_by_operation
+            .iter()
             .map(|(op, count)| {
                 let baseline_count = baseline_ops.get(op).copied().unwrap_or(0);
                 (op.clone(), count.saturating_sub(baseline_count))
@@ -283,8 +322,11 @@ impl DbMetricsSummary {
             .filter(|(_, count)| *count > 0)
             .collect();
 
-        let baseline_sps: std::collections::HashMap<_, _> = baseline.calls_by_sp_name.iter().cloned().collect();
-        let mut calls_by_sp_name: Vec<_> = self.calls_by_sp_name.iter()
+        let baseline_sps: std::collections::HashMap<_, _> =
+            baseline.calls_by_sp_name.iter().cloned().collect();
+        let mut calls_by_sp_name: Vec<_> = self
+            .calls_by_sp_name
+            .iter()
             .map(|(sp, count)| {
                 let baseline_count = baseline_sps.get(sp).copied().unwrap_or(0);
                 (sp.clone(), count.saturating_sub(baseline_count))
@@ -338,7 +380,11 @@ async fn stress_test_parallel_orchestrations_light() {
     {
         let current = DbMetricsSummary::from_snapshotter(get_global_snapshotter());
         let summary = current.delta(&baseline);
-        summary.print("stress_test_parallel_orchestrations_light", result.completed, tasks_per_instance);
+        summary.print(
+            "stress_test_parallel_orchestrations_light",
+            result.completed,
+            tasks_per_instance,
+        );
     }
 
     // Assert quality requirements
@@ -411,7 +457,11 @@ async fn stress_test_high_concurrency() {
     {
         let current = DbMetricsSummary::from_snapshotter(get_global_snapshotter());
         let summary = current.delta(&baseline);
-        summary.print("stress_test_high_concurrency (long-poll ENABLED)", result.completed, tasks_per_instance);
+        summary.print(
+            "stress_test_high_concurrency (long-poll ENABLED)",
+            result.completed,
+            tasks_per_instance,
+        );
     }
 
     assert_eq!(result.success_rate(), 100.0);
@@ -456,7 +506,11 @@ async fn stress_test_high_concurrency_no_longpoll() {
     {
         let current = DbMetricsSummary::from_snapshotter(get_global_snapshotter());
         let summary = current.delta(&baseline);
-        summary.print("stress_test_high_concurrency_no_longpoll (long-poll DISABLED)", result.completed, tasks_per_instance);
+        summary.print(
+            "stress_test_high_concurrency_no_longpoll (long-poll DISABLED)",
+            result.completed,
+            tasks_per_instance,
+        );
     }
 
     assert_eq!(result.success_rate(), 100.0);
@@ -471,15 +525,15 @@ async fn stress_test_high_concurrency_no_longpoll() {
 }
 
 /// Long-poll comparison test: LOW concurrency + HIGH activity delay
-/// 
+///
 /// Key insight: Long-poll benefits show when there are IDLE PERIODS where
 /// no work is available. In a high-concurrency test, work is always available
 /// so long-poll never waits.
-/// 
+///
 /// This test uses:
 /// - max_concurrent: 3 (low - to allow idle gaps between orchestrations)
 /// - activity_delay_ms: 500 (high - activities take time, creating wait periods)
-/// 
+///
 /// Expected: Long-poll ENABLED should have FEWER DB calls because it waits
 /// for notifications instead of polling repeatedly during idle periods.
 #[tokio::test]
@@ -489,7 +543,7 @@ async fn stress_test_longpoll_comparison_enabled() {
     let factory = PostgresStressFactory::new(database_url); // Long-poll ENABLED
 
     let config = StressTestConfig {
-        max_concurrent: 3,   // LOW - creates idle gaps
+        max_concurrent: 3, // LOW - creates idle gaps
         duration_secs: 30,
         tasks_per_instance: 5,
         activity_delay_ms: 1000, // 500ms delay - activities take real time
@@ -510,14 +564,18 @@ async fn stress_test_longpoll_comparison_enabled() {
     {
         let current = DbMetricsSummary::from_snapshotter(get_global_snapshotter());
         let summary = current.delta(&baseline);
-        summary.print("stress_test_longpoll_comparison_ENABLED (100ms activity delay)", result.completed, tasks_per_instance);
+        summary.print(
+            "stress_test_longpoll_comparison_ENABLED (100ms activity delay)",
+            result.completed,
+            tasks_per_instance,
+        );
     }
 
     assert_eq!(result.success_rate(), 100.0);
 }
 
 /// Long-poll comparison test: LOW concurrency + HIGH activity delay, long-poll DISABLED
-/// 
+///
 /// This is the baseline to compare against. Without long-poll, the system will
 /// poll repeatedly during idle periods, resulting in MORE DB calls.
 #[tokio::test]
@@ -527,7 +585,7 @@ async fn stress_test_longpoll_comparison_disabled() {
     let factory = PostgresStressFactory::new(database_url).with_long_poll_disabled();
 
     let config = StressTestConfig {
-        max_concurrent: 3,   // LOW - creates idle gaps  
+        max_concurrent: 3, // LOW - creates idle gaps
         duration_secs: 30,
         tasks_per_instance: 5,
         activity_delay_ms: 1000, // 1000ms delay - activities take real time
@@ -548,7 +606,11 @@ async fn stress_test_longpoll_comparison_disabled() {
     {
         let current = DbMetricsSummary::from_snapshotter(get_global_snapshotter());
         let summary = current.delta(&baseline);
-        summary.print("stress_test_longpoll_comparison_DISABLED (100ms activity delay)", result.completed, tasks_per_instance);
+        summary.print(
+            "stress_test_longpoll_comparison_DISABLED (100ms activity delay)",
+            result.completed,
+            tasks_per_instance,
+        );
     }
 
     assert_eq!(result.success_rate(), 100.0);
@@ -611,15 +673,15 @@ async fn stress_test_long_duration_stability() {
 }
 
 /// Batch-style test to properly demonstrate long-poll benefits.
-/// 
+///
 /// The standard stress tests use continuous pumping where work is ALWAYS available.
 /// Long-poll benefits only show when there are idle periods between work availability.
-/// 
+///
 /// This test uses a BATCH pattern:
 /// 1. Launch N orchestrations  
 /// 2. Wait for ALL to complete (orch dispatcher waits for activities)
 /// 3. Repeat
-/// 
+///
 /// During the wait phase, long-poll should reduce DB calls because it waits for
 /// notifications instead of polling every 100ms.
 mod batch_tests {
@@ -632,46 +694,58 @@ mod batch_tests {
     use std::time::Duration;
 
     async fn create_provider(database_url: &str, long_poll_enabled: bool) -> Arc<PostgresProvider> {
-        let schema_name = format!("batch_test_{}", uuid::Uuid::new_v4().to_string().replace("-", "_"));
-        
+        let schema_name = format!(
+            "batch_test_{}",
+            uuid::Uuid::new_v4().to_string().replace("-", "_")
+        );
+
         let long_poll_config = LongPollConfig {
             enabled: long_poll_enabled,
             ..Default::default()
         };
 
-        let provider = PostgresProvider::new_with_options(
-            database_url,
-            Some(&schema_name),
-            long_poll_config,
-        )
-        .await
-        .expect("Failed to create provider");
+        let provider =
+            PostgresProvider::new_with_options(database_url, Some(&schema_name), long_poll_config)
+                .await
+                .expect("Failed to create provider");
 
         Arc::new(provider)
     }
 
-    async fn run_batch_test(database_url: &str, long_poll_enabled: bool, batch_size: usize, num_batches: usize, activity_delay_ms: u64) -> (usize, usize) {
+    async fn run_batch_test(
+        database_url: &str,
+        long_poll_enabled: bool,
+        batch_size: usize,
+        num_batches: usize,
+        activity_delay_ms: u64,
+    ) -> (usize, usize) {
         let provider = create_provider(database_url, long_poll_enabled).await;
 
         // Create activities with configurable delay
         let delay = activity_delay_ms;
         let activity_registry = Arc::new(
             ActivityRegistry::builder()
-                .register("SlowTask", move |_ctx: ActivityContext, input: String| {
-                    async move {
+                .register(
+                    "SlowTask",
+                    move |_ctx: ActivityContext, input: String| async move {
                         tokio::time::sleep(Duration::from_millis(delay)).await;
                         Ok(format!("processed: {input}"))
-                    }
-                })
+                    },
+                )
                 .build(),
         );
 
         // Simple orchestration that does one activity
         let orchestration_registry = OrchestrationRegistry::builder()
-            .register("BatchOrch", |ctx: OrchestrationContext, input: String| async move {
-                ctx.schedule_activity("SlowTask", input).into_activity().await?;
-                Ok("done".to_string())
-            })
+            .register(
+                "BatchOrch",
+                |ctx: OrchestrationContext, input: String| async move {
+                    ctx.schedule_activity("SlowTask", input)
+                        .into_activity()
+                        .await?;
+                    Ok("done".to_string())
+                },
+            )
             .build();
 
         // Runtime with standard settings
@@ -708,19 +782,25 @@ mod batch_tests {
 
             // Wait for all in batch to complete
             for instance_id in instance_ids {
-                match client.wait_for_orchestration(&instance_id, Duration::from_secs(60)).await {
+                match client
+                    .wait_for_orchestration(&instance_id, Duration::from_secs(60))
+                    .await
+                {
                     Ok(duroxide::OrchestrationStatus::Completed { .. }) => {
                         total_completed += 1;
                     }
                     other => {
-                        println!("Orchestration {} did not complete: {:?}", instance_id, other);
+                        println!(
+                            "Orchestration {} did not complete: {:?}",
+                            instance_id, other
+                        );
                     }
                 }
             }
         }
 
         rt.shutdown(None).await;
-        
+
         (total_completed, num_batches * batch_size)
     }
 
@@ -736,9 +816,10 @@ mod batch_tests {
             &database_url,
             true,  // long-poll ENABLED
             5,     // batch_size
-            10,    // num_batches  
+            10,    // num_batches
             30000, // activity_delay_ms - 30s per activity
-        ).await;
+        )
+        .await;
 
         #[cfg(feature = "db-metrics")]
         {
@@ -764,7 +845,8 @@ mod batch_tests {
             5,     // batch_size
             10,    // num_batches
             30000, // activity_delay_ms - 30s per activity
-        ).await;
+        )
+        .await;
 
         #[cfg(feature = "db-metrics")]
         {
@@ -786,17 +868,22 @@ mod batch_tests {
         let database_url = get_database_url();
         let (completed, expected) = run_batch_test(
             &database_url,
-            true,  // long-poll ENABLED
-            5,     // batch_size
-            10,    // num_batches  
-            5000,  // activity_delay_ms - 5s per activity
-        ).await;
+            true, // long-poll ENABLED
+            5,    // batch_size
+            10,   // num_batches
+            5000, // activity_delay_ms - 5s per activity
+        )
+        .await;
 
         #[cfg(feature = "db-metrics")]
         {
             let current = DbMetricsSummary::from_snapshotter(get_global_snapshotter());
             let summary = current.delta(&baseline);
-            summary.print("batch_longpoll_ENABLED_v2 (batch=5, delay=5s)", completed, 1);
+            summary.print(
+                "batch_longpoll_ENABLED_v2 (batch=5, delay=5s)",
+                completed,
+                1,
+            );
         }
 
         assert_eq!(completed, expected, "All orchestrations should complete");
@@ -815,13 +902,18 @@ mod batch_tests {
             5,     // batch_size
             10,    // num_batches
             5000,  // activity_delay_ms - 5s per activity
-        ).await;
+        )
+        .await;
 
         #[cfg(feature = "db-metrics")]
         {
             let current = DbMetricsSummary::from_snapshotter(get_global_snapshotter());
             let summary = current.delta(&baseline);
-            summary.print("batch_longpoll_DISABLED_v2 (batch=5, delay=5s)", completed, 1);
+            summary.print(
+                "batch_longpoll_DISABLED_v2 (batch=5, delay=5s)",
+                completed,
+                1,
+            );
         }
 
         assert_eq!(completed, expected, "All orchestrations should complete");

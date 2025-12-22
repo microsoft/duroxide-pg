@@ -1,5 +1,7 @@
 use clap::Parser;
-use duroxide_pg_stress::run_test_suite;
+use duroxide_pg_stress::{
+    run_all_stress_tests, run_large_payload_suite, run_test_suite, StressTestType,
+};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -13,6 +15,10 @@ struct Args {
     /// PostgreSQL connection URL (or set DATABASE_URL env var)
     #[arg(short = 'u', long)]
     database_url: Option<String>,
+
+    /// Type of stress test to run: parallel, large-payload, or all
+    #[arg(short = 't', long, default_value = "parallel")]
+    test_type: String,
 
     /// Track results to file for comparison
     #[arg(long)]
@@ -43,8 +49,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("DATABASE_URL").ok())
         .expect("DATABASE_URL must be provided via --database-url or DATABASE_URL env var");
 
-    // Run stress test suite
-    run_test_suite(database_url.clone(), args.duration).await?;
+    // Parse test type
+    let test_type: StressTestType = args.test_type.parse()?;
+
+    // Run appropriate stress test(s)
+    match test_type {
+        StressTestType::Parallel => {
+            run_test_suite(database_url.clone(), args.duration).await?;
+        }
+        StressTestType::LargePayload => {
+            run_large_payload_suite(database_url.clone(), args.duration).await?;
+        }
+        StressTestType::All => {
+            run_all_stress_tests(database_url.clone(), args.duration).await?;
+        }
+    }
 
     // Show results filename for reference
     let results_file = duroxide_pg_stress::get_results_filename(&database_url);

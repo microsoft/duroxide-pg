@@ -66,7 +66,8 @@ impl FaultInjector {
 
     /// Set whether the notifier should panic on next iteration.
     pub fn set_notifier_should_panic(&self, should_panic: bool) {
-        self.notifier_should_panic.store(should_panic, Ordering::SeqCst);
+        self.notifier_should_panic
+            .store(should_panic, Ordering::SeqCst);
     }
 
     /// Check if the notifier should panic.
@@ -80,7 +81,8 @@ impl FaultInjector {
 
     /// Set artificial delay for refresh queries (simulates slow database).
     pub fn set_refresh_delay(&self, delay: Duration) {
-        self.refresh_delay_ms.store(delay.as_millis() as u64, Ordering::SeqCst);
+        self.refresh_delay_ms
+            .store(delay.as_millis() as u64, Ordering::SeqCst);
     }
 
     /// Get the current refresh delay.
@@ -90,7 +92,8 @@ impl FaultInjector {
 
     /// Set whether the next refresh query should return an error.
     pub fn set_refresh_should_error(&self, should_error: bool) {
-        self.refresh_should_error.store(should_error, Ordering::SeqCst);
+        self.refresh_should_error
+            .store(should_error, Ordering::SeqCst);
     }
 
     /// Check and consume the refresh error flag.
@@ -137,7 +140,8 @@ impl FaultInjector {
     /// fi.set_clock_skew_signed(-200);
     /// ```
     pub fn set_clock_skew(&self, skew: Duration) {
-        self.clock_skew_ms.store(skew.as_millis() as i64, Ordering::SeqCst);
+        self.clock_skew_ms
+            .store(skew.as_millis() as i64, Ordering::SeqCst);
     }
 
     /// Set clock skew offset in milliseconds (signed).

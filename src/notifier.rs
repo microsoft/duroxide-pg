@@ -438,16 +438,22 @@ impl Notifier {
         );
 
         // Add orchestrator timers
-        for fire_at in
-            timers_from_refresh(&result.orch_timers, now_ms, self.config.timer_grace_period, now_instant)
-        {
+        for fire_at in timers_from_refresh(
+            &result.orch_timers,
+            now_ms,
+            self.config.timer_grace_period,
+            now_instant,
+        ) {
             self.orch_heap.push(Reverse(fire_at));
         }
 
         // Add worker timers
-        for fire_at in
-            timers_from_refresh(&result.worker_timers, now_ms, self.config.timer_grace_period, now_instant)
-        {
+        for fire_at in timers_from_refresh(
+            &result.worker_timers,
+            now_ms,
+            self.config.timer_grace_period,
+            now_instant,
+        ) {
             self.worker_heap.push(Reverse(fire_at));
         }
 
@@ -545,7 +551,7 @@ pub fn parse_notify_action(
 /// 1. Item had visible_at just barely in the future when query started
 /// 2. Query takes longer than that margin to complete
 /// 3. By the time we process results, the item has expired (delay <= 0)
-/// 
+///
 /// This is acceptable because:
 /// - The original NOTIFY when the item was inserted should have already woken dispatchers
 /// - poll_timeout (default 5s) provides a safety net for any missed items

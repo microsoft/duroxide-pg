@@ -4,15 +4,38 @@ This package contains stress tests for the `duroxide-pg` PostgreSQL provider imp
 
 ## Quick Start
 
-### Run Stress Tests
+### Run Stress Tests via Script (Recommended)
 
 ```bash
 # From workspace root
-./scripts/run-pg-stress-tests.sh [DURATION_SECS]
 
-# Or directly
-cd pg-stress
-cargo run --release --bin pg-stress -- --duration 10
+# Run all stress tests (integration tests + pg-stress binary)
+./scripts/run-stress-tests.sh
+
+# Run only pg-stress binary tests (parallel + large-payload)
+./scripts/run-stress-tests.sh pg-stress
+
+# Run only pg-stress parallel test
+./scripts/run-stress-tests.sh pg-stress-parallel
+
+# Run only pg-stress large-payload test
+./scripts/run-stress-tests.sh pg-stress-payload
+```
+
+### Run pg-stress Binary Directly
+
+```bash
+# Run parallel orchestrations test (default)
+cargo run --release --package duroxide-pg-stress --bin pg-stress
+
+# Run large payload test
+cargo run --release --package duroxide-pg-stress --bin pg-stress -- --test-type large-payload
+
+# Run all stress tests
+cargo run --release --package duroxide-pg-stress --bin pg-stress -- --test-type all
+
+# Custom duration (seconds)
+cargo run --release --package duroxide-pg-stress --bin pg-stress -- --duration 30 --test-type all
 ```
 
 ### Run via Test Harness
@@ -25,11 +48,31 @@ cargo test --test stress_tests -- --ignored
 cargo test --test stress_tests -- --ignored stress_test_parallel_orchestrations_light
 ```
 
+## Stress Test Types
+
+### Parallel Orchestrations Test
+
+Tests fan-out/fan-in pattern with concurrent orchestrations:
+- 20 max concurrent orchestrations
+- 5 activities per orchestration (fan-out)
+- 10ms simulated activity delay
+- Validates throughput and latency under load
+
+### Large Payload Test
+
+Tests memory consumption and history management with large event payloads:
+- 5 max concurrent orchestrations
+- Large event payloads (10KB, 50KB, 100KB)
+- Moderate-length histories (~80-100 events per instance)
+- 20 activities + 5 sub-orchestrations per instance
+- Validates memory allocation patterns and history handling
+
 ## Configuration
 
 ### Environment Variables
 
 - `DATABASE_URL`: PostgreSQL connection string (required)
+- `PG_STRESS_DURATION`: Test duration in seconds (default: 10)
 - `DUROXIDE_PG_POOL_MAX`: Connection pool size per provider (default: 10)
 - `RUST_LOG`: Log level (default: info)
 
@@ -41,6 +84,14 @@ cargo test --test stress_tests -- --ignored stress_test_parallel_orchestrations_
 | Standard | 10s | 20 | 5 | 2:2 |
 | High Concurrency | 30s | 50 | 10 | 4:4 |
 | Long Duration | 300s | 20 | 5 | 2:2 |
+
+## Resource Monitoring
+
+The stress test script includes resource monitoring that tracks:
+- **Peak RSS (MB)**: Maximum resident set size during test
+- **Average CPU (%)**: Mean CPU utilization during test
+
+Monitoring is enabled by default when running via `./scripts/run-stress-tests.sh`.
 
 ## Expected Performance
 

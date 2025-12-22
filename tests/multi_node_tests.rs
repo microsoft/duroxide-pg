@@ -177,10 +177,16 @@ async fn multi_node_work_distribution() {
 
     // Each node should have fetched some work
     let total_fetches: usize = results.iter().map(|r| r.len()).sum();
-    println!("Fetches by node: {:?}", results.iter().map(|r| r.len()).collect::<Vec<_>>());
+    println!(
+        "Fetches by node: {:?}",
+        results.iter().map(|r| r.len()).collect::<Vec<_>>()
+    );
 
     // We expect some overlap due to abandons, but work should be distributed
-    assert!(total_fetches >= 3, "Work should be distributed across nodes");
+    assert!(
+        total_fetches >= 3,
+        "Work should be distributed across nodes"
+    );
 
     cleanup_schema(&schema).await;
 }
@@ -244,7 +250,11 @@ async fn delayed_work_cross_node_visibility() {
 
     // The fetch should have completed around the 50ms mark (500ms - 450ms)
     // Allow some margin for timing jitter and remote DB latency (~100-200ms per query)
-    let threshold = if is_localhost() { Duration::from_millis(150) } else { Duration::from_millis(400) };
+    let threshold = if is_localhost() {
+        Duration::from_millis(150)
+    } else {
+        Duration::from_millis(400)
+    };
     assert!(
         elapsed < threshold,
         "Long-poll should have woken up quickly after work became visible, took {:?}",
@@ -330,7 +340,11 @@ async fn multi_node_timer_coordination() {
     let timer_delay = Duration::from_millis(300);
 
     // Each node writes delayed work
-    for (node, name) in [(&node_a, "node-a"), (&node_b, "node-b"), (&node_c, "node-c")] {
+    for (node, name) in [
+        (&node_a, "node-a"),
+        (&node_b, "node-b"),
+        (&node_c, "node-c"),
+    ] {
         node.enqueue_for_orchestrator(
             WorkItem::StartOrchestration {
                 instance: format!("timer-from-{name}"),
@@ -387,7 +401,7 @@ async fn multi_node_timer_coordination() {
 ///
 /// Writes multiple delayed items with varying delays and verifies they all
 /// become visible after their respective delays pass.
-/// 
+///
 /// Note: True clock drift between nodes cannot be simulated without actual
 /// clock manipulation. This test validates staggered timer behavior.
 #[tokio::test]
@@ -701,7 +715,11 @@ async fn multi_node_lock_race_longpoll() {
 
     // The winner should have gotten it quickly (not waited full timeout)
     // Note: On remote DBs with 100-200ms latency, this threshold needs to be larger
-    let winner_threshold = if is_localhost() { Duration::from_millis(200) } else { Duration::from_millis(500) };
+    let winner_threshold = if is_localhost() {
+        Duration::from_millis(200)
+    } else {
+        Duration::from_millis(500)
+    };
     if let Some(Some((node_id, instance, elapsed))) = winners.first() {
         println!(
             "Winner: node {} got '{}' in {:?}",
@@ -789,10 +807,7 @@ async fn multi_node_notify_propagation() {
 
     println!("Notify propagation results:");
     for (name, got_work, elapsed) in &results {
-        println!(
-            "  {}: got_work={}, elapsed={:?}",
-            name, got_work, elapsed
-        );
+        println!("  {}: got_work={}, elapsed={:?}", name, got_work, elapsed);
     }
 
     // At least one should have gotten the work
@@ -801,7 +816,11 @@ async fn multi_node_notify_propagation() {
 
     // All should have responded quickly (not waiting full 5s timeout)
     // Note: On remote DBs with 100-200ms latency, allow more time
-    let response_threshold = if is_localhost() { Duration::from_secs(2) } else { Duration::from_secs(3) };
+    let response_threshold = if is_localhost() {
+        Duration::from_secs(2)
+    } else {
+        Duration::from_secs(3)
+    };
     for (name, _, elapsed) in &results {
         assert!(
             *elapsed < response_threshold,
@@ -815,4 +834,3 @@ async fn multi_node_notify_propagation() {
 
     cleanup_schema(&schema).await;
 }
-

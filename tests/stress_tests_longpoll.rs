@@ -90,7 +90,14 @@ async fn stress_high_notify_rate() {
             .expect("Fetch failed")
         {
             provider
-                .ack_orchestration_item(&lock_token, 1, vec![], vec![], vec![], ExecutionMetadata::default())
+                .ack_orchestration_item(
+                    &lock_token,
+                    1,
+                    vec![],
+                    vec![],
+                    vec![],
+                    ExecutionMetadata::default(),
+                )
                 .await
                 .expect("Failed to ack");
             fetched += 1;
@@ -105,12 +112,22 @@ async fn stress_high_notify_rate() {
     eprintln!("  - Work items: {}", insert_count);
     eprintln!("Insert phase:");
     eprintln!("  - Duration: {:?}", insert_duration);
-    eprintln!("  - Rate: {:.1} items/sec", insert_count as f64 / insert_duration.as_secs_f64());
+    eprintln!(
+        "  - Rate: {:.1} items/sec",
+        insert_count as f64 / insert_duration.as_secs_f64()
+    );
     eprintln!("Fetch phase:");
     eprintln!("  - Duration: {:?}", fetch_duration);
     eprintln!("  - Items fetched: {}", fetched);
     eprintln!("  - Throughput: {:.1} items/sec", throughput);
-    eprintln!("Result: {} - All items processed", if fetched == insert_count { "PASS" } else { "FAIL" });
+    eprintln!(
+        "Result: {} - All items processed",
+        if fetched == insert_count {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    );
     eprintln!("==============================================\n");
 
     assert_eq!(
@@ -189,7 +206,14 @@ async fn stress_many_timers() {
             .expect("Fetch failed")
         {
             provider
-                .ack_orchestration_item(&lock_token, 1, vec![], vec![], vec![], ExecutionMetadata::default())
+                .ack_orchestration_item(
+                    &lock_token,
+                    1,
+                    vec![],
+                    vec![],
+                    vec![],
+                    ExecutionMetadata::default(),
+                )
                 .await
                 .expect("Failed to ack");
             fetched += 1;
@@ -207,8 +231,18 @@ async fn stress_many_timers() {
     eprintln!("Fetch phase:");
     eprintln!("  - Duration: {:?}", fetch_duration);
     eprintln!("  - Timers fetched: {}", fetched);
-    eprintln!("  - Avg time per timer: {:?}", fetch_duration / timer_count as u32);
-    eprintln!("Result: {} - All timers processed", if fetched == timer_count { "PASS" } else { "FAIL" });
+    eprintln!(
+        "  - Avg time per timer: {:?}",
+        fetch_duration / timer_count as u32
+    );
+    eprintln!(
+        "Result: {} - All timers processed",
+        if fetched == timer_count {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    );
     eprintln!("==========================================\n");
 
     assert_eq!(
@@ -268,7 +302,14 @@ async fn stress_connection_flapping() {
             .expect("Fetch failed")
         {
             provider
-                .ack_orchestration_item(&lock_token, 1, vec![], vec![], vec![], ExecutionMetadata::default())
+                .ack_orchestration_item(
+                    &lock_token,
+                    1,
+                    vec![],
+                    vec![],
+                    vec![],
+                    ExecutionMetadata::default(),
+                )
                 .await
                 .expect("Failed to ack");
             fetched += 1;
@@ -286,7 +327,14 @@ async fn stress_connection_flapping() {
     eprintln!("Fetch phase:");
     eprintln!("  - Duration: {:?}", fetch_duration);
     eprintln!("  - Items fetched: {}", fetched);
-    eprintln!("Result: {} - All items processed", if fetched == insert_count { "PASS" } else { "FAIL" });
+    eprintln!(
+        "Result: {} - All items processed",
+        if fetched == insert_count {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    );
     eprintln!("=================================================\n");
 
     assert_eq!(fetched, insert_count, "Should have fetched all items");

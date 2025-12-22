@@ -54,6 +54,7 @@ fn test_timer_drop_order() {
 #[cfg(feature = "db-metrics")]
 mod with_metrics {
     use super::*;
+    use duroxide_pg_opt::db_metrics::{record_fetch_attempt, record_fetch_success, FetchType};
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use metrics_util::MetricKind;
 
@@ -235,7 +236,7 @@ mod with_metrics {
         assert_eq!(durations.len(), 1, "Expected 1 duration sample");
         let duration_ms = durations[0];
         assert!(
-            duration_ms >= 5.0 && duration_ms < 100.0,
+            (5.0..100.0).contains(&duration_ms),
             "Expected duration ~5ms, got {}ms",
             duration_ms
         );
@@ -290,14 +291,22 @@ mod with_metrics {
             "duroxide.db.call_duration_ms",
             &[("operation", "sp_call"), ("sp_name", "fast_sp")],
         );
-        assert_eq!(fast_durations.len(), 2, "Expected 2 fast_sp duration samples");
+        assert_eq!(
+            fast_durations.len(),
+            2,
+            "Expected 2 fast_sp duration samples"
+        );
 
         // Verify slow_sp has 1 sample with longer duration
         let slow_durations = snapshot.get_histogram_values(
             "duroxide.db.call_duration_ms",
             &[("operation", "sp_call"), ("sp_name", "slow_sp")],
         );
-        assert_eq!(slow_durations.len(), 1, "Expected 1 slow_sp duration sample");
+        assert_eq!(
+            slow_durations.len(),
+            1,
+            "Expected 1 slow_sp duration sample"
+        );
         assert!(
             slow_durations[0] >= 10.0,
             "Expected slow_sp duration >= 10ms, got {}ms",
@@ -305,11 +314,13 @@ mod with_metrics {
         );
 
         // Verify select has duration recorded
-        let select_durations = snapshot.get_histogram_values(
-            "duroxide.db.call_duration_ms",
-            &[("operation", "select")],
+        let select_durations = snapshot
+            .get_histogram_values("duroxide.db.call_duration_ms", &[("operation", "select")]);
+        assert_eq!(
+            select_durations.len(),
+            1,
+            "Expected 1 select duration sample"
         );
-        assert_eq!(select_durations.len(), 1, "Expected 1 select duration sample");
 
         // Verify counters
         assert_eq!(
@@ -339,13 +350,17 @@ mod with_metrics {
 
         // Verify we can find SP calls by sp_name label
         assert_eq!(
-            snapshot.find_counter_with_labels("duroxide.db.sp_calls", &[("sp_name", "fetch_work_item")]),
+            snapshot.find_counter_with_labels(
+                "duroxide.db.sp_calls",
+                &[("sp_name", "fetch_work_item")]
+            ),
             Some(2),
             "Expected 2 fetch_work_item calls"
         );
 
         assert_eq!(
-            snapshot.find_counter_with_labels("duroxide.db.sp_calls", &[("sp_name", "append_history")]),
+            snapshot
+                .find_counter_with_labels("duroxide.db.sp_calls", &[("sp_name", "append_history")]),
             Some(1),
             "Expected 1 append_history call"
         );
@@ -383,24 +398,34 @@ mod with_metrics {
 
         // Verify orchestration fetch metrics
         assert_eq!(
-            snapshot.find_counter_with_labels("duroxide.fetch.attempts", &[("fetch_type", "orchestration")]),
+            snapshot.find_counter_with_labels(
+                "duroxide.fetch.attempts",
+                &[("fetch_type", "orchestration")]
+            ),
             Some(10),
             "Expected 10 orchestration fetch attempts"
         );
         assert_eq!(
-            snapshot.find_counter_with_labels("duroxide.fetch.items", &[("fetch_type", "orchestration")]),
+            snapshot.find_counter_with_labels(
+                "duroxide.fetch.items",
+                &[("fetch_type", "orchestration")]
+            ),
             Some(7),
             "Expected 7 orchestration items fetched"
         );
 
         // Verify work item fetch metrics
         assert_eq!(
-            snapshot.find_counter_with_labels("duroxide.fetch.attempts", &[("fetch_type", "work_item")]),
+            snapshot.find_counter_with_labels(
+                "duroxide.fetch.attempts",
+                &[("fetch_type", "work_item")]
+            ),
             Some(20),
             "Expected 20 work item fetch attempts"
         );
         assert_eq!(
-            snapshot.find_counter_with_labels("duroxide.fetch.items", &[("fetch_type", "work_item")]),
+            snapshot
+                .find_counter_with_labels("duroxide.fetch.items", &[("fetch_type", "work_item")]),
             Some(15),
             "Expected 15 work items fetched"
         );
@@ -428,14 +453,18 @@ mod with_metrics {
 
         // 3 attempts total
         assert_eq!(
-            snapshot.find_counter_with_labels("duroxide.fetch.attempts", &[("fetch_type", "work_item")]),
+            snapshot.find_counter_with_labels(
+                "duroxide.fetch.attempts",
+                &[("fetch_type", "work_item")]
+            ),
             Some(3),
             "Expected 3 work item fetch attempts"
         );
 
         // 6 items total (5 from batch + 1 regular)
         assert_eq!(
-            snapshot.find_counter_with_labels("duroxide.fetch.items", &[("fetch_type", "work_item")]),
+            snapshot
+                .find_counter_with_labels("duroxide.fetch.items", &[("fetch_type", "work_item")]),
             Some(6),
             "Expected 6 work items fetched (batch + regular)"
         );
@@ -447,4 +476,5 @@ mod with_metrics {
     fn test_fetch_type_as_str() {
         assert_eq!(FetchType::Orchestration.as_str(), "orchestration");
         assert_eq!(FetchType::WorkItem.as_str(), "work_item");
-    }}
+    }
+}
