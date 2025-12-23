@@ -4,6 +4,9 @@
 
 **Last Updated:** 2024-12-22
 
+**Quick Links:**
+- 🔗 [All duroxide-pg issues](https://github.com/affandar/duroxide/labels/duroxide-pg)
+
 ---
 
 ## How to Check for Fixes
@@ -98,6 +101,41 @@ Use a oneshot channel to signal when thread 1 has acquired the lock, then have t
 
 **Files to Update:**
 - [ ] `src/provider.rs` (search for "pre-warming")
+
+---
+
+### 3. Validation Test Timing Sensitivity (Lock Renewal)
+
+| Field | Value |
+|-------|-------|
+| **Issue** | [GitHub #34](https://github.com/affandar/duroxide/issues/34) |
+| **Status** | 🔴 Open |
+| **Fixed In** | TBD |
+| **Workaround Location** | None - test fails on remote databases |
+
+**Problem:**
+The `test_worker_lock_renewal_extends_timeout` validation test in `duroxide/src/provider_validation/lock_expiration.rs` uses tight timing windows (800ms sleeps with 1s lock timeouts) that don't account for network latency when running against remote databases.
+
+**Root Cause:**
+- Test uses 800ms sleep + 800ms sleep = 1.6s total, with lock expiring at 2s
+- With remote DB latency (~40-60ms per query), cumulative drift is ~150-200ms
+- Final fetch can complete around 1.7-1.8s, too close to 2s expiration
+- Any additional processing overhead causes the lock to expire before assertion
+
+**Proposed Fix:**
+Use larger timing margins (2s timeout, 1.5s sleeps) or accept a `ProviderFactory::network_latency_budget()` hint.
+
+**Current Workaround:**
+- **None** - test must be run against localhost database
+- Use `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres` in `.env`
+
+**When Fixed - Cleanup Steps:**
+1. Update duroxide dependency in `Cargo.toml`
+2. Verify the validation test passes against remote databases
+3. Update this document
+
+**Files to Update:**
+- [ ] None (no code workaround, just use localhost for now)
 
 ---
 
