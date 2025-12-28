@@ -711,7 +711,7 @@ impl Provider for PostgresProvider {
         let start = std::time::Instant::now();
 
         // If no completion is provided (activity was cancelled), just delete the work item
-        let (instance_id, completion_json) = if let Some(completion) = completion {
+        if let Some(completion) = completion {
             // Extract instance ID from completion WorkItem
             let instance_id = match &completion {
                 WorkItem::ActivityCompleted { instance, .. }
@@ -734,16 +734,9 @@ impl Provider for PostgresProvider {
                 ProviderError::permanent("ack_worker", format!("Failed to serialize completion: {e}"))
             })?;
 
-            (instance_id, Some(completion_json))
-        } else {
-            // No completion - activity was cancelled
-            (String::new(), None)
-        };
+            let now_ms = Self::now_millis();
 
-        let now_ms = Self::now_millis();
-
-        // Call stored procedure to atomically delete worker item and enqueue completion (if provided)
-        if let Some(completion_json) = completion_json {
+            // Call stored procedure to atomically delete worker item and enqueue completion
             sqlx::query(&format!(
                 "SELECT {}.ack_worker($1, $2, $3, $4)",
                 self.schema_name
@@ -771,8 +764,17 @@ impl Provider for PostgresProvider {
                     Self::sqlx_to_provider_error("ack_worker", e)
                 }
             })?;
+
+            let duration_ms = start.elapsed().as_millis() as u64;
+            debug!(
+                target = "duroxide::providers::postgres",
+                operation = "ack_worker",
+                instance_id = %instance_id,
+                duration_ms = duration_ms,
+                "Acknowledged worker and enqueued completion"
+            );
         } else {
-            // Just delete the work item without enqueuing a completion
+            // Activity was cancelled - just delete the work item without enqueuing a completion
             sqlx::query(&format!(
                 "DELETE FROM {}.worker_queue WHERE lock_token = $1",
                 self.schema_name
@@ -781,16 +783,16 @@ impl Provider for PostgresProvider {
             .execute(&*self.pool)
             .await
             .map_err(|e| Self::sqlx_to_provider_error("ack_worker", e))?;
-        }
 
-        let duration_ms = start.elapsed().as_millis() as u64;
-        debug!(
-            target = "duroxide::providers::postgres",
-            operation = "ack_worker",
-            instance_id = %instance_id,
-            duration_ms = duration_ms,
-            "Acknowledged worker and enqueued completion"
-        );
+            let duration_ms = start.elapsed().as_millis() as u64;
+            debug!(
+                target = "duroxide::providers::postgres",
+                operation = "ack_worker",
+                cancelled = true,
+                duration_ms = duration_ms,
+                "Acknowledged cancelled worker (no completion enqueued)"
+            );
+        }
 
         Ok(())
     }
