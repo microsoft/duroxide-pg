@@ -1,5 +1,7 @@
 name: Tests
 
+# Runs cargo tests on pull requests
+
 on:
   pull_request:
     branches:
