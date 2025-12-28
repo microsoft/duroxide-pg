@@ -1,8 +1,8 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use duroxide::providers::{
-    ExecutionInfo, ExecutionMetadata, InstanceInfo, OrchestrationItem, Provider, ProviderAdmin,
-    ProviderError, QueueDepths, SystemMetrics, WorkItem,
+    ExecutionInfo, ExecutionMetadata, ExecutionState, InstanceInfo, OrchestrationItem, Provider,
+    ProviderAdmin, ProviderError, QueueDepths, SystemMetrics, WorkItem,
 };
 use duroxide::Event;
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
@@ -88,6 +88,28 @@ impl PostgresProvider {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64
+    }
+
+    /// Parse execution state string from stored procedure result
+    /// Format: "Running", "Terminal:status", or "Missing"
+    fn parse_execution_state(state_str: &str) -> ExecutionState {
+        if state_str == "Running" {
+            ExecutionState::Running
+        } else if state_str == "Missing" {
+            ExecutionState::Missing
+        } else if let Some(status) = state_str.strip_prefix("Terminal:") {
+            ExecutionState::Terminal {
+                status: status.to_string(),
+            }
+        } else {
+            // Default to Running if unrecognized (shouldn't happen)
+            warn!(
+                target = "duroxide::providers::postgres",
+                state = %state_str,
+                "Unrecognized execution state, defaulting to Running"
+            );
+            ExecutionState::Running
+        }
     }
 
     /// Get schema-qualified table name
@@ -622,13 +644,13 @@ impl Provider for PostgresProvider {
         &self,
         lock_timeout: Duration,
         _poll_timeout: Duration,
-    ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
+    ) -> Result<Option<(WorkItem, String, u32, ExecutionState)>, ProviderError> {
         let start = std::time::Instant::now();
 
         // Convert Duration to milliseconds
         let lock_timeout_ms = lock_timeout.as_millis() as i64;
 
-        let row = match sqlx::query_as::<_, (String, String, i32)>(&format!(
+        let row = match sqlx::query_as::<_, (String, String, i32, String)>(&format!(
             "SELECT * FROM {}.fetch_work_item($1, $2)",
             self.schema_name
         ))
@@ -643,7 +665,7 @@ impl Provider for PostgresProvider {
             }
         };
 
-        let (work_item_json, lock_token, attempt_count) = match row {
+        let (work_item_json, lock_token, attempt_count, execution_state_str) = match row {
             Some(row) => row,
             None => return Ok(None),
         };
@@ -654,6 +676,9 @@ impl Provider for PostgresProvider {
                 format!("Failed to deserialize worker item: {e}"),
             )
         })?;
+
+        // Parse execution state from stored procedure result
+        let execution_state = Self::parse_execution_state(&execution_state_str);
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -680,16 +705,58 @@ impl Provider for PostgresProvider {
             operation = "fetch_work_item",
             instance_id = %instance_id,
             attempt_count = attempt_count,
+            execution_state = ?execution_state,
             duration_ms = duration_ms,
             "Fetched activity work item via stored procedure"
         );
 
-        Ok(Some((work_item, lock_token, attempt_count as u32)))
+        Ok(Some((
+            work_item,
+            lock_token,
+            attempt_count as u32,
+            execution_state,
+        )))
     }
 
     #[instrument(skip(self), fields(token = %token), target = "duroxide::providers::postgres")]
-    async fn ack_work_item(&self, token: &str, completion: WorkItem) -> Result<(), ProviderError> {
+    async fn ack_work_item(
+        &self,
+        token: &str,
+        completion: Option<WorkItem>,
+    ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
+
+        // If no completion provided (e.g., cancelled activity), just delete the item
+        let Some(completion) = completion else {
+            // Call ack_worker with NULL completion to delete without enqueueing
+            sqlx::query(&format!(
+                "SELECT {}.ack_worker($1)",
+                self.schema_name
+            ))
+            .bind(token)
+            .execute(&*self.pool)
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("Worker queue item not found") {
+                    ProviderError::permanent(
+                        "ack_worker",
+                        "Worker queue item not found or already processed",
+                    )
+                } else {
+                    Self::sqlx_to_provider_error("ack_worker", e)
+                }
+            })?;
+
+            let duration_ms = start.elapsed().as_millis() as u64;
+            debug!(
+                target = "duroxide::providers::postgres",
+                operation = "ack_worker",
+                token = %token,
+                duration_ms = duration_ms,
+                "Acknowledged worker without completion (cancelled)"
+            );
+            return Ok(());
+        };
 
         // Extract instance ID from completion WorkItem
         let instance_id = match &completion {
@@ -761,7 +828,7 @@ impl Provider for PostgresProvider {
         &self,
         token: &str,
         extend_for: Duration,
-    ) -> Result<(), ProviderError> {
+    ) -> Result<ExecutionState, ProviderError> {
         let start = std::time::Instant::now();
 
         // Get current time from application for consistent time reference
@@ -770,27 +837,29 @@ impl Provider for PostgresProvider {
         // Convert Duration to seconds for the stored procedure
         let extend_secs = extend_for.as_secs() as i64;
 
-        match sqlx::query(&format!(
+        match sqlx::query_as::<_, (String,)>(&format!(
             "SELECT {}.renew_work_item_lock($1, $2, $3)",
             self.schema_name
         ))
         .bind(token)
         .bind(now_ms)
         .bind(extend_secs)
-        .execute(&*self.pool)
+        .fetch_one(&*self.pool)
         .await
         {
-            Ok(_) => {
+            Ok((execution_state_str,)) => {
+                let execution_state = Self::parse_execution_state(&execution_state_str);
                 let duration_ms = start.elapsed().as_millis() as u64;
                 debug!(
                     target = "duroxide::providers::postgres",
                     operation = "renew_work_item_lock",
                     token = %token,
                     extend_for_secs = extend_secs,
+                    execution_state = ?execution_state,
                     duration_ms = duration_ms,
                     "Work item lock renewed successfully"
                 );
-                Ok(())
+                Ok(execution_state)
             }
             Err(e) => {
                 if let SqlxError::Database(db_err) = &e {

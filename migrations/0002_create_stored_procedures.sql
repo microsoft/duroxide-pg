@@ -236,12 +236,13 @@ BEGIN
     ', v_schema_name, v_schema_name);
 
     -- Procedure: ack_worker
-    -- Atomically deletes worker queue item and enqueues completion to orchestrator queue
+    -- Atomically deletes worker queue item and optionally enqueues completion to orchestrator queue
+    -- If p_completion_json is NULL, just deletes without enqueueing (for cancelled activities)
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.ack_worker(
             p_lock_token TEXT,
-            p_instance_id TEXT,
-            p_completion_json TEXT
+            p_instance_id TEXT DEFAULT NULL,
+            p_completion_json TEXT DEFAULT NULL
         )
         RETURNS VOID AS $ack_worker$
         DECLARE
@@ -255,15 +256,20 @@ BEGIN
                 RAISE EXCEPTION ''Worker queue item not found or already processed'';
             END IF;
 
-            -- Enqueue completion to orchestrator queue
-            INSERT INTO %I.orchestrator_queue (instance_id, work_item, visible_at, created_at)
-            VALUES (p_instance_id, p_completion_json, NOW(), NOW());
+            -- Only enqueue completion if provided (NULL means cancelled activity)
+            IF p_completion_json IS NOT NULL THEN
+                INSERT INTO %I.orchestrator_queue (instance_id, work_item, visible_at, created_at)
+                VALUES (p_instance_id, p_completion_json, NOW(), NOW());
+            END IF;
         END;
         $ack_worker$ LANGUAGE plpgsql;
     ', v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: renew_work_item_lock
     -- Renews (extends) the lock timeout for a worker queue item
+    -- Note: DROP first because migration 0007 changes the return type
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.renew_work_item_lock(TEXT, BIGINT, BIGINT)', v_schema_name);
+
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.renew_work_item_lock(
             p_lock_token TEXT,

@@ -101,6 +101,7 @@ pub async fn run_single_test(
         activity_delay_ms: 10,
         orch_concurrency: orch_conc,
         worker_concurrency: worker_conc,
+        wait_timeout_secs: 60, // Default for high-latency providers
     };
 
     // We need to create our own runtime with custom options
@@ -263,6 +264,7 @@ pub async fn run_test_suite(
             activity_delay_ms: 10,
             orch_concurrency: *orch_conc,
             worker_concurrency: *worker_conc,
+            wait_timeout_secs: 60, // Default for high-latency providers
         };
 
         info!(

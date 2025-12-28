@@ -20,6 +20,7 @@ async fn stress_test_parallel_orchestrations_light() {
         activity_delay_ms: 5,
         orch_concurrency: 2,
         worker_concurrency: 2,
+        wait_timeout_secs: 60,
     };
 
     let result = run_parallel_orchestrations_test_with_config(&factory, config)
@@ -58,6 +59,7 @@ async fn stress_test_parallel_orchestrations_standard() {
         activity_delay_ms: 10,
         orch_concurrency: 2,
         worker_concurrency: 2,
+        wait_timeout_secs: 60,
     };
 
     let result = run_parallel_orchestrations_test_with_config(&factory, config)
@@ -81,6 +83,7 @@ async fn stress_test_high_concurrency() {
         activity_delay_ms: 10,
         orch_concurrency: 4,
         worker_concurrency: 4,
+        wait_timeout_secs: 60,
     };
 
     let result = run_parallel_orchestrations_test_with_config(&factory, config)
@@ -115,6 +118,7 @@ async fn stress_test_connection_pool_limits() {
         activity_delay_ms: 10,
         orch_concurrency: 4,
         worker_concurrency: 4,
+        wait_timeout_secs: 60,
     };
 
     let result = run_parallel_orchestrations_test_with_config(&factory, config)
@@ -138,6 +142,7 @@ async fn stress_test_long_duration_stability() {
         activity_delay_ms: 10,
         orch_concurrency: 2,
         worker_concurrency: 2,
+        wait_timeout_secs: 60,
     };
 
     let result = run_parallel_orchestrations_test_with_config(&factory, config)

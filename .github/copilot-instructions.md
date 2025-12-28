@@ -1,0 +1,112 @@
+# Duroxide-PG Copilot Instructions
+
+## Project Overview
+This is a **PostgreSQL provider** for [Duroxide](https://github.com/affandar/duroxide), a durable task orchestration framework for Rust. It implements the `Provider` and `ProviderAdmin` traits, storing orchestration state, history, and work queues in PostgreSQL using stored procedures.
+
+## Architecture
+
+### Core Components
+- **[src/provider.rs](../src/provider.rs)** - Main `PostgresProvider` implementing duroxide traits (`Provider`, `ProviderAdmin`)
+- **[src/migrations.rs](../src/migrations.rs)** - Embedded SQL migration runner using `include_dir!`
+- **[migrations/](../migrations/)** - Sequential SQL migrations (schema + stored procedures)
+- **[pg-stress/](../pg-stress/)** - Stress testing binary for performance validation
+
+### Key Design Decisions
+1. **Stored Procedures over inline SQL** - All database operations use schema-qualified stored procedures in `0002_create_stored_procedures.sql` for atomic transactions and deadlock prevention
+2. **Rust-provided timestamps** - All procedures receive `p_now_ms` from Rust (not database `NOW()`) to avoid clock skew (see migration `0006`)
+3. **Schema isolation** - Multi-tenant support via custom PostgreSQL schemas (`new_with_schema()`)
+4. **Two-phase locking in fetch operations** - Prevents B-tree index deadlocks (peek query → advisory lock → FOR UPDATE verification)
+
+### Data Flow
+```
+Duroxide Runtime → PostgresProvider → Stored Procedures → PostgreSQL Tables
+                                                         (instances, executions, history,
+                                                          orchestrator_queue, worker_queue)
+```
+
+## Development Workflow
+
+### Prerequisites
+```bash
+# PostgreSQL running locally (or use Docker)
+docker run -d --name duroxide-pg -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:15
+
+# Create .env file
+echo "DATABASE_URL=postgres://postgres:postgres@localhost:5432/duroxide_test" > .env
+```
+
+### Running Tests
+```bash
+# All tests (requires DATABASE_URL)
+cargo test
+
+# Specific test with output
+cargo test test_provider_creation -- --nocapture
+
+# Provider validation tests only (63 tests from duroxide)
+cargo test --test postgres_provider_test
+
+# Stress tests (long-running, marked #[ignore])
+cargo test --test stress_tests -- --ignored
+```
+
+### Stress Testing
+```bash
+# Quick stress test (10 seconds)
+cargo run --release --package duroxide-pg-stress --bin pg-stress -- --duration 10
+
+# Custom configuration
+cargo run --release --package duroxide-pg-stress --bin pg-stress -- \
+  --duration 30 --orch-concurrency 4 --worker-concurrency 4
+```
+
+## Conventions
+
+### Error Handling
+Provider errors are classified as **retryable** or **permanent** via `ProviderError`:
+```rust
+// Retryable: deadlocks (40P01), pool timeouts, I/O errors
+ProviderError::retryable(operation, message)
+
+// Permanent: constraint violations (23505, 23503), invalid tokens
+ProviderError::permanent(operation, message)
+```
+
+### Schema Naming for Tests
+Tests create unique schemas with GUID suffix to allow parallel execution:
+```rust
+fn next_schema_name() -> String {
+    let guid = uuid::Uuid::new_v4().to_string();
+    format!("test_{}", &guid[guid.len()-8..])
+}
+```
+
+### Adding Migrations
+1. Create `NNNN_description.sql` in `migrations/`
+2. Use unqualified table names (search_path is set by runner)
+3. Make idempotent with `IF NOT EXISTS` / `IF EXISTS`
+4. Update stored procedures with new parameters if needed
+
+### Updating duroxide Dependency
+Follow the detailed guide in [prompts/update-duroxide-dependency.md](../prompts/update-duroxide-dependency.md). Key steps:
+1. **Review changes**: Read duroxide CHANGELOG, README, and provider guides at the duroxide repo
+2. **Update Cargo.toml**: Change version, run `cargo check`, fix compilation errors
+3. **Implement API changes**: Update `src/provider.rs`, add migrations if needed
+4. **Add validation tests**: New tests go in `tests/postgres_provider_test.rs` using the `provider_validation_test!` macro
+5. **Test thoroughly**: `cargo test`, run flaky tests 10x
+6. **Update docs**: CHANGELOG.md, README.md, bump version
+
+> ⚠️ **Never push to remote or publish to crates.io without explicit user confirmation**
+
+## Key Files Reference
+| File | Purpose |
+|------|---------|
+| [provider.rs](../src/provider.rs) | Provider trait implementations |
+| [0002_create_stored_procedures.sql](../migrations/0002_create_stored_procedures.sql) | All stored procedures |
+| [tests/common/mod.rs](../tests/common/mod.rs) | Test utilities (`create_postgres_store`, `test_create_execution`) |
+| [postgres_provider_test.rs](../tests/postgres_provider_test.rs) | Provider validation test harness |
+
+## Debugging Tips
+- Enable tracing: `RUST_LOG=duroxide::providers::postgres=debug cargo test`
+- Check schema cleanup: Run `scripts/cleanup_test_schemas.sh` after failed tests
+- Deadlock issues: Review two-phase locking in `fetch_orchestration_item` stored procedure

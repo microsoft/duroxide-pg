@@ -1,8 +1,8 @@
 use std::sync::{Arc, Once};
 
 use duroxide::provider_validation::{
-    atomicity, error_handling, instance_creation, instance_locking, lock_expiration, management,
-    multi_execution, queue_semantics,
+    atomicity, cancellation, error_handling, instance_creation, instance_locking, lock_expiration,
+    management, multi_execution, queue_semantics,
 };
 use duroxide::provider_validations::ProviderFactory;
 use duroxide::providers::Provider;
@@ -240,4 +240,18 @@ mod poison_message_tests {
     provider_validation_test!(poison_message::abandon_orchestration_item_ignore_attempt_decrements);
     provider_validation_test!(poison_message::ignore_attempt_never_goes_negative);
     provider_validation_test!(poison_message::max_attempt_count_across_message_batch);
+}
+
+mod cancellation_tests {
+    use super::*;
+
+    provider_validation_test!(cancellation::test_fetch_returns_running_state_for_active_orchestration);
+    provider_validation_test!(cancellation::test_fetch_returns_terminal_state_when_orchestration_completed);
+    provider_validation_test!(cancellation::test_fetch_returns_terminal_state_when_orchestration_failed);
+    provider_validation_test!(cancellation::test_fetch_returns_terminal_state_when_orchestration_continued_as_new);
+    provider_validation_test!(cancellation::test_fetch_returns_missing_state_when_instance_deleted);
+    provider_validation_test!(cancellation::test_renew_returns_running_when_orchestration_active);
+    provider_validation_test!(cancellation::test_renew_returns_terminal_when_orchestration_completed);
+    provider_validation_test!(cancellation::test_renew_returns_missing_when_instance_deleted);
+    provider_validation_test!(cancellation::test_ack_work_item_none_deletes_without_enqueue);
 }

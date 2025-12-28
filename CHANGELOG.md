@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2025-12-28
+
+### Added
+
+- Activity cancellation support (duroxide 0.1.7)
+  - `fetch_work_item` now returns `ExecutionState` as fourth column
+  - `renew_work_item_lock` now returns `ExecutionState` (was `void`)
+  - `ack_work_item` now accepts `Option<WorkItem>` to support cancellation without enqueue
+- New migration `0007_add_execution_state_support.sql`
+- 9 new provider validation tests for cancellation:
+  - `test_fetch_returns_running_state_for_active_orchestration`
+  - `test_fetch_returns_terminal_state_when_orchestration_completed`
+  - `test_fetch_returns_terminal_state_when_orchestration_failed`
+  - `test_fetch_returns_terminal_state_when_orchestration_continued_as_new`
+  - `test_fetch_returns_missing_state_when_instance_deleted`
+  - `test_renew_returns_running_when_orchestration_active`
+  - `test_renew_returns_terminal_when_orchestration_completed`
+  - `test_renew_returns_missing_when_instance_deleted`
+  - `test_ack_work_item_none_deletes_without_enqueue`
+
+### Changed
+
+- Updated to duroxide 0.1.7
+- `parse_execution_state` helper added to convert database strings to `ExecutionState` enum
+
+### Notes
+
+- Total validation tests: 72 (up from 63)
+- ExecutionState values: `Running`, `Terminal:<status>`, `Missing`
+- Enables runtime to detect orchestration state changes during long-running activities
+
 ## [0.1.8] - 2025-12-19
 
 ### Fixed

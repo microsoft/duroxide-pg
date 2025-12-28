@@ -324,24 +324,23 @@ BEGIN
     ', v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name);
 
     -- ============================================================================
-    -- Update ack_worker to accept p_now_ms
+    -- Update ack_worker to accept p_now_ms and support nullable completion
     -- ============================================================================
     EXECUTE format('DROP FUNCTION IF EXISTS %I.ack_worker(TEXT, TEXT, TEXT)', v_schema_name);
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.ack_worker(TEXT, TEXT, TEXT, BIGINT)', v_schema_name);
 
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.ack_worker(
             p_lock_token TEXT,
-            p_instance_id TEXT,
-            p_completion_json TEXT,
-            p_now_ms BIGINT
+            p_instance_id TEXT DEFAULT NULL,
+            p_completion_json TEXT DEFAULT NULL,
+            p_now_ms BIGINT DEFAULT NULL
         )
         RETURNS VOID AS $ack_worker$
         DECLARE
             v_rows_affected INTEGER;
             v_now_ts TIMESTAMPTZ;
         BEGIN
-            v_now_ts := TO_TIMESTAMP(p_now_ms / 1000.0);
-
             -- Delete the worker queue item
             DELETE FROM %I.worker_queue WHERE lock_token = p_lock_token;
             GET DIAGNOSTICS v_rows_affected = ROW_COUNT;
@@ -350,9 +349,20 @@ BEGIN
                 RAISE EXCEPTION ''Worker queue item not found or already processed'';
             END IF;
 
-            -- Enqueue completion to orchestrator queue
-            INSERT INTO %I.orchestrator_queue (instance_id, work_item, visible_at, created_at)
-            VALUES (p_instance_id, p_completion_json, v_now_ts, v_now_ts);
+            -- Only enqueue completion if provided (NULL means cancelled activity)
+            IF p_completion_json IS NOT NULL THEN
+                -- Validate required parameters for completion
+                IF p_instance_id IS NULL THEN
+                    RAISE EXCEPTION ''p_instance_id is required when p_completion_json is provided'';
+                END IF;
+                IF p_now_ms IS NULL THEN
+                    RAISE EXCEPTION ''p_now_ms is required when p_completion_json is provided'';
+                END IF;
+                
+                v_now_ts := TO_TIMESTAMP(p_now_ms / 1000.0);
+                INSERT INTO %I.orchestrator_queue (instance_id, work_item, visible_at, created_at)
+                VALUES (p_instance_id, p_completion_json, v_now_ts, v_now_ts);
+            END IF;
         END;
         $ack_worker$ LANGUAGE plpgsql;
     ', v_schema_name, v_schema_name, v_schema_name);
