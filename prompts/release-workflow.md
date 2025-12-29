@@ -2,6 +2,9 @@
 
 > Use this prompt to prepare and tag a new release of duroxide-pg-opt.
 
+> **⚠️ IMPORTANT:** This is a **private repository**. Do NOT publish to public crates.io.
+> The release workflow ends at git push - no `cargo publish` step.
+
 ## Instructions for AI Assistant
 
 Execute the following release workflow steps in order. 
