@@ -65,7 +65,7 @@ async fn stress_high_notify_rate() {
         provider
             .enqueue_for_orchestrator(
                 WorkItem::StartOrchestration {
-                    instance: format!("stress-{}", i),
+                    instance: format!("stress-{i}"),
                     orchestration: "test-orch".to_string(),
                     version: Some("1.0".to_string()),
                     input: "{}".to_string(),
@@ -109,17 +109,17 @@ async fn stress_high_notify_rate() {
 
     eprintln!("\n========== STRESS: HIGH NOTIFY RATE ==========");
     eprintln!("Test configuration:");
-    eprintln!("  - Work items: {}", insert_count);
+    eprintln!("  - Work items: {insert_count}");
     eprintln!("Insert phase:");
-    eprintln!("  - Duration: {:?}", insert_duration);
+    eprintln!("  - Duration: {insert_duration:?}");
     eprintln!(
         "  - Rate: {:.1} items/sec",
         insert_count as f64 / insert_duration.as_secs_f64()
     );
     eprintln!("Fetch phase:");
-    eprintln!("  - Duration: {:?}", fetch_duration);
-    eprintln!("  - Items fetched: {}", fetched);
-    eprintln!("  - Throughput: {:.1} items/sec", throughput);
+    eprintln!("  - Duration: {fetch_duration:?}");
+    eprintln!("  - Items fetched: {fetched}");
+    eprintln!("  - Throughput: {throughput:.1} items/sec");
     eprintln!(
         "Result: {} - All items processed",
         if fetched == insert_count {
@@ -132,8 +132,7 @@ async fn stress_high_notify_rate() {
 
     assert_eq!(
         fetched, insert_count,
-        "Should have fetched all {} items, got {}",
-        insert_count, fetched
+        "Should have fetched all {insert_count} items, got {fetched}"
     );
 
     cleanup_schema(&schema).await;
@@ -171,12 +170,11 @@ async fn stress_many_timers() {
         let visible_at = now + chrono::Duration::milliseconds(delay_ms);
 
         sqlx::query(&format!(
-            r#"INSERT INTO {}.orchestrator_queue
+            r#"INSERT INTO {schema}.orchestrator_queue
                (instance_id, work_item, visible_at, created_at)
-               VALUES ($1, $2, $3, NOW())"#,
-            schema
+               VALUES ($1, $2, $3, NOW())"#
         ))
-        .bind(format!("timer-stress-{}", i))
+        .bind(format!("timer-stress-{i}"))
         .bind(
             serde_json::to_string(&serde_json::json!({
                 "StartOrchestration": {
@@ -224,13 +222,13 @@ async fn stress_many_timers() {
 
     eprintln!("\n========== STRESS: MANY TIMERS ==========");
     eprintln!("Test configuration:");
-    eprintln!("  - Timer count: {}", timer_count);
+    eprintln!("  - Timer count: {timer_count}");
     eprintln!("  - Timer delays: 500ms to 4500ms (staggered)");
     eprintln!("Insert phase:");
-    eprintln!("  - Duration: {:?}", insert_duration);
+    eprintln!("  - Duration: {insert_duration:?}");
     eprintln!("Fetch phase:");
-    eprintln!("  - Duration: {:?}", fetch_duration);
-    eprintln!("  - Timers fetched: {}", fetched);
+    eprintln!("  - Duration: {fetch_duration:?}");
+    eprintln!("  - Timers fetched: {fetched}");
     eprintln!(
         "  - Avg time per timer: {:?}",
         fetch_duration / timer_count as u32
@@ -247,8 +245,7 @@ async fn stress_many_timers() {
 
     assert_eq!(
         fetched, timer_count,
-        "Should have fetched all {} timers, got {}",
-        timer_count, fetched
+        "Should have fetched all {timer_count} timers, got {fetched}"
     );
 
     pool.close().await;
@@ -278,7 +275,7 @@ async fn stress_connection_flapping() {
         provider
             .enqueue_for_orchestrator(
                 WorkItem::StartOrchestration {
-                    instance: format!("flap-{}", i),
+                    instance: format!("flap-{i}"),
                     orchestration: "test-orch".to_string(),
                     version: Some("1.0".to_string()),
                     input: "{}".to_string(),
@@ -320,13 +317,13 @@ async fn stress_connection_flapping() {
 
     eprintln!("\n========== STRESS: CONNECTION FLAPPING ==========");
     eprintln!("Test configuration:");
-    eprintln!("  - Work items: {}", insert_count);
+    eprintln!("  - Work items: {insert_count}");
     eprintln!("  - Note: Full flapping requires fault injection");
     eprintln!("Insert phase:");
-    eprintln!("  - Duration: {:?}", insert_duration);
+    eprintln!("  - Duration: {insert_duration:?}");
     eprintln!("Fetch phase:");
-    eprintln!("  - Duration: {:?}", fetch_duration);
-    eprintln!("  - Items fetched: {}", fetched);
+    eprintln!("  - Duration: {fetch_duration:?}");
+    eprintln!("  - Items fetched: {fetched}");
     eprintln!(
         "Result: {} - All items processed",
         if fetched == insert_count {

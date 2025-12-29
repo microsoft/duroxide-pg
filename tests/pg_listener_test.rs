@@ -64,7 +64,7 @@ async fn test_pg_listener_basic() {
             assert_eq!(notification.payload(), "hello from test");
         }
         Ok(Err(e)) => {
-            panic!("❌ Error receiving notification: {}", e);
+            panic!("❌ Error receiving notification: {e}");
         }
         Err(_) => {
             panic!("❌ Timeout waiting for notification");
@@ -89,17 +89,16 @@ async fn test_pg_listener_with_trigger() {
         "test_notify_{}",
         uuid::Uuid::new_v4().to_string().replace("-", "")[..8].to_lowercase()
     );
-    eprintln!("[TEST] Creating test schema: {}", schema_name);
+    eprintln!("[TEST] Creating test schema: {schema_name}");
 
     // Create schema with table and trigger
-    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", schema_name))
+    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {schema_name}"))
         .execute(&pool)
         .await
         .expect("Failed to create schema");
 
     sqlx::query(&format!(
-        "CREATE TABLE {}.test_queue (id SERIAL PRIMARY KEY, data TEXT)",
-        schema_name
+        "CREATE TABLE {schema_name}.test_queue (id SERIAL PRIMARY KEY, data TEXT)"
     ))
     .execute(&pool)
     .await
@@ -111,15 +110,14 @@ async fn test_pg_listener_with_trigger() {
     // TG_TABLE_SCHEMA is the correct way to get the table's schema in a trigger.
     sqlx::query(&format!(
         r#"
-        CREATE OR REPLACE FUNCTION {}.notify_test_queue()
+        CREATE OR REPLACE FUNCTION {schema_name}.notify_test_queue()
         RETURNS TRIGGER AS $$
         BEGIN
             PERFORM pg_notify(TG_TABLE_SCHEMA || '_test_channel', NEW.id::TEXT);
             RETURN NEW;
         END;
         $$ LANGUAGE plpgsql
-    "#,
-        schema_name
+    "#
     ))
     .execute(&pool)
     .await
@@ -129,11 +127,10 @@ async fn test_pg_listener_with_trigger() {
     sqlx::query(&format!(
         r#"
         CREATE TRIGGER trg_test_notify
-        AFTER INSERT ON {}.test_queue
+        AFTER INSERT ON {schema_name}.test_queue
         FOR EACH ROW
-        EXECUTE FUNCTION {}.notify_test_queue()
-    "#,
-        schema_name, schema_name
+        EXECUTE FUNCTION {schema_name}.notify_test_queue()
+    "#
     ))
     .execute(&pool)
     .await
@@ -143,8 +140,8 @@ async fn test_pg_listener_with_trigger() {
     let mut listener = PgListener::connect_with(&pool)
         .await
         .expect("Failed to create listener");
-    let channel = format!("{}_test_channel", schema_name);
-    eprintln!("[TEST] Subscribing to channel: {}", channel);
+    let channel = format!("{schema_name}_test_channel");
+    eprintln!("[TEST] Subscribing to channel: {channel}");
     listener.listen(&channel).await.expect("Failed to listen");
     eprintln!("[TEST] Subscribed successfully");
 
@@ -158,8 +155,7 @@ async fn test_pg_listener_with_trigger() {
         // With TG_TABLE_SCHEMA, we don't need to set search_path - the trigger
         // will correctly use the schema of the table regardless of search_path
         sqlx::query(&format!(
-            "INSERT INTO {}.test_queue (data) VALUES ('test data')",
-            schema_clone
+            "INSERT INTO {schema_clone}.test_queue (data) VALUES ('test data')"
         ))
         .execute(&pool2)
         .await
@@ -180,14 +176,14 @@ async fn test_pg_listener_with_trigger() {
         }
         Ok(Err(e)) => {
             // Cleanup
-            let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
+            let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
                 .execute(&pool)
                 .await;
-            panic!("❌ Error receiving notification: {}", e);
+            panic!("❌ Error receiving notification: {e}");
         }
         Err(_) => {
             // Cleanup
-            let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
+            let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
                 .execute(&pool)
                 .await;
             panic!("❌ Timeout waiting for notification from trigger");
@@ -195,7 +191,7 @@ async fn test_pg_listener_with_trigger() {
     }
 
     // Cleanup
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name))
+    sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
         .execute(&pool)
         .await
         .expect("Failed to cleanup");

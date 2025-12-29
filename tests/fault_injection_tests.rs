@@ -180,10 +180,9 @@ async fn fault_heap_corruption_negative_timer() {
     let past = chrono::Utc::now() - chrono::Duration::hours(1);
 
     sqlx::query(&format!(
-        r#"INSERT INTO {}.orchestrator_queue
+        r#"INSERT INTO {schema}.orchestrator_queue
            (instance_id, work_item, visible_at, created_at)
-           VALUES ($1, $2, $3, NOW())"#,
-        schema
+           VALUES ($1, $2, $3, NOW())"#
     ))
     .bind("negative-timer-test")
     .bind(
@@ -215,8 +214,7 @@ async fn fault_heap_corruption_negative_timer() {
     assert!(result.is_some(), "Should find work with past visible_at");
     assert!(
         elapsed < Duration::from_millis(500),
-        "Past timer should be found immediately, took {:?}",
-        elapsed
+        "Past timer should be found immediately, took {elapsed:?}"
     );
 
     pool.close().await;
@@ -465,23 +463,20 @@ async fn fault_injection_symmetric_clock_skew() {
          - Node B skew: -100ms (behind)\n\
          - Scheduled delay: 500ms\n\
          - Expected effective delay: ~700ms (500 + 200 skew)\n\
-         - Actual time since enqueue: {:?}\n\
-         - Total fetch time (including pre-enqueue wait): {:?}",
-        time_since_enqueue, total_elapsed
+         - Actual time since enqueue: {time_since_enqueue:?}\n\
+         - Total fetch time (including pre-enqueue wait): {total_elapsed:?}"
     );
 
     assert!(
         time_since_enqueue >= Duration::from_millis(600),
-        "Work should NOT appear before ~700ms due to clock skew, but appeared at {:?}",
-        time_since_enqueue
+        "Work should NOT appear before ~700ms due to clock skew, but appeared at {time_since_enqueue:?}"
     );
 
     // Use tighter threshold for localhost, more generous for remote
     let upper_bound_ms = if is_localhost() { 900 } else { 1500 };
     assert!(
         time_since_enqueue < Duration::from_millis(upper_bound_ms),
-        "Work should appear around 700ms, not {:?}",
-        time_since_enqueue
+        "Work should appear around 700ms, not {time_since_enqueue:?}"
     );
 
     cleanup_schema(&schema).await;

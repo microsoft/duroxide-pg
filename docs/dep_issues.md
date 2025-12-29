@@ -2,7 +2,7 @@
 
 **Purpose:** Track duroxide issues/limitations that require workarounds in duroxide-pg-opt.
 
-**Last Updated:** 2024-12-22
+**Last Updated:** 2024-12-29
 
 **Quick Links:**
 - 🔗 [All duroxide-pg issues](https://github.com/affandar/duroxide/labels/duroxide-pg)
@@ -35,128 +35,109 @@
 
 ## Active Blockers
 
-### 1. Configurable `wait_for_orchestration` Timeout
+### 1. Provider Validation Missing Lock Extension Verification
 
 | Field | Value |
 |-------|-------|
-| **Issue** | [GitHub #31](https://github.com/affandar/duroxide/issues/31) |
+| **Issue** | [GitHub #36](https://github.com/affandar/duroxide/issues/36) |
 | **Status** | 🔴 Open |
 | **Fixed In** | TBD |
-| **Workaround Location** | `pg-stress/src/lib.rs` - `run_large_payload_suite()` |
+| **Workaround Location** | None - manual code review required |
 
 **Problem:**
-The stress test framework has a hardcoded 60-second timeout for `wait_for_orchestration` in `duroxide/src/provider_stress_test/core.rs:177`. This causes large payload tests to fail on remote databases with high latency (200-300ms per query).
-
-**Current Workaround:**
-- `is_localhost_db()` function detects local vs remote databases
-- Remote databases use reduced test intensity:
-  - Smaller payloads (5/20/50 KB instead of 10/50/100 KB)
-  - Fewer activities (8 instead of 20)
-  - Fewer sub-orchestrations (2 instead of 5)
-
-**When Fixed - Cleanup Steps:**
-1. Update duroxide dependency in `Cargo.toml`
-2. Remove `is_localhost_db()` function from `pg-stress/src/lib.rs`
-3. Remove conditional config in `run_large_payload_suite()`
-4. Use full intensity config for all databases with increased timeout
-5. Remove STOPGAP comments
-6. Remove entry from `TODO.md`
-
-**Files to Update:**
-- [ ] `pg-stress/src/lib.rs` (search for `STOPGAP`)
-- [ ] `TODO.md` (remove BLOCKED entry)
-
----
-
-### 2. Validation Test Timing Race with Connection Latency
-
-| Field | Value |
-|-------|-------|
-| **Issue** | [GitHub #32](https://github.com/affandar/duroxide/issues/32) |
-| **Status** | 🔴 Open |
-| **Fixed In** | TBD |
-| **Workaround Location** | `src/provider.rs` - `new_with_options()` and `new_with_fault_injection()` |
-
-**Problem:**
-The `test_multi_threaded_lock_expiration_recovery` validation test in `duroxide/src/provider_validation/instance_locking.rs` has a timing race condition. The test spawns 3 threads that start their sleep timers at spawn time, but thread 1 may have connection establishment latency before acquiring the lock. This causes thread 2 and thread 3 to wake up at the wrong time relative to when the lock was actually acquired.
+The `renew_work_item_lock` provider contract specifies that the lock should **only** be extended when `ExecutionState::Running` is returned. For `Terminal` and `Missing` states, the lock must NOT be extended. However, the validation tests only verify the **return value**, not whether the lock was actually extended.
 
 **Root Cause:**
-- Thread 1: Fetches lock (may have 50-200ms connection latency)
-- Thread 2: Sleeps 200ms from spawn (may wake BEFORE thread 1 acquires lock)
-- Thread 3: Sleeps `lock_timeout+100ms` from spawn (may wake before lock actually expires)
+- Tests like `test_renew_returns_terminal_when_orchestration_completed` check the return value
+- No test verifies that the lock timeout was NOT extended
+- Provider implementations can pass all tests while incorrectly extending locks
+
+**Impact:**
+- All 77 provider validation tests passed in duroxide-pg-opt even when the contract was violated
+- Bug was only discovered through manual code review
+- Incorrect behavior could cause activities to continue running after orchestration cancellation
 
 **Proposed Fix:**
-Use a oneshot channel to signal when thread 1 has acquired the lock, then have thread 2 and thread 3 start their timers from that point.
+Add validation tests that:
+1. Call `renew_work_item_lock` on a Terminal/Missing state
+2. Wait for the **original** lock timeout to elapse (not the renewal duration)
+3. Verify the work item becomes fetchable (proving lock was NOT extended)
 
 **Current Workaround:**
-- Pre-warm 4 additional connections when long-poll is enabled
-- Connections are acquired and immediately dropped to warm the pool
-- This ensures the connection pool is ready before tests run
+- **None** - manual code review of `renew_work_item_lock` implementation required
+- Ensure stored procedure checks execution status BEFORE extending lock
 
 **When Fixed - Cleanup Steps:**
 1. Update duroxide dependency in `Cargo.toml`
-2. Verify the validation test passes without pre-warming
-3. Remove pre-warming code blocks in both constructors
-4. Remove TODO comments
-
-**Files to Update:**
-- [ ] `src/provider.rs` (search for "pre-warming")
-
----
-
-### 3. Validation Test Timing Sensitivity (Lock Renewal)
-
-| Field | Value |
-|-------|-------|
-| **Issue** | [GitHub #34](https://github.com/affandar/duroxide/issues/34) |
-| **Status** | 🔴 Open |
-| **Fixed In** | TBD |
-| **Workaround Location** | None - test fails on remote databases |
-
-**Problem:**
-The `test_worker_lock_renewal_extends_timeout` validation test in `duroxide/src/provider_validation/lock_expiration.rs` uses tight timing windows (800ms sleeps with 1s lock timeouts) that don't account for network latency when running against remote databases.
-
-**Root Cause:**
-- Test uses 800ms sleep + 800ms sleep = 1.6s total, with lock expiring at 2s
-- With remote DB latency (~40-60ms per query), cumulative drift is ~150-200ms
-- Final fetch can complete around 1.7-1.8s, too close to 2s expiration
-- Any additional processing overhead causes the lock to expire before assertion
-
-**Proposed Fix:**
-Use larger timing margins (2s timeout, 1.5s sleeps) or accept a `ProviderFactory::network_latency_budget()` hint.
-
-**Current Workaround:**
-- **None** - test must be run against localhost database
-- Use `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres` in `.env`
-
-**When Fixed - Cleanup Steps:**
-1. Update duroxide dependency in `Cargo.toml`
-2. Verify the validation test passes against remote databases
+2. Verify the new validation tests pass
 3. Update this document
 
 **Files to Update:**
-- [ ] None (no code workaround, just use localhost for now)
+- [ ] None (no code workaround, just awareness)
 
 ---
 
 ## Resolved Blockers
 
-_None yet. Move items here when fixed._
-
-<!--
-Template for resolved blocker:
-
-### [RESOLVED] Issue Title
+### [RESOLVED] Configurable `wait_for_orchestration` Timeout
 
 | Field | Value |
 |-------|-------|
-| **Issue** | [GitHub #XX](https://github.com/affandar/duroxide/issues/XX) |
+| **Issue** | [GitHub #31](https://github.com/affandar/duroxide/issues/31) |
 | **Status** | ✅ Resolved |
-| **Fixed In** | v0.1.X |
-| **Cleanup PR** | [#YY](link) |
+| **Fixed In** | v0.1.7 |
+| **Cleanup PR** | N/A - workaround code already uses `wait_timeout_secs` |
 
-**Resolution Date:** YYYY-MM-DD
--->
+**Resolution Date:** 2024-12-29
+
+**Resolution:**
+duroxide v0.1.7 added `StressTestConfig::wait_timeout_secs` field, allowing providers to specify custom timeouts for remote databases. The workaround code in `pg-stress/src/lib.rs` already uses this field (`wait_timeout_secs: 120`), so no cleanup is needed - just update comments to note the field is now officially supported.
+
+**Original Problem:**
+The stress test framework had a hardcoded 60-second timeout for `wait_for_orchestration`. This caused large payload tests to fail on remote databases with high latency.
+
+---
+
+### [RESOLVED] Validation Test Timing Race with Connection Latency
+
+| Field | Value |
+|-------|-------|
+| **Issue** | [GitHub #32](https://github.com/affandar/duroxide/issues/32) |
+| **Status** | ✅ Resolved |
+| **Fixed In** | v0.1.7 |
+| **Cleanup PR** | N/A - workaround removed |
+
+**Resolution Date:** 2024-12-29
+
+**Resolution:**
+duroxide v0.1.7 fixed the `test_multi_threaded_lock_expiration_recovery` race condition. The connection pre-warming workaround in `src/provider.rs` has been removed.
+
+**Original Problem:**
+The test spawned threads that started sleep timers at spawn time, causing timing issues with connection establishment latency.
+
+**Cleanup Completed:**
+- [x] Verify test passes without pre-warming
+- [x] Remove pre-warming code in `src/provider.rs` (both constructors)
+- [x] Remove TODO comments
+
+---
+
+### [RESOLVED] Validation Test Timing Sensitivity (Lock Renewal)
+
+| Field | Value |
+|-------|-------|
+| **Issue** | [GitHub #34](https://github.com/affandar/duroxide/issues/34) |
+| **Status** | ✅ Resolved |
+| **Fixed In** | v0.1.7 |
+| **Cleanup PR** | N/A - no workaround code |
+
+**Resolution Date:** 2024-12-29
+
+**Resolution:**
+duroxide v0.1.7 fixed the `test_worker_lock_renewal_extends_timeout` timing sensitivity issue. The test now uses larger timing margins that accommodate remote database latency.
+
+**Original Problem:**
+The test used 800ms sleeps with 1s lock timeouts, causing failures on remote databases with 40-60ms latency.
 
 ---
 
@@ -181,5 +162,4 @@ When updating the duroxide dependency, run through this checklist:
 
 | duroxide-pg-opt | duroxide | Notes |
 |-----------------|----------|-------|
-| 0.1.1 | 0.1.6 | Current - has workarounds for #31 |
-
+| 0.1.6 | 0.1.7 | Current - cooperative cancellation support, #31/#32/#34 resolved, #36 pending |

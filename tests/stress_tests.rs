@@ -218,12 +218,12 @@ impl DbMetricsSummary {
         };
 
         println!("\n============================================================");
-        println!("DB METRICS SUMMARY: {}", test_name);
+        println!("DB METRICS SUMMARY: {test_name}");
         println!("============================================================");
-        println!("Completed orchestrations: {}", completed_orchs);
-        println!("Total activities:         {}", total_activities);
+        println!("Completed orchestrations: {completed_orchs}");
+        println!("Total activities:         {total_activities}");
         println!("Total DB calls:           {}", self.total_db_calls);
-        println!("DB calls per orch:        {:.1}", db_calls_per_orch);
+        println!("DB calls per orch:        {db_calls_per_orch:.1}");
 
         println!("\n--- Long-Poll Effectiveness ---");
         println!(
@@ -269,11 +269,11 @@ impl DbMetricsSummary {
 
         println!("\nCalls by operation:");
         for (op, count) in &self.calls_by_operation {
-            println!("  {:20} {:>10}", op, count);
+            println!("  {op:20} {count:>10}");
         }
         println!("\nCalls by stored procedure:");
         for (sp, count) in &self.calls_by_sp_name {
-            println!("  {:40} {:>10}", sp, count);
+            println!("  {sp:40} {count:>10}");
         }
         println!("============================================================\n");
     }
@@ -369,6 +369,7 @@ async fn stress_test_parallel_orchestrations_light() {
         activity_delay_ms: 5,
         orch_concurrency: 2,
         worker_concurrency: 2,
+        wait_timeout_secs: 60,
     };
     let tasks_per_instance = config.tasks_per_instance;
 
@@ -419,6 +420,7 @@ async fn stress_test_parallel_orchestrations_standard() {
         activity_delay_ms: 10,
         orch_concurrency: 2,
         worker_concurrency: 2,
+        wait_timeout_secs: 60,
     };
 
     let result = run_parallel_orchestrations_test_with_config(&factory, config)
@@ -442,6 +444,7 @@ async fn stress_test_high_concurrency() {
         activity_delay_ms: 10,
         orch_concurrency: 4,
         worker_concurrency: 4,
+        wait_timeout_secs: 60,
     };
     let tasks_per_instance = config.tasks_per_instance;
 
@@ -491,6 +494,7 @@ async fn stress_test_high_concurrency_no_longpoll() {
         activity_delay_ms: 10,
         orch_concurrency: 4,
         worker_concurrency: 4,
+        wait_timeout_secs: 60,
     };
     let tasks_per_instance = config.tasks_per_instance;
 
@@ -549,6 +553,7 @@ async fn stress_test_longpoll_comparison_enabled() {
         activity_delay_ms: 1000, // 500ms delay - activities take real time
         orch_concurrency: 2,
         worker_concurrency: 2,
+        wait_timeout_secs: 60,
     };
     let tasks_per_instance = config.tasks_per_instance;
 
@@ -591,6 +596,7 @@ async fn stress_test_longpoll_comparison_disabled() {
         activity_delay_ms: 1000, // 1000ms delay - activities take real time
         orch_concurrency: 2,
         worker_concurrency: 2,
+        wait_timeout_secs: 60,
     };
     let tasks_per_instance = config.tasks_per_instance;
 
@@ -633,6 +639,7 @@ async fn stress_test_connection_pool_limits() {
         activity_delay_ms: 10,
         orch_concurrency: 4,
         worker_concurrency: 4,
+        wait_timeout_secs: 60,
     };
 
     let result = run_parallel_orchestrations_test_with_config(&factory, config)
@@ -656,6 +663,7 @@ async fn stress_test_long_duration_stability() {
         activity_delay_ms: 10,
         orch_concurrency: 2,
         worker_concurrency: 2,
+        wait_timeout_secs: 60,
     };
 
     let result = run_parallel_orchestrations_test_with_config(&factory, config)
@@ -772,7 +780,7 @@ mod batch_tests {
             // Launch batch
             let mut instance_ids = Vec::new();
             for i in 0..batch_size {
-                let instance_id = format!("batch-{}-orch-{}", batch, i);
+                let instance_id = format!("batch-{batch}-orch-{i}");
                 client
                     .start_orchestration(&instance_id, "BatchOrch", format!("input-{i}"))
                     .await
@@ -790,10 +798,7 @@ mod batch_tests {
                         total_completed += 1;
                     }
                     other => {
-                        println!(
-                            "Orchestration {} did not complete: {:?}",
-                            instance_id, other
-                        );
+                        println!("Orchestration {instance_id} did not complete: {other:?}");
                     }
                 }
             }

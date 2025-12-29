@@ -91,8 +91,7 @@ async fn fetch_returns_immediately_when_work_exists() {
     assert!(result.is_some(), "Should have found work");
     assert!(
         elapsed < Duration::from_millis(500),
-        "Fetch should be near-instant when work exists, took {:?}",
-        elapsed
+        "Fetch should be near-instant when work exists, took {elapsed:?}"
     );
 
     cleanup_schema(&schema).await;
@@ -123,8 +122,7 @@ async fn fetch_times_out_after_poll_timeout() {
     // Should take at least poll_timeout (minus some slack for timing)
     assert!(
         elapsed >= poll_timeout - Duration::from_millis(200),
-        "Should wait for poll_timeout, only waited {:?}",
-        elapsed
+        "Should wait for poll_timeout, only waited {elapsed:?}"
     );
     // But not too much longer (allow more slack for remote DB latency)
     let slack = if is_localhost() {
@@ -134,8 +132,7 @@ async fn fetch_times_out_after_poll_timeout() {
     };
     assert!(
         elapsed < poll_timeout + slack,
-        "Should not wait much longer than poll_timeout, waited {:?}",
-        elapsed
+        "Should not wait much longer than poll_timeout, waited {elapsed:?}"
     );
 
     cleanup_schema(&schema).await;
@@ -176,8 +173,7 @@ async fn fetch_works_without_long_poll_enabled() {
     };
     assert!(
         elapsed < threshold,
-        "Without long-poll should return immediately, took {:?}",
-        elapsed
+        "Without long-poll should return immediately, took {elapsed:?}"
     );
 
     cleanup_schema(&schema).await;
@@ -241,8 +237,7 @@ async fn fetch_waits_for_notify_when_no_work() {
     // Should have waited for at least the 500ms we slept
     assert!(
         elapsed >= Duration::from_millis(400),
-        "Should have been waiting, elapsed {:?}",
-        elapsed
+        "Should have been waiting, elapsed {elapsed:?}"
     );
 
     cleanup_schema(&schema).await;
@@ -305,8 +300,7 @@ async fn e2e_immediate_work_detected() {
     // Total elapsed includes the initial 100ms wait, so allow ~600ms
     assert!(
         elapsed < Duration::from_millis(1000),
-        "Should wake quickly after NOTIFY, took {:?}",
-        elapsed
+        "Should wake quickly after NOTIFY, took {elapsed:?}"
     );
 
     cleanup_schema(&schema).await;
@@ -350,7 +344,7 @@ async fn e2e_multiple_dispatchers_wake() {
         provider
             .enqueue_for_orchestrator(
                 WorkItem::StartOrchestration {
-                    instance: format!("multi-notify-{}", i),
+                    instance: format!("multi-notify-{i}"),
                     orchestration: "test-orch".to_string(),
                     version: Some("1.0".to_string()),
                     input: "{}".to_string(),
@@ -374,9 +368,7 @@ async fn e2e_multiple_dispatchers_wake() {
         // Each should complete within reasonable time
         assert!(
             elapsed < Duration::from_secs(5),
-            "Fetch {} should complete quickly, took {:?}",
-            idx,
-            elapsed
+            "Fetch {idx} should complete quickly, took {elapsed:?}"
         );
     }
 
@@ -384,8 +376,7 @@ async fn e2e_multiple_dispatchers_wake() {
     // The key assertion is that NOTIFY wakes dispatchers, not that locking is perfect
     assert!(
         got_work >= 2,
-        "At least 2 dispatchers should find work, got {}",
-        got_work
+        "At least 2 dispatchers should find work, got {got_work}"
     );
 
     cleanup_schema(&schema).await;
@@ -442,8 +433,7 @@ async fn e2e_worker_and_orch_separate() {
     // Should have waited close to the 2s timeout
     assert!(
         elapsed >= Duration::from_millis(1800),
-        "Worker should wait for timeout, only waited {:?}",
-        elapsed
+        "Worker should wait for timeout, only waited {elapsed:?}"
     );
     // And not find any work
     assert!(
@@ -510,8 +500,7 @@ async fn resilience_work_before_startup() {
     };
     assert!(
         elapsed < threshold,
-        "Should find work immediately, took {:?}",
-        elapsed
+        "Should find work immediately, took {elapsed:?}"
     );
 
     cleanup_schema(&schema).await;
@@ -601,8 +590,7 @@ async fn resilience_notify_during_busy() {
     assert_eq!(item2.instance, "busy-test-2");
     assert!(
         elapsed < Duration::from_millis(500),
-        "Should find work immediately, took {:?}",
-        elapsed
+        "Should find work immediately, took {elapsed:?}"
     );
 
     cleanup_schema(&schema).await;
@@ -641,8 +629,7 @@ async fn resilience_refresh_catches_missed_notify() {
 
     // Disable the trigger temporarily to prevent NOTIFY
     sqlx::query(&format!(
-        "ALTER TABLE {}.orchestrator_queue DISABLE TRIGGER trg_notify_orch_work",
-        schema
+        "ALTER TABLE {schema}.orchestrator_queue DISABLE TRIGGER trg_notify_orch_work"
     ))
     .execute(&pool)
     .await
@@ -651,10 +638,9 @@ async fn resilience_refresh_catches_missed_notify() {
     // Insert work without NOTIFY firing
     let visible_at = chrono::Utc::now();
     sqlx::query(&format!(
-        r#"INSERT INTO {}.orchestrator_queue
+        r#"INSERT INTO {schema}.orchestrator_queue
            (instance_id, work_item, visible_at, created_at)
-           VALUES ($1, $2, $3, NOW())"#,
-        schema
+           VALUES ($1, $2, $3, NOW())"#
     ))
     .bind("missed-notify-test")
     .bind(
@@ -676,8 +662,7 @@ async fn resilience_refresh_catches_missed_notify() {
 
     // Re-enable the trigger
     sqlx::query(&format!(
-        "ALTER TABLE {}.orchestrator_queue ENABLE TRIGGER trg_notify_orch_work",
-        schema
+        "ALTER TABLE {schema}.orchestrator_queue ENABLE TRIGGER trg_notify_orch_work"
     ))
     .execute(&pool)
     .await
@@ -696,8 +681,7 @@ async fn resilience_refresh_catches_missed_notify() {
     // Should find within poll_timeout (5s) even though NOTIFY was missed
     assert!(
         elapsed < Duration::from_secs(5),
-        "Should find work within poll_timeout, took {:?}",
-        elapsed
+        "Should find work within poll_timeout, took {elapsed:?}"
     );
 
     pool.close().await;
@@ -770,8 +754,7 @@ async fn resilience_notifier_disabled_finds_work() {
     assert!(result.is_some(), "Should find work even without notifier");
     assert!(
         elapsed < Duration::from_millis(500),
-        "Should find work immediately (do_fetch runs first), took {:?}",
-        elapsed
+        "Should find work immediately (do_fetch runs first), took {elapsed:?}"
     );
 
     cleanup_schema(&schema).await;
@@ -817,8 +800,7 @@ async fn resilience_notifier_disabled_returns_immediately_when_empty() {
     };
     assert!(
         elapsed < threshold,
-        "Without notifier should return immediately, took {:?}",
-        elapsed
+        "Without notifier should return immediately, took {elapsed:?}"
     );
 
     cleanup_schema(&schema).await;
@@ -857,10 +839,9 @@ async fn timer_precision_100ms_grace() {
     let start = Instant::now();
 
     sqlx::query(&format!(
-        r#"INSERT INTO {}.orchestrator_queue
+        r#"INSERT INTO {schema}.orchestrator_queue
            (instance_id, work_item, visible_at, created_at)
-           VALUES ($1, $2, $3, NOW())"#,
-        schema
+           VALUES ($1, $2, $3, NOW())"#
     ))
     .bind("timer-test")
     .bind(
@@ -901,15 +882,11 @@ async fn timer_precision_100ms_grace() {
 
     assert!(
         elapsed >= expected_min,
-        "Timer should not fire early, fired at {:?} (expected >= {:?})",
-        elapsed,
-        expected_min
+        "Timer should not fire early, fired at {elapsed:?} (expected >= {expected_min:?})"
     );
     assert!(
         elapsed <= expected_max,
-        "Timer should fire within reasonable time, fired at {:?} (expected <= {:?})",
-        elapsed,
-        expected_max
+        "Timer should fire within reasonable time, fired at {elapsed:?} (expected <= {expected_max:?})"
     );
 
     pool.close().await;
@@ -946,12 +923,11 @@ async fn timer_precision_many_timers() {
         let visible_at = now + chrono::Duration::milliseconds(delay_ms);
 
         sqlx::query(&format!(
-            r#"INSERT INTO {}.orchestrator_queue
+            r#"INSERT INTO {schema}.orchestrator_queue
                (instance_id, work_item, visible_at, created_at)
-               VALUES ($1, $2, $3, NOW())"#,
-            schema
+               VALUES ($1, $2, $3, NOW())"#
         ))
-        .bind(format!("timer-{}", i))
+        .bind(format!("timer-{i}"))
         .bind(
             serde_json::to_string(&serde_json::json!({
                 "StartOrchestration": {
@@ -1008,17 +984,11 @@ async fn timer_precision_many_timers() {
 
         assert!(
             *elapsed >= expected_min,
-            "{} fetched too early at {:?}, expected >= {:?}",
-            instance,
-            elapsed,
-            expected_min
+            "{instance} fetched too early at {elapsed:?}, expected >= {expected_min:?}"
         );
         assert!(
             *elapsed <= expected_max,
-            "{} fetched too late at {:?}, expected <= {:?}",
-            instance,
-            elapsed,
-            expected_max
+            "{instance} fetched too late at {elapsed:?}, expected <= {expected_max:?}"
         );
     }
 
@@ -1064,12 +1034,11 @@ async fn timer_precision_under_load() {
         let visible_at = now + chrono::Duration::milliseconds(delay_ms as i64);
 
         sqlx::query(&format!(
-            r#"INSERT INTO {}.orchestrator_queue
+            r#"INSERT INTO {schema}.orchestrator_queue
                (instance_id, work_item, visible_at, created_at)
-               VALUES ($1, $2, $3, NOW())"#,
-            schema
+               VALUES ($1, $2, $3, NOW())"#
         ))
-        .bind(format!("load-timer-{}", i))
+        .bind(format!("load-timer-{i}"))
         .bind(
             serde_json::to_string(&serde_json::json!({
                 "StartOrchestration": {
@@ -1110,7 +1079,7 @@ async fn timer_precision_under_load() {
         let error_ms = actual_ms - expected_time_ms as i64;
         timing_errors.push(error_ms.abs());
 
-        assert!(result.is_some(), "Should find work item {}", i);
+        assert!(result.is_some(), "Should find work item {i}");
         let (item, lock_token, _) = result.unwrap();
 
         // Record timing trace
@@ -1167,10 +1136,7 @@ async fn timer_precision_under_load() {
 
     assert!(
         p95_error < p95_threshold,
-        "95th percentile timing error should be < {}ms, got {}ms. Errors: {:?}",
-        p95_threshold,
-        p95_error,
-        timing_errors
+        "95th percentile timing error should be < {p95_threshold}ms, got {p95_error}ms. Errors: {timing_errors:?}"
     );
 
     pool.close().await;
@@ -1227,10 +1193,9 @@ async fn e2e_timer_fires_correctly() {
     let start = Instant::now();
 
     sqlx::query(&format!(
-        r#"INSERT INTO {}.orchestrator_queue
+        r#"INSERT INTO {schema}.orchestrator_queue
            (instance_id, work_item, visible_at, created_at)
-           VALUES ($1, $2, $3, NOW())"#,
-        schema
+           VALUES ($1, $2, $3, NOW())"#
     ))
     .bind("e2e-timer-test")
     .bind(
@@ -1269,8 +1234,7 @@ async fn e2e_timer_fires_correctly() {
 
     assert!(
         elapsed >= expected_min && elapsed <= expected_max,
-        "Timer should fire at ~3.1s, but fired at {:?}",
-        elapsed
+        "Timer should fire at ~3.1s, but fired at {elapsed:?}"
     );
 
     pool.close().await;
@@ -1311,10 +1275,9 @@ async fn resilience_notifier_dead() {
         .expect("Failed to connect");
 
     sqlx::query(&format!(
-        r#"INSERT INTO {}.orchestrator_queue
+        r#"INSERT INTO {schema}.orchestrator_queue
            (instance_id, work_item, visible_at, created_at)
-           VALUES ($1, $2, NOW(), NOW())"#,
-        schema
+           VALUES ($1, $2, NOW(), NOW())"#
     ))
     .bind("notifier-dead-test")
     .bind(
@@ -1347,8 +1310,7 @@ async fn resilience_notifier_dead() {
     assert!(result.is_some(), "Should find work even with notifier dead");
     assert!(
         elapsed < Duration::from_secs(1),
-        "First fetch should find existing work quickly, took {:?}",
-        elapsed
+        "First fetch should find existing work quickly, took {elapsed:?}"
     );
 
     pool.close().await;
@@ -1437,8 +1399,7 @@ async fn resilience_connection_drop() {
     assert!(result.is_some(), "Should find second work item");
     assert!(
         elapsed < Duration::from_millis(500),
-        "Should wake quickly via NOTIFY, took {:?}",
-        elapsed
+        "Should wake quickly via NOTIFY, took {elapsed:?}"
     );
 
     cleanup_schema(&schema).await;

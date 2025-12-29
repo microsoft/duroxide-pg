@@ -237,8 +237,7 @@ mod with_metrics {
         let duration_ms = durations[0];
         assert!(
             (5.0..100.0).contains(&duration_ms),
-            "Expected duration ~5ms, got {}ms",
-            duration_ms
+            "Expected duration ~5ms, got {duration_ms}ms"
         );
 
         // Verify counter was ALSO recorded by DbCallTimer (not just histogram)

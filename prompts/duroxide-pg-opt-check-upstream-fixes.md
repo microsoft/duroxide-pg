@@ -2,6 +2,24 @@
 
 **Purpose:** Check if fixes for tracked blockers have been released in upstream dependencies (duroxide) and guide updating duroxide-pg-opt.
 
+**Last Updated:** 2024-12-29
+
+---
+
+## Quick Reference - Active Blockers
+
+| Issue | Title | Status |
+|-------|-------|--------|
+| [#36](https://github.com/affandar/duroxide/issues/36) | Provider validation missing lock extension verification | 🔴 Open |
+
+## Resolved Blockers (duroxide v0.1.7)
+
+| Issue | Title | Resolution |
+|-------|-------|------------|
+| [#31](https://github.com/affandar/duroxide/issues/31) | Configurable `wait_for_orchestration` timeout | ✅ `wait_timeout_secs` field added |
+| [#32](https://github.com/affandar/duroxide/issues/32) | Validation test timing race | ✅ Fixed race condition |
+| [#34](https://github.com/affandar/duroxide/issues/34) | Lock renewal timing sensitivity | ✅ Increased timing margins |
+
 ---
 
 ## Instructions
@@ -96,9 +114,8 @@ Present the changes to the user for review before committing. Include:
 ## Quick Reference Commands
 
 ```bash
-# Check all tracked issues at once
-gh issue view 31 --repo affandar/duroxide --json state,title
-gh issue view 32 --repo affandar/duroxide --json state,title
+# Check active issue
+gh issue view 36 --repo affandar/duroxide --json state,title
 
 # Current dependency versions
 grep 'duroxide = ' Cargo.toml

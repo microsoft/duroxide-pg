@@ -314,7 +314,7 @@ async fn test_enqueue_and_dequeue_worker() {
         .expect("Failed to enqueue worker work");
 
     // Dequeue worker work
-    let (dequeued_item, lock_token, _attempt_count) = provider
+    let (dequeued_item, lock_token, _attempt_count, _execution_state) = provider
         .fetch_work_item(
             std::time::Duration::from_secs(30),
             std::time::Duration::ZERO,

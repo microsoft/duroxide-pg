@@ -257,14 +257,10 @@ async fn delayed_work_cross_node_visibility() {
     };
     assert!(
         elapsed < threshold,
-        "Long-poll should have woken up quickly after work became visible, took {:?}",
-        elapsed
+        "Long-poll should have woken up quickly after work became visible, took {elapsed:?}"
     );
 
-    println!(
-        "Delayed work cross-node visibility: received after {:?} of long-polling",
-        elapsed
-    );
+    println!("Delayed work cross-node visibility: received after {elapsed:?} of long-polling");
 
     cleanup_schema(&schema).await;
 }
@@ -319,7 +315,7 @@ async fn staggered_delayed_work_visibility() {
         }
     }
 
-    println!("Fetched delayed items: {:?}", fetched);
+    println!("Fetched delayed items: {fetched:?}");
     assert_eq!(fetched.len(), 5, "All 5 delayed items should be visible");
 
     cleanup_schema(&schema).await;
@@ -378,7 +374,7 @@ async fn multi_node_timer_coordination() {
         }
     }
 
-    println!("Fetched cross-node delayed work: {:?}", fetched);
+    println!("Fetched cross-node delayed work: {fetched:?}");
     assert_eq!(
         fetched.len(),
         3,
@@ -452,7 +448,7 @@ async fn clock_drift_progressive() {
         }
     }
 
-    println!("Fetched drifted items: {:?}", fetched);
+    println!("Fetched drifted items: {fetched:?}");
     assert_eq!(
         fetched.len(),
         5,
@@ -633,7 +629,7 @@ async fn multi_node_lock_race() {
     }
 
     let winners: Vec<_> = results.iter().filter(|r| r.is_some()).collect();
-    println!("Lock race results: {:?}", results);
+    println!("Lock race results: {results:?}");
 
     assert_eq!(
         winners.len(),
@@ -705,7 +701,7 @@ async fn multi_node_lock_race_longpoll() {
     }
 
     let winners: Vec<_> = results.iter().filter(|r| r.is_some()).collect();
-    println!("Lock race (long-poll) results: {:?}", results);
+    println!("Lock race (long-poll) results: {results:?}");
 
     assert_eq!(
         winners.len(),
@@ -721,10 +717,7 @@ async fn multi_node_lock_race_longpoll() {
         Duration::from_millis(500)
     };
     if let Some(Some((node_id, instance, elapsed))) = winners.first() {
-        println!(
-            "Winner: node {} got '{}' in {:?}",
-            node_id, instance, elapsed
-        );
+        println!("Winner: node {node_id} got '{instance}' in {elapsed:?}");
         assert!(
             *elapsed < winner_threshold,
             "Winner should get work quickly, not wait for timeout"
@@ -807,7 +800,7 @@ async fn multi_node_notify_propagation() {
 
     println!("Notify propagation results:");
     for (name, got_work, elapsed) in &results {
-        println!("  {}: got_work={}, elapsed={:?}", name, got_work, elapsed);
+        println!("  {name}: got_work={got_work}, elapsed={elapsed:?}");
     }
 
     // At least one should have gotten the work
@@ -824,9 +817,7 @@ async fn multi_node_notify_propagation() {
     for (name, _, elapsed) in &results {
         assert!(
             *elapsed < response_threshold,
-            "{} took too long: {:?} (NOTIFY may not have propagated)",
-            name,
-            elapsed
+            "{name} took too long: {elapsed:?} (NOTIFY may not have propagated)"
         );
     }
 

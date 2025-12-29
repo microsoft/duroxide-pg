@@ -369,6 +369,8 @@ BEGIN
     ', v_schema_name, v_schema_name);
 
     -- Procedure: ack_worker
+    -- When p_completion_json is NULL, only delete from worker_queue (no enqueue)
+    -- This is used when the orchestration is terminal or missing
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.ack_worker(
             p_lock_token TEXT,
@@ -390,23 +392,76 @@ BEGIN
                 RAISE EXCEPTION ''Worker queue item not found or already processed'';
             END IF;
 
-            INSERT INTO %I.orchestrator_queue (instance_id, work_item, visible_at, created_at)
-            VALUES (p_instance_id, p_completion_json, v_now_ts, v_now_ts);
+            -- Validate: if completion provided, instance_id must also be provided
+            IF p_completion_json IS NOT NULL AND p_instance_id IS NULL THEN
+                RAISE EXCEPTION ''instance_id required when completion_json is provided'';
+            END IF;
+
+            -- Only enqueue completion if provided (not NULL)
+            IF p_completion_json IS NOT NULL THEN
+                INSERT INTO %I.orchestrator_queue (instance_id, work_item, visible_at, created_at)
+                VALUES (p_instance_id, p_completion_json, v_now_ts, v_now_ts);
+            END IF;
         END;
         $ack_worker$ LANGUAGE plpgsql;
     ', v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: renew_work_item_lock
+    -- Returns execution_status for cancellation support
+    -- Note: DROP first because return type changed from VOID to TEXT
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.renew_work_item_lock(TEXT, BIGINT, BIGINT)', v_schema_name);
+
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.renew_work_item_lock(
             p_lock_token TEXT,
             p_now_ms BIGINT,
             p_extend_ms BIGINT
         )
-        RETURNS VOID AS $renew_lock$
+        RETURNS TEXT AS $renew_lock$
         DECLARE
             v_rows_affected INTEGER;
+            v_work_item_json JSONB;
+            v_instance_id TEXT;
+            v_execution_id BIGINT;
+            v_execution_status TEXT;
         BEGIN
+            -- Get the work item before updating
+            SELECT work_item::JSONB INTO v_work_item_json
+            FROM %I.worker_queue
+            WHERE lock_token = p_lock_token
+              AND locked_until > p_now_ms;
+
+            IF NOT FOUND THEN
+                RAISE EXCEPTION ''Lock token invalid, expired, or already acked'';
+            END IF;
+
+            -- Check execution status BEFORE extending the lock
+            -- Per provider contract: lock can only be renewed if execution is Running
+            IF v_work_item_json ? ''ActivityExecute'' THEN
+                v_instance_id := v_work_item_json->''ActivityExecute''->>''instance'';
+                v_execution_id := (v_work_item_json->''ActivityExecute''->>''execution_id'')::BIGINT;
+                
+                -- Get execution status directly from executions table
+                -- Note: We check executions table, not instances table, because:
+                -- 1. Instance record may not exist if ack_orchestration_item was called with NULL version
+                -- 2. Execution record is the authoritative source for execution state
+                SELECT e.status INTO v_execution_status
+                FROM %I.executions e
+                WHERE e.instance_id = v_instance_id AND e.execution_id = v_execution_id;
+                
+                IF v_execution_status IS NULL THEN
+                    -- Execution record missing - return NULL to signal Missing state
+                    -- Do NOT extend lock per contract
+                    RETURN NULL;
+                END IF;
+                
+                IF v_execution_status <> ''Running'' THEN
+                    -- Execution is terminal - return status but do NOT extend lock per contract
+                    RETURN v_execution_status;
+                END IF;
+            END IF;
+            
+            -- Only extend lock if execution is Running (or non-ActivityExecute item)
             UPDATE %I.worker_queue
             SET locked_until = GREATEST(locked_until, p_now_ms) + p_extend_ms
             WHERE lock_token = p_lock_token
@@ -417,14 +472,20 @@ BEGIN
             IF v_rows_affected = 0 THEN
                 RAISE EXCEPTION ''Lock token invalid, expired, or already acked'';
             END IF;
+            
+            RETURN v_execution_status;
         END;
         $renew_lock$ LANGUAGE plpgsql;
-    ', v_schema_name, v_schema_name);
+    ', v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: fetch_work_item
     -- Item is available if:
     -- 1. visible_at <= now (not delayed)
     -- 2. AND (lock_token IS NULL OR locked_until <= now) (not locked or lock expired)
+    -- Returns execution_status from the execution table for cancellation support
+    -- Note: DROP first because return type changed to include out_execution_status
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.fetch_work_item(BIGINT, BIGINT)', v_schema_name);
+
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.fetch_work_item(
             p_now_ms BIGINT,
@@ -433,10 +494,14 @@ BEGIN
         RETURNS TABLE(
             out_work_item TEXT,
             out_lock_token TEXT,
-            out_attempt_count INTEGER
+            out_attempt_count INTEGER,
+            out_execution_status TEXT
         ) AS $fetch_worker$
         DECLARE
             v_id BIGINT;
+            v_work_item_json JSONB;
+            v_instance_id TEXT;
+            v_execution_id BIGINT;
         BEGIN
             SELECT q.id INTO v_id
             FROM %I.worker_queue q
@@ -463,10 +528,23 @@ BEGIN
             FROM %I.worker_queue
             WHERE id = v_id;
 
+            -- Parse work item to get instance and execution_id for status lookup
+            v_work_item_json := out_work_item::JSONB;
+            IF v_work_item_json ? ''ActivityExecute'' THEN
+                v_instance_id := v_work_item_json->''ActivityExecute''->>''instance'';
+                v_execution_id := (v_work_item_json->''ActivityExecute''->>''execution_id'')::BIGINT;
+                
+                SELECT e.status INTO out_execution_status
+                FROM %I.executions e
+                WHERE e.instance_id = v_instance_id AND e.execution_id = v_execution_id;
+            ELSE
+                out_execution_status := NULL;
+            END IF;
+
             RETURN NEXT;
         END;
         $fetch_worker$ LANGUAGE plpgsql;
-    ', v_schema_name, v_schema_name, v_schema_name, v_schema_name);
+    ', v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: abandon_work_item
     -- Always clear lock_token and locked_until when abandoning.

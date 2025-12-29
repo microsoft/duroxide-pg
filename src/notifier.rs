@@ -400,11 +400,10 @@ impl Notifier {
             // Use Rust clock ($1) for "now" comparison, not database NOW()
             let orch_timers = sqlx::query_scalar::<_, i64>(&format!(
                 "SELECT (EXTRACT(EPOCH FROM visible_at) * 1000)::BIGINT
-                 FROM {}.orchestrator_queue
+                 FROM {schema}.orchestrator_queue
                  WHERE (EXTRACT(EPOCH FROM visible_at) * 1000)::BIGINT > $1
                    AND (EXTRACT(EPOCH FROM visible_at) * 1000)::BIGINT <= $2
-                   AND lock_token IS NULL",
-                schema
+                   AND lock_token IS NULL"
             ))
             .bind(now_ms)
             .bind(window_end_ms)
@@ -668,11 +667,10 @@ mod tests {
                 assert!(
                     actual_delay >= expected_delay - Duration::from_millis(10)
                         && actual_delay <= expected_delay + Duration::from_millis(10),
-                    "Expected delay ~30.1s, got {:?}",
-                    actual_delay
+                    "Expected delay ~30.1s, got {actual_delay:?}"
                 );
             }
-            other => panic!("Expected AddTimer, got {:?}", other),
+            other => panic!("Expected AddTimer, got {other:?}"),
         }
     }
 
@@ -751,11 +749,10 @@ mod tests {
                 assert!(
                     delay >= expected - Duration::from_millis(5)
                         && delay <= expected + Duration::from_millis(5),
-                    "Timer should fire at visible_at + grace, got {:?}",
-                    delay
+                    "Timer should fire at visible_at + grace, got {delay:?}"
                 );
             }
-            other => panic!("Expected AddTimer, got {:?}", other),
+            other => panic!("Expected AddTimer, got {other:?}"),
         }
     }
 
@@ -937,7 +934,7 @@ mod tests {
         // At window_end should still be included (<=)
         match action {
             NotifyAction::AddTimer { .. } => {}
-            other => panic!("Expected AddTimer at window boundary, got {:?}", other),
+            other => panic!("Expected AddTimer at window boundary, got {other:?}"),
         }
     }
 

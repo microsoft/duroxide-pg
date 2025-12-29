@@ -83,7 +83,7 @@ async fn perf_idle_stability() {
     eprintln!("Configuration:");
     eprintln!("  - Refresh interval: 5s");
     eprintln!("  - Timer grace period: 100ms");
-    eprintln!("  - Idle observation period: {:?}", idle_duration);
+    eprintln!("  - Idle observation period: {idle_duration:?}");
     eprintln!("Result: PASS - Provider remained stable during idle period");
     eprintln!("==========================================\n");
 
@@ -156,10 +156,7 @@ async fn perf_notify_wake_latency() {
     eprintln!("  - Dispatcher waited idle for 2s");
     eprintln!("  - Work inserted via enqueue_for_orchestrator");
     eprintln!("Results:");
-    eprintln!(
-        "  - Wake latency (insert -> fetch return): {:?}",
-        wake_latency
-    );
+    eprintln!("  - Wake latency (insert -> fetch return): {wake_latency:?}");
     eprintln!("  - Work found: {}", result.is_some());
     eprintln!("Expected: Near-instant wake via NOTIFY (< 500ms)");
     eprintln!("===============================================\n");
@@ -167,8 +164,7 @@ async fn perf_notify_wake_latency() {
     // Verify: wake latency should be fast via NOTIFY
     assert!(
         wake_latency.as_millis() < 500,
-        "Wake latency should be < 500ms via NOTIFY, got {:?}",
-        wake_latency
+        "Wake latency should be < 500ms via NOTIFY, got {wake_latency:?}"
     );
 
     cleanup_schema(&schema).await;
@@ -218,7 +214,7 @@ async fn perf_immediate_work_latency() {
         provider
             .enqueue_for_orchestrator(
                 WorkItem::StartOrchestration {
-                    instance: format!("latency-test-{}", i),
+                    instance: format!("latency-test-{i}"),
                     orchestration: "test-orch".to_string(),
                     version: Some("1.0".to_string()),
                     input: "{}".to_string(),
@@ -264,21 +260,21 @@ async fn perf_immediate_work_latency() {
 
     eprintln!("\n========== PERF: IMMEDIATE WORK LATENCY ==========");
     eprintln!("Test configuration:");
-    eprintln!("  - Iterations: {}", iterations);
+    eprintln!("  - Iterations: {iterations}");
     eprintln!("  - Pattern: Insert work while dispatcher waiting on NOTIFY");
     eprintln!("Latency results (insert -> fetch return):");
-    eprintln!("  - Min:  {:>6}ms", min_lat);
-    eprintln!("  - Avg:  {:>6}ms", avg);
-    eprintln!("  - p50:  {:>6}ms", p50);
-    eprintln!("  - p95:  {:>6}ms", p95);
-    eprintln!("  - p99:  {:>6}ms", p99);
-    eprintln!("  - Max:  {:>6}ms", max_lat);
-    eprintln!("All latencies: {:?}", latencies);
+    eprintln!("  - Min:  {min_lat:>6}ms");
+    eprintln!("  - Avg:  {avg:>6}ms");
+    eprintln!("  - p50:  {p50:>6}ms");
+    eprintln!("  - p95:  {p95:>6}ms");
+    eprintln!("  - p99:  {p99:>6}ms");
+    eprintln!("  - Max:  {max_lat:>6}ms");
+    eprintln!("All latencies: {latencies:?}");
     eprintln!("===================================================\n");
 
     // With NOTIFY, we expect very low latency
     // Allow generous tolerance for CI environments
-    assert!(p99 < 500, "p99 latency should be < 500ms, got {}ms", p99);
+    assert!(p99 < 500, "p99 latency should be < 500ms, got {p99}ms");
 
     cleanup_schema(&schema).await;
 }

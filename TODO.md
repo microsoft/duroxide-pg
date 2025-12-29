@@ -1,6 +1,7 @@
 # TODO
 
-- upgrade to duroxide 
+- Pull json parsing into rust code where it makes sense
+- Competing consumer instead of all dispatchers racing
 - fix up perf testing prompt and tests
 - Connection pool pre-warming in `provider.rs` is still needed - the `test_multi_threaded_lock_expiration_recovery` validation test requires pre-warmed connections to avoid connection-establishment latency affecting lock ordering. This is not a duroxide bug.
 - fetch_orchestration_item review as listed below

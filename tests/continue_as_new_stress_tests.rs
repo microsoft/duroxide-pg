@@ -117,7 +117,7 @@ async fn concurrent_continue_as_new_chains() {
     eprintln!("Results:");
     eprintln!("  - All chains completed successfully");
     eprintln!("  - Total executions: 50 (5 chains × 10 executions)");
-    eprintln!("  - Verification time: {:?}", verify_duration);
+    eprintln!("  - Verification time: {verify_duration:?}");
     eprintln!("Result: PASS");
     eprintln!("===============================================================\n");
 

@@ -1,8 +1,8 @@
 use std::sync::{Arc, Once};
 
 use duroxide::provider_validation::{
-    atomicity, error_handling, instance_creation, instance_locking, lock_expiration, management,
-    multi_execution, queue_semantics,
+    atomicity, cancellation, error_handling, instance_creation, instance_locking, lock_expiration,
+    long_polling, management, multi_execution, queue_semantics,
 };
 use duroxide::provider_validations::ProviderFactory;
 use duroxide::providers::Provider;
@@ -248,4 +248,100 @@ mod poison_message_tests {
     provider_validation_test!(poison_message::abandon_orchestration_item_ignore_attempt_decrements);
     provider_validation_test!(poison_message::ignore_attempt_never_goes_negative);
     provider_validation_test!(poison_message::max_attempt_count_across_message_batch);
+}
+
+mod cancellation_tests {
+    use super::*;
+
+    provider_validation_test!(
+        cancellation::test_fetch_returns_running_state_for_active_orchestration
+    );
+    provider_validation_test!(
+        cancellation::test_fetch_returns_terminal_state_when_orchestration_completed
+    );
+    provider_validation_test!(
+        cancellation::test_fetch_returns_terminal_state_when_orchestration_failed
+    );
+    provider_validation_test!(
+        cancellation::test_fetch_returns_terminal_state_when_orchestration_continued_as_new
+    );
+    provider_validation_test!(cancellation::test_fetch_returns_missing_state_when_instance_deleted);
+    provider_validation_test!(cancellation::test_renew_returns_running_when_orchestration_active);
+    provider_validation_test!(
+        cancellation::test_renew_returns_terminal_when_orchestration_completed
+    );
+    provider_validation_test!(cancellation::test_renew_returns_missing_when_instance_deleted);
+    provider_validation_test!(cancellation::test_ack_work_item_none_deletes_without_enqueue);
+}
+
+mod long_polling_tests {
+    use super::*;
+    use duroxide_pg_opt::{LongPollConfig, PostgresProvider};
+
+    /// Helper to create a provider with long-polling DISABLED for short-poll tests
+    async fn create_short_poll_provider() -> (Arc<PostgresProvider>, String) {
+        let database_url = get_database_url();
+        let schema_name = next_schema_name();
+        reset_schema(&database_url, &schema_name).await;
+
+        let config = LongPollConfig {
+            enabled: false,
+            ..Default::default()
+        };
+
+        let provider =
+            PostgresProvider::new_with_options(&database_url, Some(&schema_name), config)
+                .await
+                .expect("Failed to create short-poll provider");
+
+        (Arc::new(provider), schema_name)
+    }
+
+    // =========================================================================
+    // Short-poll tests (long-polling DISABLED)
+    // Provider should return immediately when no work exists
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_short_poll_returns_immediately() {
+        let (provider, schema_name) = create_short_poll_provider().await;
+        long_polling::test_short_poll_returns_immediately(provider.as_ref()).await;
+        reset_schema(&get_database_url(), &schema_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_short_poll_work_item_returns_immediately() {
+        let (provider, schema_name) = create_short_poll_provider().await;
+        long_polling::test_short_poll_work_item_returns_immediately(provider.as_ref()).await;
+        reset_schema(&get_database_url(), &schema_name).await;
+    }
+
+    // =========================================================================
+    // Long-poll tests (long-polling ENABLED - default)
+    // Provider should block for the timeout period when no work exists
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_long_poll_waits_for_timeout() {
+        let factory = PostgresProviderFactory::new();
+        let provider = factory.create_provider().await;
+        long_polling::test_long_poll_waits_for_timeout(provider.as_ref()).await;
+        factory.cleanup_schema().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_respects_timeout_upper_bound() {
+        let factory = PostgresProviderFactory::new();
+        let provider = factory.create_provider().await;
+        long_polling::test_fetch_respects_timeout_upper_bound(provider.as_ref()).await;
+        factory.cleanup_schema().await;
+    }
+
+    #[tokio::test]
+    async fn test_long_poll_work_item_waits_for_timeout() {
+        let factory = PostgresProviderFactory::new();
+        let provider = factory.create_provider().await;
+        long_polling::test_long_poll_work_item_waits_for_timeout(provider.as_ref()).await;
+        factory.cleanup_schema().await;
+    }
 }

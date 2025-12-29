@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2024-12-29
+
+### Added
+
+- **Cooperative cancellation support** (duroxide 0.1.7 API):
+  - `fetch_work_item` now returns `ExecutionState` (4th tuple element) indicating orchestration status
+  - `renew_work_item_lock` now returns `ExecutionState` instead of `()`:
+    - Returns `Running` when lock is successfully extended
+    - Returns `Terminal { status }` when orchestration completed/failed (lock NOT extended)
+    - Returns `Missing` when execution record doesn't exist (lock NOT extended)
+  - `ack_work_item` now accepts `Option<WorkItem>`:
+    - `Some(completion)` - enqueue completion to orchestrator queue
+    - `None` - just delete worker item (for terminal/missing orchestrations)
+
+- 9 new provider validation tests for cancellation support:
+  - `test_fetch_returns_running_state_for_active_orchestration`
+  - `test_fetch_returns_terminal_state_when_orchestration_completed`
+  - `test_fetch_returns_terminal_state_when_orchestration_failed`
+  - `test_fetch_returns_terminal_state_when_orchestration_continued_as_new`
+  - `test_fetch_returns_missing_state_when_instance_deleted`
+  - `test_renew_returns_running_when_orchestration_active`
+  - `test_renew_returns_terminal_when_orchestration_completed`
+  - `test_renew_returns_missing_when_instance_deleted`
+  - `test_ack_work_item_none_deletes_without_enqueue`
+
+- 5 new long-polling validation tests
+
+### Changed
+
+- Updated to duroxide 0.1.7 from crates.io
+- `renew_work_item_lock` stored procedure now checks execution status BEFORE extending lock
+  - Per provider contract: lock only extended when orchestration is Running
+  - Terminal/Missing states return status without extending lock
+- `ack_worker` stored procedure now accepts NULL completion (no enqueue, just delete)
+
+### Removed
+
+- Connection pre-warming workaround (duroxide #32 fixed in v0.1.7)
+- STOPGAP comments for resolved upstream issues (#31, #32, #34)
+
+### Notes
+
+- Total validation tests: 86 (77 + 9 cancellation)
+- Requires duroxide 0.1.7+ for cooperative cancellation support
+
 ## [0.1.6] - 2025-12-22
 
 ### Changed

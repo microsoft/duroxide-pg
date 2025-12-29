@@ -129,6 +129,7 @@ pub async fn run_single_test(
         activity_delay_ms: 10,
         orch_concurrency: orch_conc,
         worker_concurrency: worker_conc,
+        wait_timeout_secs: 60,
     };
 
     // We need to create our own runtime with custom options
@@ -291,6 +292,7 @@ pub async fn run_test_suite(
             activity_delay_ms: 10,
             orch_concurrency: *orch_conc,
             worker_concurrency: *worker_conc,
+            wait_timeout_secs: 60,
         };
 
         info!(
@@ -379,8 +381,7 @@ impl std::str::FromStr for StressTestType {
             "large-payload" | "largepayload" | "large_payload" => Ok(StressTestType::LargePayload),
             "all" => Ok(StressTestType::All),
             _ => Err(format!(
-                "Unknown test type '{}'. Valid options: parallel, large-payload, all",
-                s
+                "Unknown test type '{s}'. Valid options: parallel, large-payload, all"
             )),
         }
     }
@@ -395,15 +396,13 @@ fn is_localhost_db(database_url: &str) -> bool {
 ///
 /// # Remote Database Limitations
 ///
-/// For remote databases, this test uses reduced intensity settings to work around
-/// a hardcoded 60-second `wait_for_orchestration` timeout in duroxide's stress test
-/// framework (`src/provider_stress_test/core.rs`). With high-latency connections
-/// (200-300ms per query), the full test configuration can exceed this timeout.
+/// For remote databases, this test uses reduced intensity settings due to
+/// higher latency (200-300ms per query). The full test configuration can
+/// exceed the wait timeout with slow connections, so we use smaller payloads
+/// and fewer activities/sub-orchestrations for remote databases.
 ///
-/// TODO: Once duroxide makes the wait_for_orchestration timeout configurable in
-/// StressTestConfig or LargePayloadConfig, remove the local/remote distinction
-/// and use the full intensity settings for all databases.
-/// Tracking: https://github.com/affandar/duroxide - needs configurable timeout
+/// Note: duroxide v0.1.7+ supports `wait_timeout_secs` in StressTestConfig,
+/// which we set to 120 seconds to accommodate remote database latency.
 pub async fn run_large_payload_suite(
     database_url: String,
     duration_secs: u64,
@@ -441,6 +440,7 @@ pub async fn run_large_payload_suite(
                 activity_delay_ms: 5,
                 orch_concurrency: 2,
                 worker_concurrency: 2,
+                wait_timeout_secs: 120,
             },
             small_payload_kb: 10,
             medium_payload_kb: 50,
@@ -449,8 +449,7 @@ pub async fn run_large_payload_suite(
             sub_orch_count: 5,
         }
     } else {
-        // TODO: STOPGAP - Remove this reduced config once duroxide adds configurable timeout
-        // Reduced intensity for remote databases to complete within 60s timeout
+        // Reduced intensity for remote databases to complete within timeout
         // - Smaller payloads (5/20/50 KB instead of 10/50/100 KB)
         // - Fewer activities (8 instead of 20)
         // - Fewer sub-orchestrations (2 instead of 5)
@@ -463,6 +462,7 @@ pub async fn run_large_payload_suite(
                 activity_delay_ms: 5,
                 orch_concurrency: 2,
                 worker_concurrency: 2,
+                wait_timeout_secs: 120,
             },
             small_payload_kb: 5,
             medium_payload_kb: 20,
