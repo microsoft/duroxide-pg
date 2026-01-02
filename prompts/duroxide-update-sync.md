@@ -89,6 +89,11 @@ Check for:
 - Missing trait implementations
 - Type mismatches
 
+If code changes are needed, implement them. If migrations are needed:
+1. Create new migration file `migrations/NNNN_description.sql`
+2. Update `0001_initial_schema.sql` with the complete schema (this is the single source of truth)
+3. **Note:** For future releases, consider adding migration delta scripts similar to duroxide-pg to support incremental upgrades
+
 ### Step 8: Run Validation Tests
 
 ```bash

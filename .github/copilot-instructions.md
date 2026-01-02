@@ -87,6 +87,16 @@ Use `ProviderError` with proper classification in [provider.rs](../src/provider.
 
 All provider operations use schema-qualified stored procedures (e.g., `schema.fetch_orchestration_item`). This ensures atomicity and allows the database to handle locking. Add new procedures in [migrations/](../migrations/) and update the migration runner.
 
+### Adding Migrations
+
+1. Create `NNNN_description.sql` in `migrations/`
+2. Use unqualified table names (search_path is set by runner)
+3. Make idempotent with `IF NOT EXISTS` / `IF EXISTS`
+4. Update stored procedures with new parameters if needed
+5. Update `0001_initial_schema.sql` with the complete schema (single source of truth)
+
+> **Note:** For future releases, consider adding migration delta scripts similar to duroxide-pg to support incremental upgrades from previous versions.
+
 ### Time Handling
 
 All timestamps use Unix epoch milliseconds (`i64`). The `now_millis()` method in provider supports clock skew injection for testing. Never use `chrono` types directly in provider logic.

@@ -572,6 +572,7 @@ async fn resilience_notify_during_busy() {
             vec![],
             vec![],
             ExecutionMetadata::default(),
+            vec![], // no cancelled activities
         )
         .await
         .expect("Failed to ack");
@@ -967,6 +968,7 @@ async fn timer_precision_many_timers() {
                 vec![],
                 vec![],
                 ExecutionMetadata::default(),
+                vec![], // no cancelled activities
             )
             .await
             .expect("Failed to ack");
@@ -1102,6 +1104,7 @@ async fn timer_precision_under_load() {
                 vec![],
                 vec![],
                 ExecutionMetadata::default(),
+                vec![], // no cancelled activities
             )
             .await
             .expect("Failed to ack");
@@ -1366,6 +1369,7 @@ async fn resilience_connection_drop() {
             vec![],
             vec![],
             ExecutionMetadata::default(),
+            vec![], // no cancelled activities
         )
         .await
         .expect("Failed to ack");

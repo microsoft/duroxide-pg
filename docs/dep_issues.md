@@ -2,7 +2,7 @@
 
 **Purpose:** Track duroxide issues/limitations that require workarounds in duroxide-pg-opt.
 
-**Last Updated:** 2024-12-29
+**Last Updated:** 2025-01-03
 
 **Quick Links:**
 - 🔗 [All duroxide-pg issues](https://github.com/affandar/duroxide/labels/duroxide-pg)
@@ -74,6 +74,45 @@ Add validation tests that:
 
 **Files to Update:**
 - [ ] None (no code workaround, just awareness)
+
+---
+
+### 2. Idempotency Test Uses Cross-Execution Activity Cancellation
+
+| Field | Value |
+|-------|-------|
+| **Issue** | [GitHub #40](https://github.com/affandar/duroxide/issues/40) |
+| **Status** | 🔴 Open |
+| **Fixed In** | TBD |
+| **Workaround Location** | None - provider allows cross-execution cancellation |
+
+**Problem:**
+The `test_cancelling_nonexistent_activities_is_idempotent` validation test passes `ScheduledActivityIdentifier` with `execution_id: 99` when calling `ack_orchestration_item` with `execution_id: 1`. This implies orchestrations can cancel activities from **any** execution.
+
+**Root Cause:**
+- Test uses different execution_ids to verify idempotency
+- An orchestration should only be able to cancel its own activities
+- Current design prevents providers from validating execution_id match
+
+**Impact:**
+- Providers cannot assert that cancelled_activities belong to the current execution
+- Cross-execution cancellation doesn't reflect real orchestration semantics
+- Provider implementations must allow mismatched execution_ids to pass validation
+
+**Proposed Fix:**
+Change the test to use the **same** execution_id for both the `ack_orchestration_item` call and the `ScheduledActivityIdentifier`. The test remains an idempotency test (non-existent activity_id), but correctly validates same-execution cancellation.
+
+**Current Workaround:**
+- **None** - provider allows any execution_id in cancelled_activities
+- Rust code intentionally does NOT assert execution_id match (see `provider.rs` comments)
+
+**When Fixed - Cleanup Steps:**
+1. Update duroxide dependency in `Cargo.toml`
+2. Optionally add Rust assertion that cancelled_activities match current execution_id
+3. Update this document
+
+**Files to Update:**
+- [ ] `src/provider.rs` - optionally add assertion after fix
 
 ---
 

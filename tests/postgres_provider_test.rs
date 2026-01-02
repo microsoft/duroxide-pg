@@ -272,6 +272,13 @@ mod cancellation_tests {
     );
     provider_validation_test!(cancellation::test_renew_returns_missing_when_instance_deleted);
     provider_validation_test!(cancellation::test_ack_work_item_none_deletes_without_enqueue);
+
+    // Lock-stealing cancellation tests (new in duroxide 0.1.8)
+    provider_validation_test!(cancellation::test_cancelled_activities_deleted_from_worker_queue);
+    provider_validation_test!(cancellation::test_ack_work_item_fails_when_entry_deleted);
+    provider_validation_test!(cancellation::test_renew_fails_when_entry_deleted);
+    provider_validation_test!(cancellation::test_cancelling_nonexistent_activities_is_idempotent);
+    provider_validation_test!(cancellation::test_batch_cancellation_deletes_multiple_activities);
 }
 
 mod long_polling_tests {

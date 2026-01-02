@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2025-01-03
+
+### Added
+
+- **Lock-stealing cancellation support** (duroxide 0.1.8 API):
+  - `ack_orchestration_item` now accepts `cancelled_activities: Vec<ScheduledActivityIdentifier>`
+  - Cancelled activities are deleted from worker queue atomically during orchestration ack
+  - Enables immediate activity cancellation without waiting for lock expiry
+
+- 5 new provider validation tests for lock-stealing cancellation:
+  - `test_cancelled_activities_deleted_from_worker_queue`
+  - `test_ack_work_item_fails_when_entry_deleted`
+  - `test_renew_fails_when_entry_deleted`
+  - `test_cancelling_nonexistent_activities_is_idempotent`
+  - `test_batch_cancellation_deletes_multiple_activities`
+
+### Changed
+
+- Updated to duroxide 0.1.8 from crates.io
+- `ack_orchestration_item` stored procedure now handles `p_cancelled_activities` JSONB parameter
+- Simplified migration approach: single `0001_initial_schema.sql` as source of truth
+
+### Removed
+
+- Migration delta scripts (`0002_*.sql`, `*_diff.md`) - not needed for single-schema approach
+- `generate_migration_diff.sh` script
+
+### Notes
+
+- Total validation tests: 82 (77 + 5 lock-stealing)
+- Requires duroxide 0.1.8+ for lock-stealing cancellation support
+
 ## [0.1.7] - 2024-12-29
 
 ### Added

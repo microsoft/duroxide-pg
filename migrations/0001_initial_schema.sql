@@ -768,7 +768,8 @@ BEGIN
             p_history_delta JSONB,
             p_worker_items JSONB,
             p_orchestrator_items JSONB,
-            p_metadata JSONB
+            p_metadata JSONB,
+            p_cancelled_activities JSONB DEFAULT ''[]''::JSONB
         )
         RETURNS VOID AS $ack_orch$
         DECLARE
@@ -783,6 +784,9 @@ BEGIN
             v_visible_at TIMESTAMPTZ;
             v_fire_at_ms BIGINT;
             v_item_instance_id TEXT;
+            v_cancelled JSONB;
+            v_cancelled_execution_id BIGINT;
+            v_cancelled_activity_id BIGINT;
         BEGIN
             v_now_ts := TO_TIMESTAMP(p_now_ms / 1000.0);
 
@@ -887,6 +891,26 @@ BEGIN
                 END LOOP;
             END IF;
 
+            -- ================================================================
+            -- Lock-Stealing: Delete worker queue entries for cancelled activities
+            -- Uses v_instance_id (from lock_token) for instance constraint
+            -- Uses execution_id and activity_id from JSON to identify activities
+            -- ================================================================
+            IF p_cancelled_activities IS NOT NULL AND JSONB_ARRAY_LENGTH(p_cancelled_activities) > 0 THEN
+                FOR v_cancelled IN SELECT value FROM JSONB_ARRAY_ELEMENTS(p_cancelled_activities) LOOP
+                    v_cancelled_execution_id := (v_cancelled->>''execution_id'')::BIGINT;
+                    v_cancelled_activity_id := (v_cancelled->>''activity_id'')::BIGINT;
+                    
+                    -- Delete matching ActivityExecute items from worker_queue
+                    -- The work_item JSON contains ActivityExecute with instance, execution_id, and id (activity_id)
+                    DELETE FROM %I.worker_queue wq
+                    WHERE wq.work_item::JSONB ? ''ActivityExecute''
+                      AND (wq.work_item::JSONB->''ActivityExecute''->>''instance'') = v_instance_id
+                      AND (wq.work_item::JSONB->''ActivityExecute''->>''execution_id'')::BIGINT = v_cancelled_execution_id
+                      AND (wq.work_item::JSONB->''ActivityExecute''->>''id'')::BIGINT = v_cancelled_activity_id;
+                END LOOP;
+            END IF;
+
             DELETE FROM %I.orchestrator_queue q WHERE q.lock_token = p_lock_token;
 
             DELETE FROM %I.instance_locks il
@@ -895,7 +919,7 @@ BEGIN
         $ack_orch$ LANGUAGE plpgsql;
     ', v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name,
        v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name,
-       v_schema_name, v_schema_name);
+       v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: abandon_orchestration_item
     EXECUTE format('

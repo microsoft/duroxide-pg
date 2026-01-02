@@ -97,6 +97,7 @@ async fn stress_high_notify_rate() {
                     vec![],
                     vec![],
                     ExecutionMetadata::default(),
+                    vec![], // no cancelled activities
                 )
                 .await
                 .expect("Failed to ack");
@@ -211,6 +212,7 @@ async fn stress_many_timers() {
                     vec![],
                     vec![],
                     ExecutionMetadata::default(),
+                    vec![], // no cancelled activities
                 )
                 .await
                 .expect("Failed to ack");
@@ -306,6 +308,7 @@ async fn stress_connection_flapping() {
                     vec![],
                     vec![],
                     ExecutionMetadata::default(),
+                    vec![], // no cancelled activities
                 )
                 .await
                 .expect("Failed to ack");

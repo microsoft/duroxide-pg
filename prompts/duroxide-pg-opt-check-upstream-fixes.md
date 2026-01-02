@@ -2,7 +2,7 @@
 
 **Purpose:** Check if fixes for tracked blockers have been released in upstream dependencies (duroxide) and guide updating duroxide-pg-opt.
 
-**Last Updated:** 2024-12-29
+**Last Updated:** 2025-01-03
 
 ---
 
@@ -11,6 +11,7 @@
 | Issue | Title | Status |
 |-------|-------|--------|
 | [#36](https://github.com/affandar/duroxide/issues/36) | Provider validation missing lock extension verification | 🔴 Open |
+| [#40](https://github.com/affandar/duroxide/issues/40) | Idempotency test uses cross-execution activity cancellation | 🔴 Open |
 
 ## Resolved Blockers (duroxide v0.1.7)
 

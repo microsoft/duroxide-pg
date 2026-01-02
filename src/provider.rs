@@ -1,8 +1,8 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use duroxide::providers::{
-    ExecutionInfo, ExecutionMetadata, ExecutionState, InstanceInfo, OrchestrationItem, Provider,
-    ProviderAdmin, ProviderError, QueueDepths, SystemMetrics, WorkItem,
+    ExecutionInfo, ExecutionMetadata, InstanceInfo, OrchestrationItem, Provider, ProviderAdmin,
+    ProviderError, QueueDepths, ScheduledActivityIdentifier, SystemMetrics, WorkItem,
 };
 use duroxide::Event;
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
@@ -485,15 +485,16 @@ impl PostgresProvider {
     async fn do_fetch_work_item(
         &self,
         lock_timeout: Duration,
-    ) -> Result<Option<(WorkItem, String, u32, ExecutionState)>, ProviderError> {
+    ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
         let start = std::time::Instant::now();
 
         // Convert Duration to milliseconds
         let lock_timeout_ms = lock_timeout.as_millis() as i64;
 
         let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("fetch_work_item"));
-        // Returns: work_item, lock_token, attempt_count, execution_status (nullable)
-        let row = match sqlx::query_as::<_, (String, String, i32, Option<String>)>(&format!(
+        // Returns: work_item, lock_token, attempt_count
+        // Note: execution_status removed in duroxide 0.1.8 - cancellation now via lock-stealing
+        let row = match sqlx::query_as::<_, (String, String, i32)>(&format!(
             "SELECT * FROM {}.fetch_work_item($1, $2)",
             self.schema_name
         ))
@@ -508,7 +509,7 @@ impl PostgresProvider {
             }
         };
 
-        let (work_item_json, lock_token, attempt_count, execution_status) = match row {
+        let (work_item_json, lock_token, attempt_count) = match row {
             Some(row) => row,
             None => {
                 // Record empty fetch with timing
@@ -545,34 +546,19 @@ impl PostgresProvider {
             } => parent_instance.as_str(),
         };
 
-        // Determine ExecutionState from status
-        let execution_state = match execution_status.as_deref() {
-            None => ExecutionState::Missing,
-            Some("Running") => ExecutionState::Running,
-            Some(status) => ExecutionState::Terminal {
-                status: status.to_string(),
-            },
-        };
-
         debug!(
             target = "duroxide::providers::postgres",
             operation = "fetch_work_item",
             instance_id = %instance_id,
             attempt_count = attempt_count,
             duration_ms = duration_ms,
-            execution_state = ?execution_state,
             "Fetched activity work item via stored procedure"
         );
 
         // Record loaded fetch with timing
         record_fetch_result(FetchType::WorkItem, 1, duration_ms);
 
-        Ok(Some((
-            work_item,
-            lock_token,
-            attempt_count as u32,
-            execution_state,
-        )))
+        Ok(Some((work_item, lock_token, attempt_count as u32)))
     }
 }
 
@@ -651,6 +637,7 @@ impl Provider for PostgresProvider {
         worker_items: Vec<WorkItem>,
         orchestrator_items: Vec<WorkItem>,
         metadata: ExecutionMetadata,
+        cancelled_activities: Vec<ScheduledActivityIdentifier>,
     ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
 
@@ -710,13 +697,32 @@ impl Provider for PostgresProvider {
             "output": metadata.output,
         });
 
+        // Serialize cancelled_activities for lock-stealing cancellation
+        // Each entry needs execution_id and activity_id. The instance_id is constrained
+        // by v_instance_id (derived from lock_token in the stored procedure).
+        //
+        // Note: We intentionally allow cancelled_activities with different execution_ids
+        // than the current p_execution_id. The DELETE will simply be a no-op for
+        // non-matching entries, making the operation idempotent.
+        let cancelled_activities_json = serde_json::Value::Array(
+            cancelled_activities
+                .iter()
+                .map(|sa| {
+                    serde_json::json!({
+                        "execution_id": sa.execution_id,
+                        "activity_id": sa.activity_id
+                    })
+                })
+                .collect(),
+        );
+
         let now_ms = self.now_millis();
 
         for attempt in 0..=MAX_RETRIES {
             let _timer =
                 DbCallTimer::new(DbOperation::StoredProcedure, Some("ack_orchestration_item"));
             let result = sqlx::query(&format!(
-                "SELECT {}.ack_orchestration_item($1, $2, $3, $4, $5, $6, $7)",
+                "SELECT {}.ack_orchestration_item($1, $2, $3, $4, $5, $6, $7, $8)",
                 self.schema_name
             ))
             .bind(lock_token)
@@ -726,6 +732,7 @@ impl Provider for PostgresProvider {
             .bind(&worker_items_json)
             .bind(&orchestrator_items_json)
             .bind(&metadata_json)
+            .bind(&cancelled_activities_json)
             .execute(&*self.pool)
             .await;
 
@@ -981,7 +988,7 @@ impl Provider for PostgresProvider {
         &self,
         lock_timeout: Duration,
         poll_timeout: Duration,
-    ) -> Result<Option<(WorkItem, String, u32, ExecutionState)>, ProviderError> {
+    ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
         // Fast path: Duration::ZERO means "do not wait".
         // Avoid long-poll notifier bookkeeping to keep behavior deterministic
         // and reduce contention/overhead on hot paths.
@@ -1104,7 +1111,7 @@ impl Provider for PostgresProvider {
         &self,
         token: &str,
         extend_for: Duration,
-    ) -> Result<ExecutionState, ProviderError> {
+    ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
 
         // Get current time from application for consistent time reference
@@ -1114,43 +1121,29 @@ impl Provider for PostgresProvider {
         let extend_ms = extend_for.as_millis() as i64;
 
         let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("renew_work_item_lock"));
-        // Returns: execution_status (nullable)
-        match sqlx::query_scalar::<_, Option<String>>(&format!(
+        // In duroxide 0.1.8, renew returns () and fails if entry missing (lock stolen)
+        // The stored procedure will raise an exception if the lock token is invalid or entry deleted
+        match sqlx::query(&format!(
             "SELECT {}.renew_work_item_lock($1, $2, $3)",
             self.schema_name
         ))
         .bind(token)
         .bind(now_ms)
         .bind(extend_ms)
-        .fetch_one(&*self.pool)
+        .execute(&*self.pool)
         .await
         {
-            Ok(execution_status) => {
+            Ok(_) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
-
-                // Determine ExecutionState from status
-                // Per provider contract:
-                // - Running: lock was extended
-                // - Terminal/Missing: lock was NOT extended (state returned for cancellation)
-                let execution_state = match execution_status.as_deref() {
-                    None => ExecutionState::Missing,
-                    Some("Running") => ExecutionState::Running,
-                    Some(status) => ExecutionState::Terminal {
-                        status: status.to_string(),
-                    },
-                };
-
                 debug!(
                     target = "duroxide::providers::postgres",
                     operation = "renew_work_item_lock",
                     token = %token,
                     extend_for_ms = extend_ms,
                     duration_ms = duration_ms,
-                    execution_state = ?execution_state,
-                    lock_extended = matches!(execution_state, ExecutionState::Running),
-                    "Renew work item lock completed"
+                    "Renew work item lock completed successfully"
                 );
-                Ok(execution_state)
+                Ok(())
             }
             Err(e) => {
                 if let SqlxError::Database(db_err) = &e {

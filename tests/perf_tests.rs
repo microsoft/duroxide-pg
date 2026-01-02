@@ -243,6 +243,7 @@ async fn perf_immediate_work_latency() {
                     vec![],
                     vec![],
                     ExecutionMetadata::default(),
+                    vec![], // no cancelled activities
                 )
                 .await;
         }
