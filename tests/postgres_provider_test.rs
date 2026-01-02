@@ -242,6 +242,36 @@ mod poison_message_tests {
     provider_validation_test!(poison_message::max_attempt_count_across_message_batch);
 }
 
+mod long_polling_tests {
+    use super::*;
+    use duroxide::provider_validation::long_polling;
+
+    // PostgreSQL provider uses short polling (returns immediately when no work)
+    #[tokio::test]
+    async fn test_short_poll_returns_immediately() {
+        let factory = PostgresProviderFactory::new();
+        let provider = factory.create_provider().await;
+        long_polling::test_short_poll_returns_immediately(&*provider).await;
+        factory.cleanup_schema().await;
+    }
+
+    #[tokio::test]
+    async fn test_short_poll_work_item_returns_immediately() {
+        let factory = PostgresProviderFactory::new();
+        let provider = factory.create_provider().await;
+        long_polling::test_short_poll_work_item_returns_immediately(&*provider).await;
+        factory.cleanup_schema().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_respects_timeout_upper_bound() {
+        let factory = PostgresProviderFactory::new();
+        let provider = factory.create_provider().await;
+        long_polling::test_fetch_respects_timeout_upper_bound(&*provider).await;
+        factory.cleanup_schema().await;
+    }
+}
+
 mod cancellation_tests {
     use super::*;
 
@@ -254,4 +284,10 @@ mod cancellation_tests {
     provider_validation_test!(cancellation::test_renew_returns_terminal_when_orchestration_completed);
     provider_validation_test!(cancellation::test_renew_returns_missing_when_instance_deleted);
     provider_validation_test!(cancellation::test_ack_work_item_none_deletes_without_enqueue);
+    // Lock-stealing tests
+    provider_validation_test!(cancellation::test_cancelled_activities_deleted_from_worker_queue);
+    provider_validation_test!(cancellation::test_ack_work_item_fails_when_entry_deleted);
+    provider_validation_test!(cancellation::test_renew_fails_when_entry_deleted);
+    provider_validation_test!(cancellation::test_cancelling_nonexistent_activities_is_idempotent);
+    provider_validation_test!(cancellation::test_batch_cancellation_deletes_multiple_activities);
 }

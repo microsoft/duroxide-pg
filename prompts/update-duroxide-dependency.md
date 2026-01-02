@@ -79,7 +79,27 @@ For each breaking change identified in Step 1:
 - Update stored procedures if provider method signatures changed
 - Ensure migrations are idempotent (can be run multiple times safely)
 
-### 4.3 Update src/migrations.rs
+### 4.3 Generate Migration Diff File (Required)
+**Every migration must have a companion diff file.** Git diffs only show new SQL code, not the semantic delta from previous versions. Generate the diff:
+
+```bash
+./scripts/generate_migration_diff.sh <migration_number>
+# Example: ./scripts/generate_migration_diff.sh 9
+# Creates: migrations/0009_diff.md
+```
+
+The script:
+1. Creates temp schemas (before/after the target migration)
+2. Applies all migrations up to N-1 and N respectively
+3. Extracts DDL for tables, indexes, and functions
+4. Generates unified diff in `migrations/NNNN_diff.md`
+5. Cleans up temp schemas
+
+> ⚠️ **Do not skip this step.** PRs with migrations but no diff file will be rejected.
+
+See [migrations/0009_diff.md](../migrations/0009_diff.md) for a complete example.
+
+### 4.4 Update src/migrations.rs
 - Add new migration to the `MIGRATIONS` array if you created one
 
 ## Step 5: Add New Validation Tests
@@ -205,6 +225,7 @@ Tag the release and create release notes.
 - Stored procedures may need DROP before CREATE OR REPLACE
 - Check for function signature changes requiring explicit DROP
 - Verify schema references use dynamic schema names
+- **Always create `NNNN_diff.md`** when dropping/recreating functions so reviewers can see the actual delta
 
 ## Example: Adding ExecutionState Support
 

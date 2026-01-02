@@ -58,12 +58,12 @@ let provider = PostgresProvider::new_with_schema(
 - Poison message detection with attempt count tracking
 - Lock renewal for long-running orchestrations and activities
 
-## Latest Release (0.1.9)
+## Latest Release (0.1.10)
 
-- Update to duroxide 0.1.7 with activity cancellation support
-- `fetch_work_item` and `renew_work_item_lock` now return `ExecutionState`
-- `ack_work_item` accepts `Option<WorkItem>` to support cancelled activities
-- 9 new cancellation validation tests (72 total)
+- Update to duroxide 0.1.8 with activity cancellation via lock stealing
+- Remove experimental `ExecutionState` from provider API
+- Add `cancelled_activities` parameter to `ack_orchestration_item`
+- 80 provider validation tests (8 new)
 - See [CHANGELOG.md](CHANGELOG.md) for full version history
 
 ## License

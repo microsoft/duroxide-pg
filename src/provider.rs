@@ -1,8 +1,8 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use duroxide::providers::{
-    ExecutionInfo, ExecutionMetadata, ExecutionState, InstanceInfo, OrchestrationItem, Provider,
-    ProviderAdmin, ProviderError, QueueDepths, SystemMetrics, WorkItem,
+    ExecutionInfo, ExecutionMetadata, InstanceInfo, OrchestrationItem, Provider,
+    ProviderAdmin, ProviderError, QueueDepths, ScheduledActivityIdentifier, SystemMetrics, WorkItem,
 };
 use duroxide::Event;
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
@@ -90,27 +90,7 @@ impl PostgresProvider {
             .as_millis() as i64
     }
 
-    /// Parse execution state string from stored procedure result
-    /// Format: "Running", "Terminal:status", or "Missing"
-    fn parse_execution_state(state_str: &str) -> ExecutionState {
-        if state_str == "Running" {
-            ExecutionState::Running
-        } else if state_str == "Missing" {
-            ExecutionState::Missing
-        } else if let Some(status) = state_str.strip_prefix("Terminal:") {
-            ExecutionState::Terminal {
-                status: status.to_string(),
-            }
-        } else {
-            // Default to Running if unrecognized (shouldn't happen)
-            warn!(
-                target = "duroxide::providers::postgres",
-                state = %state_str,
-                "Unrecognized execution state, defaulting to Running"
-            );
-            ExecutionState::Running
-        }
-    }
+
 
     /// Get schema-qualified table name
     fn table_name(&self, table: &str) -> String {
@@ -312,9 +292,9 @@ impl Provider for PostgresProvider {
                 )));
             }
 
-            if attempt < MAX_RETRIES {
-                sleep(std::time::Duration::from_millis(RETRY_DELAY_MS)).await;
-            }
+            // No result found - return immediately (short polling behavior)
+            // Only retry with delay on retryable errors (handled above)
+            return Ok(None);
         }
 
         Ok(None)
@@ -328,6 +308,7 @@ impl Provider for PostgresProvider {
         worker_items: Vec<WorkItem>,
         orchestrator_items: Vec<WorkItem>,
         metadata: ExecutionMetadata,
+        cancelled_activities: Vec<ScheduledActivityIdentifier>,
     ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
 
@@ -387,9 +368,22 @@ impl Provider for PostgresProvider {
             "output": metadata.output,
         });
 
+        // Serialize cancelled activities for lock stealing
+        let cancelled_activities_json: Vec<serde_json::Value> = cancelled_activities
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "instance": a.instance,
+                    "execution_id": a.execution_id,
+                    "activity_id": a.activity_id,
+                })
+            })
+            .collect();
+        let cancelled_activities_json = serde_json::Value::Array(cancelled_activities_json);
+
         for attempt in 0..=MAX_RETRIES {
             let result = sqlx::query(&format!(
-                "SELECT {}.ack_orchestration_item($1, $2, $3, $4, $5, $6)",
+                "SELECT {}.ack_orchestration_item($1, $2, $3, $4, $5, $6, $7)",
                 self.schema_name
             ))
             .bind(lock_token)
@@ -398,6 +392,7 @@ impl Provider for PostgresProvider {
             .bind(&worker_items_json)
             .bind(&orchestrator_items_json)
             .bind(&metadata_json)
+            .bind(&cancelled_activities_json)
             .execute(&*self.pool)
             .await;
 
@@ -411,6 +406,7 @@ impl Provider for PostgresProvider {
                         history_count = history_delta.len(),
                         worker_items_count = worker_items.len(),
                         orchestrator_items_count = orchestrator_items.len(),
+                        cancelled_activities_count = cancelled_activities.len(),
                         duration_ms = duration_ms,
                         attempts = attempt + 1,
                         "Acknowledged orchestration item via stored procedure"
@@ -617,12 +613,30 @@ impl Provider for PostgresProvider {
 
         let now_ms = Self::now_millis();
 
+        // Extract activity identification for ActivityExecute items (for cancellation support)
+        let (instance_id, execution_id, activity_id) = match &item {
+            WorkItem::ActivityExecute {
+                instance,
+                execution_id,
+                id,
+                ..
+            } => (
+                Some(instance.clone()),
+                Some(*execution_id as i64),
+                Some(*id as i64),
+            ),
+            _ => (None, None, None),
+        };
+
         sqlx::query(&format!(
-            "SELECT {}.enqueue_worker_work($1, $2)",
+            "SELECT {}.enqueue_worker_work($1, $2, $3, $4, $5)",
             self.schema_name
         ))
         .bind(work_item)
         .bind(now_ms)
+        .bind(&instance_id)
+        .bind(execution_id)
+        .bind(activity_id)
         .execute(&*self.pool)
         .await
         .map_err(|e| {
@@ -644,13 +658,13 @@ impl Provider for PostgresProvider {
         &self,
         lock_timeout: Duration,
         _poll_timeout: Duration,
-    ) -> Result<Option<(WorkItem, String, u32, ExecutionState)>, ProviderError> {
+    ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
         let start = std::time::Instant::now();
 
         // Convert Duration to milliseconds
         let lock_timeout_ms = lock_timeout.as_millis() as i64;
 
-        let row = match sqlx::query_as::<_, (String, String, i32, String)>(&format!(
+        let row = match sqlx::query_as::<_, (String, String, i32)>(&format!(
             "SELECT * FROM {}.fetch_work_item($1, $2)",
             self.schema_name
         ))
@@ -665,7 +679,7 @@ impl Provider for PostgresProvider {
             }
         };
 
-        let (work_item_json, lock_token, attempt_count, execution_state_str) = match row {
+        let (work_item_json, lock_token, attempt_count) = match row {
             Some(row) => row,
             None => return Ok(None),
         };
@@ -676,9 +690,6 @@ impl Provider for PostgresProvider {
                 format!("Failed to deserialize worker item: {e}"),
             )
         })?;
-
-        // Parse execution state from stored procedure result
-        let execution_state = Self::parse_execution_state(&execution_state_str);
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -705,7 +716,6 @@ impl Provider for PostgresProvider {
             operation = "fetch_work_item",
             instance_id = %instance_id,
             attempt_count = attempt_count,
-            execution_state = ?execution_state,
             duration_ms = duration_ms,
             "Fetched activity work item via stored procedure"
         );
@@ -714,7 +724,6 @@ impl Provider for PostgresProvider {
             work_item,
             lock_token,
             attempt_count as u32,
-            execution_state,
         )))
     }
 
@@ -828,7 +837,7 @@ impl Provider for PostgresProvider {
         &self,
         token: &str,
         extend_for: Duration,
-    ) -> Result<ExecutionState, ProviderError> {
+    ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
 
         // Get current time from application for consistent time reference
@@ -837,29 +846,27 @@ impl Provider for PostgresProvider {
         // Convert Duration to seconds for the stored procedure
         let extend_secs = extend_for.as_secs() as i64;
 
-        match sqlx::query_as::<_, (String,)>(&format!(
+        match sqlx::query(&format!(
             "SELECT {}.renew_work_item_lock($1, $2, $3)",
             self.schema_name
         ))
         .bind(token)
         .bind(now_ms)
         .bind(extend_secs)
-        .fetch_one(&*self.pool)
+        .execute(&*self.pool)
         .await
         {
-            Ok((execution_state_str,)) => {
-                let execution_state = Self::parse_execution_state(&execution_state_str);
+            Ok(_) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
                 debug!(
                     target = "duroxide::providers::postgres",
                     operation = "renew_work_item_lock",
                     token = %token,
                     extend_for_secs = extend_secs,
-                    execution_state = ?execution_state,
                     duration_ms = duration_ms,
                     "Work item lock renewed successfully"
                 );
-                Ok(execution_state)
+                Ok(())
             }
             Err(e) => {
                 if let SqlxError::Database(db_err) = &e {

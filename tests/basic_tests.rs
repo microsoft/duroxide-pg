@@ -252,6 +252,7 @@ async fn test_enqueue_for_orchestrator() {
                 orchestration_version: Some("1.0.0".to_string()),
                 ..Default::default()
             },
+            vec![], // no cancelled activities
         )
         .await
         .expect("Failed to ack orchestration item");
@@ -314,7 +315,7 @@ async fn test_enqueue_and_dequeue_worker() {
         .expect("Failed to enqueue worker work");
 
     // Dequeue worker work
-    let (dequeued_item, lock_token, _attempt_count, _execution_state) = provider
+    let (dequeued_item, lock_token, _attempt_count) = provider
         .fetch_work_item(
             std::time::Duration::from_secs(30),
             std::time::Duration::ZERO,
@@ -499,6 +500,7 @@ async fn test_list_instances_and_executions() {
                     orchestration_version: Some("1.0.0".to_string()),
                     ..Default::default()
                 },
+                vec![], // no cancelled activities
             )
             .await
             .expect("Failed to ack orchestration item");

@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-01-02
+
+### Changed
+
+- **BREAKING:** Update to duroxide 0.1.8 (crates.io release)
+- Remove `ExecutionState` from provider API (was experimental in 0.1.7, removed in 0.1.8)
+  - `fetch_work_item` now returns `(WorkItem, String, u32)` (removed 4th column)
+  - `renew_work_item_lock` now returns `()` instead of `ExecutionState`
+- Add activity cancellation support via lock stealing
+  - `ack_orchestration_item` now accepts `cancelled_activities` parameter
+  - Worker queue items now track `instance_id`, `execution_id`, `activity_id` for cancellation lookup
+
+### Added
+
+- New migration `0008_remove_execution_state.sql` - removes ExecutionState from stored procedures
+- New migration `0009_add_activity_cancellation_support.sql` - adds lock stealing support
+- New script `scripts/generate_migration_diff.sh` - auto-generates migration diff markdown files
+- 5 new lock-stealing validation tests:
+  - `test_cancelled_activities_deleted_from_worker_queue`
+  - `test_ack_work_item_fails_when_entry_deleted`
+  - `test_renew_fails_when_entry_deleted`
+  - `test_cancelling_nonexistent_activities_is_idempotent`
+  - `test_batch_cancellation_deletes_multiple_activities`
+- 3 new long-polling validation tests
+
+### Fixed
+
+- All timestamps in migration 0009 now use Rust-provided time (`v_now_ts`) instead of database `NOW()`
+
+### Notes
+
+- Total validation tests: 80 (up from 72)
+- Switched duroxide dependency from git to crates.io
+- Migration diff files are now required for all schema changes
+
 ## [0.1.9] - 2025-12-28
 
 ### Added

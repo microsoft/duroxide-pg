@@ -86,6 +86,27 @@ fn next_schema_name() -> String {
 2. Use unqualified table names (search_path is set by runner)
 3. Make idempotent with `IF NOT EXISTS` / `IF EXISTS`
 4. Update stored procedures with new parameters if needed
+5. **REQUIRED: Generate a diff markdown file** (see below)
+
+### Migration Diff Files (Required)
+Every migration that modifies schema or stored procedures **must** have a companion `NNNN_diff.md` file. This is required because git diffs for SQL migrations only show the new code, not the delta from the previous version.
+
+```bash
+# Auto-generate diff by comparing schema before/after migration
+./scripts/generate_migration_diff.sh <migration_number>
+
+# Example:
+./scripts/generate_migration_diff.sh 9
+# Creates: migrations/0009_diff.md
+```
+
+The script:
+1. Creates two temp schemas (before/after the target migration)
+2. Extracts DDL for tables, indexes, and functions
+3. Diffs them and generates `migrations/NNNN_diff.md`
+4. Cleans up temp schemas
+
+Example output: See [migrations/0009_diff.md](../migrations/0009_diff.md)
 
 ### Updating duroxide Dependency
 Follow the detailed guide in [prompts/update-duroxide-dependency.md](../prompts/update-duroxide-dependency.md). Key steps:
