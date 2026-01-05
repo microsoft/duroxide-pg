@@ -1,8 +1,9 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use duroxide::providers::{
-    ExecutionInfo, ExecutionMetadata, InstanceInfo, OrchestrationItem, Provider,
-    ProviderAdmin, ProviderError, QueueDepths, ScheduledActivityIdentifier, SystemMetrics, WorkItem,
+    DeleteInstanceResult, ExecutionInfo, ExecutionMetadata, InstanceFilter, InstanceInfo,
+    OrchestrationItem, Provider, ProviderAdmin, ProviderError, PruneOptions, PruneResult,
+    QueueDepths, ScheduledActivityIdentifier, SystemMetrics, WorkItem,
 };
 use duroxide::Event;
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
@@ -366,6 +367,7 @@ impl Provider for PostgresProvider {
             "orchestration_version": metadata.orchestration_version,
             "status": metadata.status,
             "output": metadata.output,
+            "parent_instance_id": metadata.parent_instance_id,
         });
 
         // Serialize cancelled activities for lock stealing
@@ -1245,6 +1247,7 @@ impl ProviderAdmin for PostgresProvider {
             Option<chrono::DateTime<Utc>>,
             Option<String>,
             Option<String>,
+            Option<String>,
         )> = sqlx::query_as(&format!(
             "SELECT * FROM {}.get_instance_info($1)",
             self.schema_name
@@ -1263,6 +1266,7 @@ impl ProviderAdmin for PostgresProvider {
             updated_at,
             status,
             output,
+            parent_instance_id,
         ) =
             row.ok_or_else(|| ProviderError::permanent("get_instance_info", "Instance not found"))?;
 
@@ -1277,6 +1281,7 @@ impl ProviderAdmin for PostgresProvider {
             updated_at: updated_at
                 .map(|dt| dt.timestamp_millis() as u64)
                 .unwrap_or(created_at.timestamp_millis() as u64),
+            parent_instance_id,
         })
     }
 
@@ -1369,5 +1374,326 @@ impl ProviderAdmin for PostgresProvider {
             worker_queue: worker_queue as usize,
             timer_queue: 0, // Timers are in orchestrator queue with delayed visibility
         })
+    }
+
+    // ===== Hierarchy Primitive Operations =====
+
+    #[instrument(skip(self), fields(instance = %instance_id), target = "duroxide::providers::postgres")]
+    async fn list_children(&self, instance_id: &str) -> Result<Vec<String>, ProviderError> {
+        sqlx::query_scalar(&format!(
+            "SELECT child_instance_id FROM {}.list_children($1)",
+            self.schema_name
+        ))
+        .bind(instance_id)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| Self::sqlx_to_provider_error("list_children", e))
+    }
+
+    #[instrument(skip(self), fields(instance = %instance_id), target = "duroxide::providers::postgres")]
+    async fn get_parent_id(&self, instance_id: &str) -> Result<Option<String>, ProviderError> {
+        // The stored procedure raises an exception if instance doesn't exist
+        // Otherwise returns the parent_instance_id (which may be NULL)
+        let result: Result<Option<String>, _> = sqlx::query_scalar(&format!(
+            "SELECT {}.get_parent_id($1)",
+            self.schema_name
+        ))
+        .bind(instance_id)
+        .fetch_one(&*self.pool)
+        .await;
+
+        match result {
+            Ok(parent_id) => Ok(parent_id),
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("Instance not found") {
+                    Err(ProviderError::permanent(
+                        "get_parent_id",
+                        format!("Instance not found: {}", instance_id),
+                    ))
+                } else {
+                    Err(Self::sqlx_to_provider_error("get_parent_id", e))
+                }
+            }
+        }
+    }
+
+    // ===== Deletion Operations =====
+
+    #[instrument(skip(self), target = "duroxide::providers::postgres")]
+    async fn delete_instances_atomic(
+        &self,
+        ids: &[String],
+        force: bool,
+    ) -> Result<DeleteInstanceResult, ProviderError> {
+        if ids.is_empty() {
+            return Ok(DeleteInstanceResult::default());
+        }
+
+        let row: Option<(i64, i64, i64, i64)> = sqlx::query_as(&format!(
+            "SELECT * FROM {}.delete_instances_atomic($1, $2)",
+            self.schema_name
+        ))
+        .bind(ids)
+        .bind(force)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| {
+            let err_str = e.to_string();
+            if err_str.contains("is Running") {
+                ProviderError::permanent(
+                    "delete_instances_atomic",
+                    err_str,
+                )
+            } else if err_str.contains("Orphan detected") {
+                ProviderError::permanent(
+                    "delete_instances_atomic",
+                    err_str,
+                )
+            } else {
+                Self::sqlx_to_provider_error("delete_instances_atomic", e)
+            }
+        })?;
+
+        let (instances_deleted, executions_deleted, events_deleted, queue_messages_deleted) =
+            row.unwrap_or((0, 0, 0, 0));
+
+        debug!(
+            target = "duroxide::providers::postgres",
+            operation = "delete_instances_atomic",
+            instances_deleted = instances_deleted,
+            executions_deleted = executions_deleted,
+            events_deleted = events_deleted,
+            queue_messages_deleted = queue_messages_deleted,
+            "Deleted instances atomically"
+        );
+
+        Ok(DeleteInstanceResult {
+            instances_deleted: instances_deleted as u64,
+            executions_deleted: executions_deleted as u64,
+            events_deleted: events_deleted as u64,
+            queue_messages_deleted: queue_messages_deleted as u64,
+        })
+    }
+
+    #[instrument(skip(self), target = "duroxide::providers::postgres")]
+    async fn delete_instance_bulk(
+        &self,
+        filter: InstanceFilter,
+    ) -> Result<DeleteInstanceResult, ProviderError> {
+        // Build query to find matching root instances in terminal states
+        let mut sql = format!(
+            r#"
+            SELECT i.instance_id
+            FROM {}.instances i
+            LEFT JOIN {}.executions e ON i.instance_id = e.instance_id 
+              AND i.current_execution_id = e.execution_id
+            WHERE i.parent_instance_id IS NULL
+              AND e.status IN ('Completed', 'Failed', 'ContinuedAsNew')
+            "#,
+            self.schema_name, self.schema_name
+        );
+
+        // Add instance_ids filter if provided
+        if let Some(ref ids) = filter.instance_ids {
+            if ids.is_empty() {
+                return Ok(DeleteInstanceResult::default());
+            }
+            let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("${}", i)).collect();
+            sql.push_str(&format!(
+                " AND i.instance_id IN ({})",
+                placeholders.join(", ")
+            ));
+        }
+
+        // Add completed_before filter if provided
+        if filter.completed_before.is_some() {
+            let param_num = filter.instance_ids.as_ref().map(|ids| ids.len()).unwrap_or(0) + 1;
+            sql.push_str(&format!(
+                " AND e.completed_at < TO_TIMESTAMP(${} / 1000.0)",
+                param_num
+            ));
+        }
+
+        // Add limit
+        let limit = filter.limit.unwrap_or(1000);
+        let limit_param_num = filter.instance_ids.as_ref().map(|ids| ids.len()).unwrap_or(0)
+            + if filter.completed_before.is_some() { 1 } else { 0 }
+            + 1;
+        sql.push_str(&format!(" LIMIT ${}", limit_param_num));
+
+        // Build and execute query
+        let mut query = sqlx::query_scalar::<_, String>(&sql);
+        if let Some(ref ids) = filter.instance_ids {
+            for id in ids {
+                query = query.bind(id);
+            }
+        }
+        if let Some(completed_before) = filter.completed_before {
+            query = query.bind(completed_before as i64);
+        }
+        query = query.bind(limit as i64);
+
+        let instance_ids: Vec<String> = query
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| Self::sqlx_to_provider_error("delete_instance_bulk", e))?;
+
+        if instance_ids.is_empty() {
+            return Ok(DeleteInstanceResult::default());
+        }
+
+        // Delete each instance with cascade
+        let mut result = DeleteInstanceResult::default();
+
+        for instance_id in &instance_ids {
+            // Get full tree for this root
+            let tree = self.get_instance_tree(instance_id).await?;
+
+            // Atomic delete (tree.all_ids is already in deletion order: children first)
+            let delete_result = self.delete_instances_atomic(&tree.all_ids, true).await?;
+            result.instances_deleted += delete_result.instances_deleted;
+            result.executions_deleted += delete_result.executions_deleted;
+            result.events_deleted += delete_result.events_deleted;
+            result.queue_messages_deleted += delete_result.queue_messages_deleted;
+        }
+
+        debug!(
+            target = "duroxide::providers::postgres",
+            operation = "delete_instance_bulk",
+            instances_deleted = result.instances_deleted,
+            executions_deleted = result.executions_deleted,
+            events_deleted = result.events_deleted,
+            queue_messages_deleted = result.queue_messages_deleted,
+            "Bulk deleted instances"
+        );
+
+        Ok(result)
+    }
+
+    // ===== Pruning Operations =====
+
+    #[instrument(skip(self), fields(instance = %instance_id), target = "duroxide::providers::postgres")]
+    async fn prune_executions(
+        &self,
+        instance_id: &str,
+        options: PruneOptions,
+    ) -> Result<PruneResult, ProviderError> {
+        let keep_last: Option<i32> = options.keep_last.map(|v| v as i32);
+        let completed_before_ms: Option<i64> = options.completed_before.map(|v| v as i64);
+
+        let row: Option<(i64, i64, i64)> = sqlx::query_as(&format!(
+            "SELECT * FROM {}.prune_executions($1, $2, $3)",
+            self.schema_name
+        ))
+        .bind(instance_id)
+        .bind(keep_last)
+        .bind(completed_before_ms)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| Self::sqlx_to_provider_error("prune_executions", e))?;
+
+        let (instances_processed, executions_deleted, events_deleted) = row.unwrap_or((0, 0, 0));
+
+        debug!(
+            target = "duroxide::providers::postgres",
+            operation = "prune_executions",
+            instance_id = %instance_id,
+            instances_processed = instances_processed,
+            executions_deleted = executions_deleted,
+            events_deleted = events_deleted,
+            "Pruned executions"
+        );
+
+        Ok(PruneResult {
+            instances_processed: instances_processed as u64,
+            executions_deleted: executions_deleted as u64,
+            events_deleted: events_deleted as u64,
+        })
+    }
+
+    #[instrument(skip(self), target = "duroxide::providers::postgres")]
+    async fn prune_executions_bulk(
+        &self,
+        filter: InstanceFilter,
+        options: PruneOptions,
+    ) -> Result<PruneResult, ProviderError> {
+        // Build query to find matching instances in terminal states
+        let mut sql = format!(
+            r#"
+            SELECT i.instance_id
+            FROM {}.instances i
+            LEFT JOIN {}.executions e ON i.instance_id = e.instance_id 
+              AND i.current_execution_id = e.execution_id
+            WHERE e.status IN ('Completed', 'Failed', 'ContinuedAsNew')
+            "#,
+            self.schema_name, self.schema_name
+        );
+
+        // Add instance_ids filter if provided
+        if let Some(ref ids) = filter.instance_ids {
+            if ids.is_empty() {
+                return Ok(PruneResult::default());
+            }
+            let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("${}", i)).collect();
+            sql.push_str(&format!(
+                " AND i.instance_id IN ({})",
+                placeholders.join(", ")
+            ));
+        }
+
+        // Add completed_before filter if provided
+        if filter.completed_before.is_some() {
+            let param_num = filter.instance_ids.as_ref().map(|ids| ids.len()).unwrap_or(0) + 1;
+            sql.push_str(&format!(
+                " AND e.completed_at < TO_TIMESTAMP(${} / 1000.0)",
+                param_num
+            ));
+        }
+
+        // Add limit
+        let limit = filter.limit.unwrap_or(1000);
+        let limit_param_num = filter.instance_ids.as_ref().map(|ids| ids.len()).unwrap_or(0)
+            + if filter.completed_before.is_some() { 1 } else { 0 }
+            + 1;
+        sql.push_str(&format!(" LIMIT ${}", limit_param_num));
+
+        // Build and execute query
+        let mut query = sqlx::query_scalar::<_, String>(&sql);
+        if let Some(ref ids) = filter.instance_ids {
+            for id in ids {
+                query = query.bind(id);
+            }
+        }
+        if let Some(completed_before) = filter.completed_before {
+            query = query.bind(completed_before as i64);
+        }
+        query = query.bind(limit as i64);
+
+        let instance_ids: Vec<String> = query
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| Self::sqlx_to_provider_error("prune_executions_bulk", e))?;
+
+        // Prune each instance
+        let mut result = PruneResult::default();
+
+        for instance_id in &instance_ids {
+            let single_result = self.prune_executions(instance_id, options.clone()).await?;
+            result.instances_processed += single_result.instances_processed;
+            result.executions_deleted += single_result.executions_deleted;
+            result.events_deleted += single_result.events_deleted;
+        }
+
+        debug!(
+            target = "duroxide::providers::postgres",
+            operation = "prune_executions_bulk",
+            instances_processed = result.instances_processed,
+            executions_deleted = result.executions_deleted,
+            events_deleted = result.events_deleted,
+            "Bulk pruned executions"
+        );
+
+        Ok(result)
     }
 }

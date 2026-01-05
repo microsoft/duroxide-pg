@@ -2,7 +2,7 @@ use std::sync::{Arc, Once};
 
 use duroxide::provider_validation::{
     atomicity, cancellation, error_handling, instance_creation, instance_locking, lock_expiration,
-    management, multi_execution, queue_semantics,
+    management, multi_execution, queue_semantics, deletion, prune, bulk_deletion,
 };
 use duroxide::provider_validations::ProviderFactory;
 use duroxide::providers::Provider;
@@ -290,4 +290,38 @@ mod cancellation_tests {
     provider_validation_test!(cancellation::test_renew_fails_when_entry_deleted);
     provider_validation_test!(cancellation::test_cancelling_nonexistent_activities_is_idempotent);
     provider_validation_test!(cancellation::test_batch_cancellation_deletes_multiple_activities);
+}
+
+mod deletion_tests {
+    use super::*;
+
+    provider_validation_test!(deletion::test_delete_terminal_instances);
+    provider_validation_test!(deletion::test_delete_running_rejected_force_succeeds);
+    provider_validation_test!(deletion::test_delete_nonexistent_instance);
+    provider_validation_test!(deletion::test_delete_cleans_queues_and_locks);
+    provider_validation_test!(deletion::test_cascade_delete_hierarchy);
+    provider_validation_test!(deletion::test_list_children);
+    provider_validation_test!(deletion::test_delete_get_parent_id);
+    provider_validation_test!(deletion::test_delete_get_instance_tree);
+    provider_validation_test!(deletion::test_delete_instances_atomic);
+    provider_validation_test!(deletion::test_delete_instances_atomic_force);
+    provider_validation_test!(deletion::test_delete_instances_atomic_orphan_detection);
+    provider_validation_test!(deletion::test_force_delete_prevents_ack_recreation);
+}
+
+mod prune_tests {
+    use super::*;
+
+    provider_validation_test!(prune::test_prune_options_combinations);
+    provider_validation_test!(prune::test_prune_safety);
+    provider_validation_test!(prune::test_prune_bulk);
+}
+
+mod bulk_deletion_tests {
+    use super::*;
+
+    provider_validation_test!(bulk_deletion::test_delete_instance_bulk_filter_combinations);
+    provider_validation_test!(bulk_deletion::test_delete_instance_bulk_safety_and_limits);
+    provider_validation_test!(bulk_deletion::test_delete_instance_bulk_completed_before_filter);
+    provider_validation_test!(bulk_deletion::test_delete_instance_bulk_cascades_to_children);
 }

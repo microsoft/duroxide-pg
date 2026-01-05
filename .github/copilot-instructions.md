@@ -36,18 +36,30 @@ echo "DATABASE_URL=postgres://postgres:postgres@localhost:5432/duroxide_test" > 
 ```
 
 ### Running Tests
+
+**Prefer `cargo-nextest`** if installed (faster, better output). Fall back to `cargo test` otherwise.
+
 ```bash
-# All tests (requires DATABASE_URL)
+# Check if nextest is available
+command -v cargo-nextest >/dev/null 2>&1 && echo "nextest available" || echo "use cargo test"
+
+# All tests with nextest (preferred)
+cargo nextest run
+
+# All tests with cargo test (fallback)
 cargo test
 
 # Specific test with output
-cargo test test_provider_creation -- --nocapture
+cargo nextest run test_provider_creation --nocapture
+# or: cargo test test_provider_creation -- --nocapture
 
-# Provider validation tests only (63 tests from duroxide)
-cargo test --test postgres_provider_test
+# Provider validation tests only (99 tests from duroxide)
+cargo nextest run --test postgres_provider_test
+# or: cargo test --test postgres_provider_test
 
 # Stress tests (long-running, marked #[ignore])
-cargo test --test stress_tests -- --ignored
+cargo nextest run --test stress_tests --run-ignored only
+# or: cargo test --test stress_tests -- --ignored
 ```
 
 ### Stress Testing

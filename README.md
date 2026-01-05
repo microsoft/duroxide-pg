@@ -58,12 +58,13 @@ let provider = PostgresProvider::new_with_schema(
 - Poison message detection with attempt count tracking
 - Lock renewal for long-running orchestrations and activities
 
-## Latest Release (0.1.10)
+## Latest Release (0.1.11)
 
-- Update to duroxide 0.1.8 with activity cancellation via lock stealing
-- Remove experimental `ExecutionState` from provider API
-- Add `cancelled_activities` parameter to `ack_orchestration_item`
-- 80 provider validation tests (8 new)
+- Update to duroxide 0.1.9 with full Management API support
+- Add cascade deletion for orchestration hierarchies (`delete_instance`, `delete_instance_bulk`)
+- Add execution pruning (`prune_executions`, `prune_executions_bulk`)
+- Track parent/child relationships via `parent_instance_id` column
+- 99 provider validation tests (19 new)
 - See [CHANGELOG.md](CHANGELOG.md) for full version history
 
 ## License

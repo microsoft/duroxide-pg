@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11] - 2026-01-05
+
+### Changed
+
+- **BREAKING:** Update to duroxide 0.1.9
+- `get_instance_info` now returns `parent_instance_id` field for sub-orchestration hierarchy
+
+### Added
+
+- New migration `0010_add_deletion_and_pruning_support.sql`:
+  - Adds `parent_instance_id` column to `instances` table
+  - 5 new stored procedures: `list_children`, `get_parent_id`, `delete_instances_atomic`, `prune_executions`, `get_instance_info` (updated)
+- 6 new ProviderAdmin methods for Management API:
+  - `list_children(instance_id)` - List direct child sub-orchestrations
+  - `get_parent_id(instance_id)` - Get parent instance ID
+  - `delete_instances_atomic(ids, force)` - Atomic batch deletion with cascade
+  - `delete_instance_bulk(filter)` - Bulk delete with filters
+  - `prune_executions(instance_id, options)` - Prune old executions
+  - `prune_executions_bulk(filter, options)` - Bulk prune across instances
+- 19 new provider validation tests:
+  - 12 deletion tests (cascade delete, hierarchy, atomic operations)
+  - 3 prune tests (options, safety, bulk)
+  - 4 bulk deletion tests (filters, limits, cascading)
+
+### Notes
+
+- Total validation tests: 99 (up from 80)
+- All pruning operations now raise error for non-existent instances (matches duroxide semantics)
+- Parent/child relationships tracked via `parent_instance_id` column
+
 ## [0.1.10] - 2026-01-02
 
 ### Changed
