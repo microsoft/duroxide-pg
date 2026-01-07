@@ -51,18 +51,18 @@ let provider = PostgresProvider::new_with_schema(
 
 ## Features
 
-- Automatic schema migration on startup
+- **Automatic schema migration** on startup with version tracking - see [migrations/README.md](migrations/README.md)
 - Connection pooling via sqlx
 - Custom schema support for multi-tenant isolation
 - Full implementation of the Duroxide `Provider` and `ProviderAdmin` traits
 - Poison message detection with attempt count tracking
 - Lock renewal for long-running orchestrations and activities
 
-## Latest Release (0.1.12)
+## Latest Release (0.1.13)
 
-- Fix migration system to handle function signature changes (DROP before CREATE)
-- Resolves test failures when running against existing public schema
-- 135 provider validation tests passing
+- Fix `cleanup_schema()` to drop stored procedures in public schema (fixes #4)
+- Update to duroxide 0.1.11 (bug fix release, no breaking changes)
+- 99 provider validation tests passing
 - See [CHANGELOG.md](CHANGELOG.md) for full version history
 
 ## License
