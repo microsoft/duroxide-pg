@@ -1,5 +1,7 @@
 # TODO
 
+- Test timeouts/waits are too generous assuming remote DB. We might be missing some bugs.
+    - Scan and tune for local container execution only
 - Pull json parsing into rust code where it makes sense
 - Competing consumer instead of all dispatchers racing
 - fix up perf testing prompt and tests

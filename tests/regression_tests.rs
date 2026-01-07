@@ -6,6 +6,7 @@
 use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::runtime::{self, RuntimeOptions};
 use duroxide::{ActivityContext, Client, OrchestrationContext, OrchestrationRegistry};
+use duroxide::providers::{Provider, PruneOptions};
 use duroxide_pg_opt::PostgresProvider;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
@@ -289,4 +290,332 @@ async fn test_parallel_suborchestrations_stress() {
         success, NUM_PARENTS,
         "Expected all {NUM_PARENTS} to succeed, got {success}"
     );
+}
+
+// =============================================================================
+// Bug: prune_executions_bulk excluded Running instances
+// =============================================================================
+//
+// Reporter: Internal testing
+// Date: January 6, 2026
+// Reference: GitHub issue #50 (affandar/duroxide)
+//
+// Summary:
+// When pruning executions in bulk, Running instances were excluded from the
+// query filter. This meant that long-running orchestrations using ContinueAsNew
+// could accumulate old terminal executions that would never be pruned.
+//
+// The stored procedure prune_executions already correctly protects Running
+// executions (it never deletes current_execution_id or status='Running'),
+// so the Rust layer should include Running instances in the bulk query.
+//
+// Fix: Changed prune_executions_bulk query from:
+//   WHERE e.status IN ('Completed', 'Failed', 'ContinuedAsNew')
+// To:
+//   WHERE 1=1 (no status filter - let stored procedure handle safety)
+//
+// =============================================================================
+
+/// Regression test: prune_executions on a Running instance should prune terminal executions.
+///
+/// This validates that:
+/// 1. An instance with current_execution Running is included in prune_executions_bulk
+/// 2. Old terminal executions (Completed/ContinuedAsNew) are correctly pruned
+/// 3. The current Running execution is NOT pruned (safety guarantee)
+#[tokio::test]
+async fn test_prune_running_instance_prunes_terminal_executions() {
+    let schema = unique_schema_name();
+    let database_url = get_database_url();
+
+    let provider = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("Failed to create provider");
+    let store: Arc<dyn Provider> = Arc::new(provider);
+    let admin = store.as_management_capability().unwrap();
+
+    // Create an orchestration that uses ContinueAsNew to cycle through executions
+    // After 3 iterations it stays running (simulating a long-running orchestration)
+    let activity_registry = ActivityRegistry::builder()
+        .register("Work", |_ctx: ActivityContext, input: String| async move {
+            Ok(format!("done:{input}"))
+        })
+        .build();
+
+    let counter_orch = |ctx: OrchestrationContext, input: String| async move {
+        let count: i32 = input.parse().unwrap_or(0);
+        
+        // Do some work
+        ctx.schedule_activity("Work", format!("iteration-{count}"))
+            .into_activity()
+            .await?;
+        
+        if count < 3 {
+            // Continue as new with incremented counter (creates new execution)
+            return ctx.continue_as_new(format!("{}", count + 1)).await;
+        } else {
+            // Stay running - schedule a very long timer that will never fire during the test
+            // This simulates a long-running orchestration
+            ctx.schedule_timer(Duration::from_secs(3600)).await;
+        }
+        
+        Ok(format!("completed-{count}"))
+    };
+
+    let orchestration_registry = OrchestrationRegistry::builder()
+        .register("CounterOrch", counter_orch)
+        .build();
+
+    let options = RuntimeOptions {
+        dispatcher_min_poll_interval: Duration::from_millis(10),
+        ..Default::default()
+    };
+
+    let rt = runtime::Runtime::start_with_options(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+        options,
+    )
+    .await;
+
+    let client = Client::new(store.clone());
+    let instance_id = "prune-running-test";
+
+    // Start the orchestration
+    client
+        .start_orchestration(instance_id, "CounterOrch", "0")
+        .await
+        .expect("Failed to start orchestration");
+
+    // Wait for it to reach the Running state at execution 4 (after 3 ContinueAsNew)
+    // The orchestration cycles: exec1(ContinuedAsNew) -> exec2(ContinuedAsNew) -> exec3(ContinuedAsNew) -> exec4(Running)
+    let timeout = Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + timeout;
+    
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        // Check instance info
+        if let Ok(info) = admin.get_instance_info(instance_id).await {
+            // Execution 4 means we've done 3 ContinueAsNew cycles
+            if info.current_execution_id >= 4 && info.status == "Running" {
+                break;
+            }
+        }
+        
+        if std::time::Instant::now() > deadline {
+            panic!("Timed out waiting for orchestration to reach execution 4 in Running state");
+        }
+    }
+
+    // Verify we have multiple executions (should have 4: three ContinuedAsNew + one Running)
+    let executions = admin.list_executions(instance_id).await.unwrap();
+    assert!(
+        executions.len() >= 4,
+        "Expected at least 4 executions, got {}",
+        executions.len()
+    );
+    
+    // Get info for each execution
+    let mut terminal_count = 0;
+    let mut running_count = 0;
+    for exec_id in &executions {
+        let exec_info = admin.get_execution_info(instance_id, *exec_id).await.unwrap();
+        if exec_info.status == "Running" {
+            running_count += 1;
+        } else {
+            terminal_count += 1;
+        }
+    }
+    
+    assert!(
+        terminal_count >= 3,
+        "Expected at least 3 terminal executions (ContinuedAsNew), got {}",
+        terminal_count
+    );
+    assert_eq!(
+        running_count, 1,
+        "Expected exactly 1 Running execution, got {}",
+        running_count
+    );
+    
+    // Get current execution ID before prune
+    let info_before = admin.get_instance_info(instance_id).await.unwrap();
+    let current_exec_before = info_before.current_execution_id;
+    assert_eq!(info_before.status, "Running", "Instance should be Running");
+
+    // Now prune, keeping only 1 execution (the current one)
+    let prune_result = admin
+        .prune_executions(instance_id, PruneOptions { keep_last: Some(1), ..Default::default() })
+        .await
+        .unwrap();
+    
+    // Should have pruned the terminal executions (at least 3)
+    assert!(
+        prune_result.executions_deleted >= 3,
+        "Expected at least 3 executions deleted, got {}",
+        prune_result.executions_deleted
+    );
+    assert!(
+        prune_result.events_deleted > 0,
+        "Expected some events deleted, got 0"
+    );
+
+    // Verify the instance is still Running and current execution unchanged
+    let info_after = admin.get_instance_info(instance_id).await.unwrap();
+    assert_eq!(
+        info_after.status, "Running",
+        "Instance should still be Running after prune"
+    );
+    assert_eq!(
+        info_after.current_execution_id, current_exec_before,
+        "Current execution ID should not change after prune"
+    );
+
+    // Verify only 1 execution remains
+    let executions_after = admin.list_executions(instance_id).await.unwrap();
+    assert_eq!(
+        executions_after.len(),
+        1,
+        "Expected 1 execution after prune (keep_last=1), got {}",
+        executions_after.len()
+    );
+    
+    // The remaining execution should be the current (Running) one
+    assert_eq!(
+        executions_after[0], current_exec_before,
+        "Remaining execution should be the current one"
+    );
+
+    // Clean up
+    rt.shutdown(None).await;
+    let _ = cleanup_schema(&schema).await;
+}
+
+/// Regression test: prune_executions_bulk includes Running instances.
+///
+/// Tests that bulk pruning correctly processes Running instances and prunes
+/// their terminal executions.
+#[tokio::test]
+async fn test_prune_executions_bulk_includes_running_instances() {
+    use duroxide::providers::InstanceFilter;
+    
+    let schema = unique_schema_name();
+    let database_url = get_database_url();
+
+    let provider = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("Failed to create provider");
+    let store: Arc<dyn Provider> = Arc::new(provider);
+    let admin = store.as_management_capability().unwrap();
+
+    // Same setup as above - creates an orchestration with multiple executions
+    let activity_registry = ActivityRegistry::builder()
+        .register("Work", |_ctx: ActivityContext, input: String| async move {
+            Ok(format!("done:{input}"))
+        })
+        .build();
+
+    let counter_orch = |ctx: OrchestrationContext, input: String| async move {
+        let count: i32 = input.parse().unwrap_or(0);
+        
+        ctx.schedule_activity("Work", format!("iteration-{count}"))
+            .into_activity()
+            .await?;
+        
+        if count < 2 {
+            return ctx.continue_as_new(format!("{}", count + 1)).await;
+        } else {
+            // Stay running - wait for an event that will never be raised
+            let _: String = ctx.schedule_wait("never_fired").into_event().await;
+        }
+        
+        Ok(format!("completed-{count}"))
+    };
+
+    let orchestration_registry = OrchestrationRegistry::builder()
+        .register("BulkCounterOrch", counter_orch)
+        .build();
+
+    let options = RuntimeOptions {
+        dispatcher_min_poll_interval: Duration::from_millis(10),
+        ..Default::default()
+    };
+
+    let rt = runtime::Runtime::start_with_options(
+        store.clone(),
+        Arc::new(activity_registry),
+        orchestration_registry,
+        options,
+    )
+    .await;
+
+    let client = Client::new(store.clone());
+    let instance_id = "bulk-prune-running-test";
+
+    client
+        .start_orchestration(instance_id, "BulkCounterOrch", "0")
+        .await
+        .expect("Failed to start orchestration");
+
+    // Wait for Running state at execution 3
+    let timeout = Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + timeout;
+    
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        if let Ok(info) = admin.get_instance_info(instance_id).await {
+            if info.current_execution_id >= 3 && info.status == "Running" {
+                break;
+            }
+        }
+        
+        if std::time::Instant::now() > deadline {
+            panic!("Timed out waiting for orchestration to reach execution 3");
+        }
+    }
+
+    // Verify preconditions
+    let executions_before = admin.list_executions(instance_id).await.unwrap();
+    assert!(
+        executions_before.len() >= 3,
+        "Expected at least 3 executions before bulk prune"
+    );
+    
+    let info_before = admin.get_instance_info(instance_id).await.unwrap();
+    assert_eq!(info_before.status, "Running");
+
+    // Bulk prune with instance filter
+    let prune_result = admin
+        .prune_executions_bulk(
+            InstanceFilter {
+                instance_ids: Some(vec![instance_id.to_string()]),
+                ..Default::default()
+            },
+            PruneOptions { keep_last: Some(1), ..Default::default() },
+        )
+        .await
+        .unwrap();
+    
+    // Key assertion: bulk prune should have processed this Running instance
+    assert_eq!(
+        prune_result.instances_processed, 1,
+        "Bulk prune should process the Running instance"
+    );
+    assert!(
+        prune_result.executions_deleted >= 2,
+        "Expected at least 2 executions deleted via bulk prune"
+    );
+
+    // Verify instance still Running with correct execution
+    let info_after = admin.get_instance_info(instance_id).await.unwrap();
+    assert_eq!(info_after.status, "Running");
+    assert_eq!(info_after.current_execution_id, info_before.current_execution_id);
+
+    let executions_after = admin.list_executions(instance_id).await.unwrap();
+    assert_eq!(executions_after.len(), 1);
+
+    rt.shutdown(None).await;
+    let _ = cleanup_schema(&schema).await;
 }

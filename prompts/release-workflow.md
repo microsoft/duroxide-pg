@@ -88,7 +88,37 @@ Also update the `duroxide-pg-opt` dependency version in `pg-stress/Cargo.toml` i
 
 ### 3. Documentation Updates
 
-#### 3.1 Update CHANGELOG.md
+#### 3.1 Capture Duroxide Dependency Changes
+
+If the duroxide dependency version was updated since the last release, document the changes:
+
+```bash
+# Check if duroxide version changed
+git diff HEAD~10 -- Cargo.toml | grep duroxide
+
+# If version changed, get the changelog between versions
+# Visit: https://github.com/affandar/duroxide/compare/v{OLD_VERSION}...v{NEW_VERSION}
+# Or check the duroxide CHANGELOG.md for the versions in between
+```
+
+Include in the release notes:
+- **From version** → **To version** (e.g., 0.1.10 → 0.1.11)
+- Key changes that affect duroxide-pg-opt:
+  - New Provider trait methods added
+  - Breaking API changes
+  - New validation tests that need implementation
+  - Bug fixes that may affect provider behavior
+
+Example CHANGELOG entry:
+```markdown
+### Dependencies
+- Updated `duroxide` from 0.1.10 to 0.1.11
+  - Added lock-stealing cancellation support (new `cancelled_activities` parameter)
+  - Removed `execution_status` from fetch/renew returns
+  - New validation tests: `cancellation::test_cancelled_activities_*`
+```
+
+#### 3.2 Update CHANGELOG.md
 
 Add a new section at the top following this format:
 
@@ -113,7 +143,7 @@ Include:
 - Breaking changes (highlighted)
 - Migration notes if applicable
 
-#### 3.2 Update README.md
+#### 3.3 Update README.md
 
 Review and update if needed:
 - Version references
@@ -122,7 +152,7 @@ Review and update if needed:
 - Example code
 - Badge versions (if any)
 
-#### 3.3 Update Other Docs
+#### 3.4 Update Other Docs
 
 Check `docs/` folder for any documentation that needs updating:
 - Design documents
@@ -179,6 +209,7 @@ git push origin v{VERSION}
 - [ ] `cargo test` passes
 - [ ] Version bumped in Cargo.toml
 - [ ] Version bumped in pg-stress/Cargo.toml (if applicable)
+- [ ] Duroxide dependency changes documented (if version changed)
 - [ ] CHANGELOG.md updated with new version section
 - [ ] README.md reviewed and updated
 - [ ] All changes committed

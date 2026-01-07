@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS _duroxide_migrations (
 -- ============================================================================
 
 -- Trigger function for orchestrator queue
+DROP FUNCTION IF EXISTS notify_orch_work() CASCADE;
 CREATE OR REPLACE FUNCTION notify_orch_work()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -113,6 +114,7 @@ $$ LANGUAGE plpgsql;
 -- Trigger function for worker queue
 -- Worker queue items now have visible_at for delayed visibility
 -- Send visible_at timestamp for timer scheduling
+DROP FUNCTION IF EXISTS notify_worker_work() CASCADE;
 CREATE OR REPLACE FUNCTION notify_worker_work()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -150,11 +152,14 @@ BEGIN
     -- ============================================================================
 
     -- Procedure: cleanup_schema
-    -- Drops all tables in the schema (for testing only)
+    -- Drops all tables AND functions in the schema (for testing only)
+    -- Functions must be dropped because PostgreSQL cannot change return types with CREATE OR REPLACE
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.cleanup_schema()', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.cleanup_schema()
         RETURNS VOID AS $cleanup$
         BEGIN
+            -- Drop tables first
             DROP TABLE IF EXISTS %I.instances CASCADE;
             DROP TABLE IF EXISTS %I.executions CASCADE;
             DROP TABLE IF EXISTS %I.history CASCADE;
@@ -162,16 +167,52 @@ BEGIN
             DROP TABLE IF EXISTS %I.worker_queue CASCADE;
             DROP TABLE IF EXISTS %I.instance_locks CASCADE;
             DROP TABLE IF EXISTS %I._duroxide_migrations CASCADE;
+            
+            -- Drop all stored procedures (required because return type changes cannot use CREATE OR REPLACE)
+            DROP FUNCTION IF EXISTS %I.cleanup_schema();
+            DROP FUNCTION IF EXISTS %I.list_instances();
+            DROP FUNCTION IF EXISTS %I.list_executions(TEXT);
+            DROP FUNCTION IF EXISTS %I.latest_execution_id(TEXT);
+            DROP FUNCTION IF EXISTS %I.list_instances_by_status(TEXT);
+            DROP FUNCTION IF EXISTS %I.get_instance_info(TEXT);
+            DROP FUNCTION IF EXISTS %I.get_execution_info(TEXT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.get_system_metrics();
+            DROP FUNCTION IF EXISTS %I.get_queue_depths(BIGINT);
+            DROP FUNCTION IF EXISTS %I.enqueue_worker_work(TEXT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.ack_worker(TEXT, TEXT, TEXT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.renew_work_item_lock(TEXT, BIGINT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.fetch_work_item(BIGINT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.abandon_work_item(TEXT, BIGINT, BIGINT, BOOLEAN);
+            DROP FUNCTION IF EXISTS %I.enqueue_orchestrator_work(TEXT, TEXT, TIMESTAMPTZ, BIGINT, TEXT, TEXT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.fetch_orchestration_item(BIGINT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.ack_orchestration_item(TEXT, BIGINT, BIGINT, JSONB, JSONB, JSONB, JSONB, JSONB);
+            DROP FUNCTION IF EXISTS %I.abandon_orchestration_item(TEXT, BIGINT, BIGINT, BOOLEAN);
+            DROP FUNCTION IF EXISTS %I.renew_orchestration_item_lock(TEXT, BIGINT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.fetch_history(TEXT);
+            DROP FUNCTION IF EXISTS %I.fetch_history_with_execution(TEXT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.append_history(TEXT, BIGINT, JSONB, BIGINT);
+            
+            -- Drop trigger functions (not schema-qualified, they use search_path)
+            -- CASCADE is required because triggers depend on these functions
+            DROP FUNCTION IF EXISTS notify_orch_work() CASCADE;
+            DROP FUNCTION IF EXISTS notify_worker_work() CASCADE;
         END;
         $cleanup$ LANGUAGE plpgsql;
     ', v_schema_name, v_schema_name, v_schema_name, v_schema_name, 
-       v_schema_name, v_schema_name, v_schema_name, v_schema_name);
+       v_schema_name, v_schema_name, v_schema_name, v_schema_name,
+       v_schema_name, v_schema_name, v_schema_name, v_schema_name,
+       v_schema_name, v_schema_name, v_schema_name, v_schema_name,
+       v_schema_name, v_schema_name, v_schema_name, v_schema_name,
+       v_schema_name, v_schema_name, v_schema_name, v_schema_name,
+       v_schema_name, v_schema_name, v_schema_name, v_schema_name,
+       v_schema_name, v_schema_name);
 
     -- ============================================================================
     -- Simple Query Procedures
     -- ============================================================================
 
     -- Procedure: list_instances
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.list_instances()', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.list_instances()
         RETURNS TABLE(instance_id TEXT) AS $list_inst$
@@ -185,6 +226,7 @@ BEGIN
     ', v_schema_name, v_schema_name);
 
     -- Procedure: list_executions
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.list_executions(TEXT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.list_executions(p_instance_id TEXT)
         RETURNS TABLE(execution_id BIGINT) AS $list_exec$
@@ -199,6 +241,7 @@ BEGIN
     ', v_schema_name, v_schema_name);
 
     -- Procedure: latest_execution_id
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.latest_execution_id(TEXT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.latest_execution_id(p_instance_id TEXT)
         RETURNS BIGINT AS $latest_exec$
@@ -214,6 +257,7 @@ BEGIN
     ', v_schema_name, v_schema_name);
 
     -- Procedure: list_instances_by_status
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.list_instances_by_status(TEXT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.list_instances_by_status(p_status TEXT)
         RETURNS TABLE(instance_id TEXT) AS $list_by_status$
@@ -234,6 +278,7 @@ BEGIN
     -- ============================================================================
 
     -- Procedure: get_instance_info
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.get_instance_info(TEXT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.get_instance_info(p_instance_id TEXT)
         RETURNS TABLE(
@@ -261,6 +306,7 @@ BEGIN
     ', v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: get_execution_info
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.get_execution_info(TEXT, BIGINT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.get_execution_info(
             p_instance_id TEXT,
@@ -289,6 +335,7 @@ BEGIN
     ', v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: get_system_metrics
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.get_system_metrics()', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.get_system_metrics()
         RETURNS TABLE(
@@ -327,6 +374,7 @@ BEGIN
 
     -- Procedure: get_queue_depths
     -- Returns count of items available for processing (visible and unlocked/lock expired)
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.get_queue_depths(BIGINT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.get_queue_depths(p_now_ms BIGINT)
         RETURNS TABLE(
@@ -352,6 +400,7 @@ BEGIN
     -- ============================================================================
 
     -- Procedure: enqueue_worker_work
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.enqueue_worker_work(TEXT, BIGINT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.enqueue_worker_work(
             p_work_item TEXT,
@@ -371,6 +420,7 @@ BEGIN
     -- Procedure: ack_worker
     -- When p_completion_json is NULL, only delete from worker_queue (no enqueue)
     -- This is used when the orchestration is terminal or missing
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.ack_worker(TEXT, TEXT, TEXT, BIGINT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.ack_worker(
             p_lock_token TEXT,
@@ -549,6 +599,7 @@ BEGIN
     -- Procedure: abandon_work_item
     -- Always clear lock_token and locked_until when abandoning.
     -- Use visible_at to control when item becomes available again.
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.abandon_work_item(TEXT, BIGINT, BIGINT, BOOLEAN)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.abandon_work_item(
             p_lock_token TEXT,
@@ -595,6 +646,7 @@ BEGIN
     ', v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: enqueue_orchestrator_work
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.enqueue_orchestrator_work(TEXT, TEXT, TIMESTAMPTZ, BIGINT, TEXT, TEXT, BIGINT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.enqueue_orchestrator_work(
             p_instance_id TEXT,
@@ -616,6 +668,7 @@ BEGIN
     ', v_schema_name, v_schema_name);
 
     -- Procedure: fetch_orchestration_item
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.fetch_orchestration_item(BIGINT, BIGINT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.fetch_orchestration_item(
             p_now_ms BIGINT,
@@ -760,6 +813,7 @@ BEGIN
        v_schema_name, v_schema_name);
 
     -- Procedure: ack_orchestration_item
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.ack_orchestration_item(TEXT, BIGINT, BIGINT, JSONB, JSONB, JSONB, JSONB, JSONB)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.ack_orchestration_item(
             p_lock_token TEXT,
@@ -922,6 +976,7 @@ BEGIN
        v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: abandon_orchestration_item
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.abandon_orchestration_item(TEXT, BIGINT, BIGINT, BOOLEAN)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.abandon_orchestration_item(
             p_lock_token TEXT,
@@ -983,6 +1038,7 @@ BEGIN
     ', v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: renew_orchestration_item_lock
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.renew_orchestration_item_lock(TEXT, BIGINT, BIGINT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.renew_orchestration_item_lock(
             p_lock_token TEXT,
@@ -1016,6 +1072,7 @@ BEGIN
     -- ============================================================================
 
     -- Procedure: fetch_history
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.fetch_history(TEXT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.fetch_history(
             p_instance_id TEXT
@@ -1040,6 +1097,7 @@ BEGIN
     ', v_schema_name, v_schema_name, v_schema_name);
 
     -- Procedure: fetch_history_with_execution
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.fetch_history_with_execution(TEXT, BIGINT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.fetch_history_with_execution(
             p_instance_id TEXT,
@@ -1058,6 +1116,7 @@ BEGIN
     ', v_schema_name, v_schema_name);
 
     -- Procedure: append_history
+    EXECUTE format('DROP FUNCTION IF EXISTS %I.append_history(TEXT, BIGINT, JSONB, BIGINT)', v_schema_name);
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.append_history(
             p_instance_id TEXT,

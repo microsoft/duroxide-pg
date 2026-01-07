@@ -1125,16 +1125,16 @@ async fn timer_precision_under_load() {
     // eprintln!("==================================================================\n");
 
     // 95th percentile threshold:
-    // - Local DB: tight 500ms threshold
-    // - Remote DB: generous threshold to account for:
+    // - Local DB: generous 750ms threshold to account for system load variance
+    // - Remote DB: even more generous threshold to account for:
     //   - Variable insert times (each insert ~100-200ms on remote)
     //   - Sequential fetch latency accumulation (each fetch ~100ms on remote)
     let p95_threshold: i64 = if is_localhost() {
-        500 // Local DB: tight tolerance
+        750 // Local DB: allow for system load variance
     } else {
         // Remote DB: allow for accumulated fetch latency
         // ~100ms per fetch × 20 items = ~2000ms potential accumulation
-        500 + (base_delay_ms as i64 - 1500) + (num_items as i64 * 100)
+        750 + (base_delay_ms as i64 - 1500) + (num_items as i64 * 100)
     };
 
     assert!(

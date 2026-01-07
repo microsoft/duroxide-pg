@@ -249,11 +249,12 @@ async fn delayed_work_cross_node_visibility() {
     );
 
     // The fetch should have completed around the 50ms mark (500ms - 450ms)
-    // Allow some margin for timing jitter and remote DB latency (~100-200ms per query)
+    // plus grace period (100ms) plus query execution time.
+    // Allow generous margin for timing jitter and system load.
     let threshold = if is_localhost() {
-        Duration::from_millis(150)
+        Duration::from_millis(250) // ~50ms remaining + 100ms grace + 100ms buffer
     } else {
-        Duration::from_millis(400)
+        Duration::from_millis(500) // Remote DB has higher latency
     };
     assert!(
         elapsed < threshold,

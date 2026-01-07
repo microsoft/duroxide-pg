@@ -51,7 +51,7 @@ let provider = PostgresProvider::new_with_schema(
 
 ## Features
 
-- Automatic schema migration on startup
+- **Automatic schema migration** on startup - see [Schema Migrations](docs/schema_migrations.md)
 - Connection pooling via sqlx
 - Custom schema support for multi-tenant isolation
 - Full implementation of the Duroxide `Provider` and `ProviderAdmin` traits

@@ -2,7 +2,7 @@
 
 **Purpose:** Track duroxide issues/limitations that require workarounds in duroxide-pg-opt.
 
-**Last Updated:** 2025-01-03
+**Last Updated:** 2025-01-07
 
 **Quick Links:**
 - 🔗 [All duroxide-pg issues](https://github.com/affandar/duroxide/labels/duroxide-pg)
@@ -35,7 +35,50 @@
 
 ## Active Blockers
 
-### 1. Provider Validation Missing Lock Extension Verification
+### 1. Provider Validation Missing Prune for Running Instances Test
+
+| Field | Value |
+|-------|-------|
+| **Issue** | [GitHub #50](https://github.com/affandar/duroxide/issues/50) |
+| **Status** | 🔴 Open |
+| **Fixed In** | TBD |
+| **Workaround Location** | `src/provider.rs` - manual fix applied |
+
+**Problem:**
+The provider validation tests for pruning (`test_prune_options_combinations`, `test_prune_safety`, `test_prune_bulk`) only create instances in `Completed` state. They don't validate that providers correctly handle `Running` instances with old executions from `ContinueAsNew`.
+
+**Root Cause:**
+- Tests use `create_multi_execution_instance` helper that creates Completed instances
+- No test creates a Running instance with multiple executions
+- Providers can pass all tests while incorrectly filtering out Running instances
+
+**Impact:**
+- Bug in duroxide-pg-opt filtered `WHERE e.status IN ('Completed', 'Failed', 'ContinuedAsNew')`
+- Long-running orchestrations using ContinueAsNew would never have old executions pruned
+- All 101 provider validation tests passed despite the bug
+
+**Proposed Fix:**
+Add a provider validation test that:
+1. Creates an instance that remains in Running status
+2. Simulates ContinueAsNew (multiple executions, latest is Running)
+3. Calls `prune_executions_bulk` 
+4. Verifies old executions are pruned from the Running instance
+
+**Current Workaround:**
+- **Fixed in duroxide-pg-opt** - Changed filter from terminal states to `WHERE 1=1`
+- See `src/provider.rs` `prune_executions_bulk` function
+
+**When Fixed - Cleanup Steps:**
+1. Update duroxide dependency in `Cargo.toml`
+2. Verify the new validation test passes
+3. Update this document
+
+**Files to Update:**
+- [ ] None (bug already fixed in duroxide-pg-opt)
+
+---
+
+### 2. Provider Validation Missing Lock Extension Verification
 
 | Field | Value |
 |-------|-------|
@@ -77,7 +120,7 @@ Add validation tests that:
 
 ---
 
-### 2. Idempotency Test Uses Cross-Execution Activity Cancellation
+### 3. Idempotency Test Uses Cross-Execution Activity Cancellation
 
 | Field | Value |
 |-------|-------|
@@ -201,4 +244,5 @@ When updating the duroxide dependency, run through this checklist:
 
 | duroxide-pg-opt | duroxide | Notes |
 |-----------------|----------|-------|
-| 0.1.6 | 0.1.7 | Current - cooperative cancellation support, #31/#32/#34 resolved, #36 pending |
+| 0.1.7 | 0.1.11 | Current - #50 (prune Running fix applied locally), #36/#40 pending |
+| 0.1.6 | 0.1.7 | Previous - cooperative cancellation support, #31/#32/#34 resolved |

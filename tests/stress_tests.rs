@@ -371,6 +371,7 @@ async fn stress_test_parallel_orchestrations_light() {
         worker_concurrency: 2,
         wait_timeout_secs: 60,
     };
+    #[allow(unused_variables)]
     let tasks_per_instance = config.tasks_per_instance;
 
     let result = run_parallel_orchestrations_test_with_config(&factory, config)
@@ -446,7 +447,7 @@ async fn stress_test_high_concurrency() {
         worker_concurrency: 4,
         wait_timeout_secs: 60,
     };
-    let tasks_per_instance = config.tasks_per_instance;
+    let _tasks_per_instance = config.tasks_per_instance;
 
     // Use global snapshotter and compute delta for this test
     #[cfg(feature = "db-metrics")]
@@ -496,6 +497,7 @@ async fn stress_test_high_concurrency_no_longpoll() {
         worker_concurrency: 4,
         wait_timeout_secs: 60,
     };
+    #[allow(unused_variables)]
     let tasks_per_instance = config.tasks_per_instance;
 
     // Use global snapshotter and compute delta for this test
@@ -555,7 +557,7 @@ async fn stress_test_longpoll_comparison_enabled() {
         worker_concurrency: 2,
         wait_timeout_secs: 60,
     };
-    let tasks_per_instance = config.tasks_per_instance;
+    let _tasks_per_instance = config.tasks_per_instance;
 
     // Use global snapshotter and compute delta for this test
     #[cfg(feature = "db-metrics")]
@@ -598,6 +600,7 @@ async fn stress_test_longpoll_comparison_disabled() {
         worker_concurrency: 2,
         wait_timeout_secs: 60,
     };
+    #[allow(unused_variables)]
     let tasks_per_instance = config.tasks_per_instance;
 
     // Use global snapshotter and compute delta for this test

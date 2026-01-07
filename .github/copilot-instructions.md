@@ -53,9 +53,16 @@ See [tests/postgres_provider_test.rs](../tests/postgres_provider_test.rs) `test_
 
 ### Running Tests
 
+Prefer `cargo nextest` over `cargo test` when available for better test output, parallelism, and failure reporting.
+
 ```bash
 # Basic tests (requires PostgreSQL)
-cargo test
+cargo nextest run                    # preferred
+cargo test                           # fallback
+
+# Run specific test file
+cargo nextest run --test postgres_provider_test
+cargo test --test postgres_provider_test
 
 # Stress tests (marked #[ignore], require explicit run)
 ./scripts/run-stress-tests.sh
@@ -64,9 +71,11 @@ cargo test
 ./scripts/run-perf-tests.sh
 
 # Fault injection tests (require feature flag)
+cargo nextest run --test fault_injection_tests --features test-fault-injection --run-ignored ignored-only
 cargo test --test fault_injection_tests --features test-fault-injection -- --ignored
 
 # With metrics for long-poll comparison (single-threaded required)
+cargo nextest run --features db-metrics -j 1
 cargo test --features db-metrics -- --test-threads=1
 ```
 
@@ -89,13 +98,26 @@ All provider operations use schema-qualified stored procedures (e.g., `schema.fe
 
 ### Adding Migrations
 
-1. Create `NNNN_description.sql` in `migrations/`
-2. Use unqualified table names (search_path is set by runner)
-3. Make idempotent with `IF NOT EXISTS` / `IF EXISTS`
-4. Update stored procedures with new parameters if needed
-5. Update `0001_initial_schema.sql` with the complete schema (single source of truth)
+**IMPORTANT**: `0001_initial_schema.sql` is the **baseline schema** and should generally not be modified. All schema changes should be delta migrations (0002+).
 
-> **Note:** For future releases, consider adding migration delta scripts similar to duroxide-pg to support incremental upgrades from previous versions.
+1. Create `NNNN_description.sql` in `migrations/` with incremental changes only
+2. Use `ALTER TABLE` for column additions, `CREATE OR REPLACE FUNCTION` for stored procedure updates
+3. Use unqualified table names (search_path is set by runner)
+4. Make idempotent with `IF NOT EXISTS` / `IF EXISTS` / `DROP ... IF EXISTS`
+5. **Avoid modifying `0001_initial_schema.sql`** - it represents the baseline for existing deployments. However, if modifications are needed for infrastructure reasons (e.g., PostgreSQL limitations like return type changes requiring DROP before CREATE), check with the user first.
+6. **REQUIRED: Create a companion `NNNN_diff.md` file** (see below)
+
+### Migration Diff Files (Required)
+
+Every migration that modifies schema or stored procedures **must** have a companion `NNNN_diff.md` file. This is required because git diffs for SQL migrations only show the new code, not the delta from the previous version.
+
+The diff file should document:
+1. **Summary** - What the migration adds/changes
+2. **Schema Changes** - New tables, columns, indexes
+3. **New/Modified Stored Procedures** - Function signatures and purpose
+4. **Breaking Changes** - Any incompatibilities with previous versions
+
+Example: See [migrations/0002_diff.md](../migrations/0002_diff.md)
 
 ### Time Handling
 
