@@ -1697,13 +1697,11 @@ impl ProviderAdmin for PostgresProvider {
     #[instrument(skip(self), fields(instance = %instance_id), target = "duroxide::providers::postgres")]
     async fn get_parent_id(&self, instance_id: &str) -> Result<Option<String>, ProviderError> {
         let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("get_parent_id"));
-        let result: Result<Option<String>, _> = sqlx::query_scalar(&format!(
-            "SELECT {}.get_parent_id($1)",
-            self.schema_name
-        ))
-        .bind(instance_id)
-        .fetch_one(&*self.pool)
-        .await;
+        let result: Result<Option<String>, _> =
+            sqlx::query_scalar(&format!("SELECT {}.get_parent_id($1)", self.schema_name))
+                .bind(instance_id)
+                .fetch_one(&*self.pool)
+                .await;
 
         match result {
             Ok(parent_id) => Ok(parent_id),
@@ -1712,7 +1710,7 @@ impl ProviderAdmin for PostgresProvider {
                 if err_str.contains("Instance not found") {
                     Err(ProviderError::permanent(
                         "get_parent_id",
-                        format!("Instance not found: {}", instance_id),
+                        format!("Instance not found: {instance_id}"),
                     ))
                 } else {
                     Err(Self::sqlx_to_provider_error("get_parent_id", e))
@@ -1733,7 +1731,10 @@ impl ProviderAdmin for PostgresProvider {
             return Ok(DeleteInstanceResult::default());
         }
 
-        let _timer = DbCallTimer::new(DbOperation::StoredProcedure, Some("delete_instances_atomic"));
+        let _timer = DbCallTimer::new(
+            DbOperation::StoredProcedure,
+            Some("delete_instances_atomic"),
+        );
         let row: Option<(i64, i64, i64, i64)> = sqlx::query_as(&format!(
             "SELECT * FROM {}.delete_instances_atomic($1, $2)",
             self.schema_name
@@ -1744,9 +1745,7 @@ impl ProviderAdmin for PostgresProvider {
         .await
         .map_err(|e| {
             let err_str = e.to_string();
-            if err_str.contains("is Running") {
-                ProviderError::permanent("delete_instances_atomic", err_str)
-            } else if err_str.contains("Orphan detected") {
+            if err_str.contains("is Running") || err_str.contains("Orphan detected") {
                 ProviderError::permanent("delete_instances_atomic", err_str)
             } else {
                 Self::sqlx_to_provider_error("delete_instances_atomic", e)
@@ -1797,7 +1796,7 @@ impl ProviderAdmin for PostgresProvider {
             if ids.is_empty() {
                 return Ok(DeleteInstanceResult::default());
             }
-            let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("${}", i)).collect();
+            let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("${i}")).collect();
             sql.push_str(&format!(
                 " AND i.instance_id IN ({})",
                 placeholders.join(", ")
@@ -1806,19 +1805,31 @@ impl ProviderAdmin for PostgresProvider {
 
         // Add completed_before filter if provided
         if filter.completed_before.is_some() {
-            let param_num = filter.instance_ids.as_ref().map(|ids| ids.len()).unwrap_or(0) + 1;
+            let param_num = filter
+                .instance_ids
+                .as_ref()
+                .map(|ids| ids.len())
+                .unwrap_or(0)
+                + 1;
             sql.push_str(&format!(
-                " AND e.completed_at < TO_TIMESTAMP(${} / 1000.0)",
-                param_num
+                " AND e.completed_at < TO_TIMESTAMP(${param_num} / 1000.0)"
             ));
         }
 
         // Add limit
         let limit = filter.limit.unwrap_or(1000);
-        let limit_param_num = filter.instance_ids.as_ref().map(|ids| ids.len()).unwrap_or(0)
-            + if filter.completed_before.is_some() { 1 } else { 0 }
+        let limit_param_num = filter
+            .instance_ids
+            .as_ref()
+            .map(|ids| ids.len())
+            .unwrap_or(0)
+            + if filter.completed_before.is_some() {
+                1
+            } else {
+                0
+            }
             + 1;
-        sql.push_str(&format!(" LIMIT ${}", limit_param_num));
+        sql.push_str(&format!(" LIMIT ${limit_param_num}"));
 
         // Build and execute query
         let _timer = DbCallTimer::new(DbOperation::Select, None);
@@ -1938,7 +1949,7 @@ impl ProviderAdmin for PostgresProvider {
             if ids.is_empty() {
                 return Ok(PruneResult::default());
             }
-            let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("${}", i)).collect();
+            let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("${i}")).collect();
             sql.push_str(&format!(
                 " AND i.instance_id IN ({})",
                 placeholders.join(", ")
@@ -1947,19 +1958,31 @@ impl ProviderAdmin for PostgresProvider {
 
         // Add completed_before filter if provided
         if filter.completed_before.is_some() {
-            let param_num = filter.instance_ids.as_ref().map(|ids| ids.len()).unwrap_or(0) + 1;
+            let param_num = filter
+                .instance_ids
+                .as_ref()
+                .map(|ids| ids.len())
+                .unwrap_or(0)
+                + 1;
             sql.push_str(&format!(
-                " AND e.completed_at < TO_TIMESTAMP(${} / 1000.0)",
-                param_num
+                " AND e.completed_at < TO_TIMESTAMP(${param_num} / 1000.0)"
             ));
         }
 
         // Add limit
         let limit = filter.limit.unwrap_or(1000);
-        let limit_param_num = filter.instance_ids.as_ref().map(|ids| ids.len()).unwrap_or(0)
-            + if filter.completed_before.is_some() { 1 } else { 0 }
+        let limit_param_num = filter
+            .instance_ids
+            .as_ref()
+            .map(|ids| ids.len())
+            .unwrap_or(0)
+            + if filter.completed_before.is_some() {
+                1
+            } else {
+                0
+            }
             + 1;
-        sql.push_str(&format!(" LIMIT ${}", limit_param_num));
+        sql.push_str(&format!(" LIMIT ${limit_param_num}"));
 
         // Build and execute query
         let _timer = DbCallTimer::new(DbOperation::Select, None);

@@ -3,10 +3,10 @@
 //! Each test in this file reproduces a specific bug that was reported and fixed.
 //! These tests ensure the bugs don't regress.
 
+use duroxide::providers::{Provider, PruneOptions};
 use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::runtime::{self, RuntimeOptions};
 use duroxide::{ActivityContext, Client, OrchestrationContext, OrchestrationRegistry};
-use duroxide::providers::{Provider, PruneOptions};
 use duroxide_pg_opt::PostgresProvider;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
@@ -343,12 +343,12 @@ async fn test_prune_running_instance_prunes_terminal_executions() {
 
     let counter_orch = |ctx: OrchestrationContext, input: String| async move {
         let count: i32 = input.parse().unwrap_or(0);
-        
+
         // Do some work
         ctx.schedule_activity("Work", format!("iteration-{count}"))
             .into_activity()
             .await?;
-        
+
         if count < 3 {
             // Continue as new with incremented counter (creates new execution)
             return ctx.continue_as_new(format!("{}", count + 1)).await;
@@ -357,7 +357,7 @@ async fn test_prune_running_instance_prunes_terminal_executions() {
             // This simulates a long-running orchestration
             ctx.schedule_timer(Duration::from_secs(3600)).await;
         }
-        
+
         Ok(format!("completed-{count}"))
     };
 
@@ -391,10 +391,10 @@ async fn test_prune_running_instance_prunes_terminal_executions() {
     // The orchestration cycles: exec1(ContinuedAsNew) -> exec2(ContinuedAsNew) -> exec3(ContinuedAsNew) -> exec4(Running)
     let timeout = Duration::from_secs(30);
     let deadline = std::time::Instant::now() + timeout;
-    
+
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        
+
         // Check instance info
         if let Ok(info) = admin.get_instance_info(instance_id).await {
             // Execution 4 means we've done 3 ContinueAsNew cycles
@@ -402,7 +402,7 @@ async fn test_prune_running_instance_prunes_terminal_executions() {
                 break;
             }
         }
-        
+
         if std::time::Instant::now() > deadline {
             panic!("Timed out waiting for orchestration to reach execution 4 in Running state");
         }
@@ -415,30 +415,31 @@ async fn test_prune_running_instance_prunes_terminal_executions() {
         "Expected at least 4 executions, got {}",
         executions.len()
     );
-    
+
     // Get info for each execution
     let mut terminal_count = 0;
     let mut running_count = 0;
     for exec_id in &executions {
-        let exec_info = admin.get_execution_info(instance_id, *exec_id).await.unwrap();
+        let exec_info = admin
+            .get_execution_info(instance_id, *exec_id)
+            .await
+            .unwrap();
         if exec_info.status == "Running" {
             running_count += 1;
         } else {
             terminal_count += 1;
         }
     }
-    
+
     assert!(
         terminal_count >= 3,
-        "Expected at least 3 terminal executions (ContinuedAsNew), got {}",
-        terminal_count
+        "Expected at least 3 terminal executions (ContinuedAsNew), got {terminal_count}"
     );
     assert_eq!(
         running_count, 1,
-        "Expected exactly 1 Running execution, got {}",
-        running_count
+        "Expected exactly 1 Running execution, got {running_count}"
     );
-    
+
     // Get current execution ID before prune
     let info_before = admin.get_instance_info(instance_id).await.unwrap();
     let current_exec_before = info_before.current_execution_id;
@@ -446,10 +447,16 @@ async fn test_prune_running_instance_prunes_terminal_executions() {
 
     // Now prune, keeping only 1 execution (the current one)
     let prune_result = admin
-        .prune_executions(instance_id, PruneOptions { keep_last: Some(1), ..Default::default() })
+        .prune_executions(
+            instance_id,
+            PruneOptions {
+                keep_last: Some(1),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
-    
+
     // Should have pruned the terminal executions (at least 3)
     assert!(
         prune_result.executions_deleted >= 3,
@@ -480,7 +487,7 @@ async fn test_prune_running_instance_prunes_terminal_executions() {
         "Expected 1 execution after prune (keep_last=1), got {}",
         executions_after.len()
     );
-    
+
     // The remaining execution should be the current (Running) one
     assert_eq!(
         executions_after[0], current_exec_before,
@@ -499,7 +506,7 @@ async fn test_prune_running_instance_prunes_terminal_executions() {
 #[tokio::test]
 async fn test_prune_executions_bulk_includes_running_instances() {
     use duroxide::providers::InstanceFilter;
-    
+
     let schema = unique_schema_name();
     let database_url = get_database_url();
 
@@ -518,18 +525,18 @@ async fn test_prune_executions_bulk_includes_running_instances() {
 
     let counter_orch = |ctx: OrchestrationContext, input: String| async move {
         let count: i32 = input.parse().unwrap_or(0);
-        
+
         ctx.schedule_activity("Work", format!("iteration-{count}"))
             .into_activity()
             .await?;
-        
+
         if count < 2 {
             return ctx.continue_as_new(format!("{}", count + 1)).await;
         } else {
             // Stay running - wait for an event that will never be raised
             let _: String = ctx.schedule_wait("never_fired").into_event().await;
         }
-        
+
         Ok(format!("completed-{count}"))
     };
 
@@ -561,16 +568,16 @@ async fn test_prune_executions_bulk_includes_running_instances() {
     // Wait for Running state at execution 3
     let timeout = Duration::from_secs(30);
     let deadline = std::time::Instant::now() + timeout;
-    
+
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        
+
         if let Ok(info) = admin.get_instance_info(instance_id).await {
             if info.current_execution_id >= 3 && info.status == "Running" {
                 break;
             }
         }
-        
+
         if std::time::Instant::now() > deadline {
             panic!("Timed out waiting for orchestration to reach execution 3");
         }
@@ -582,7 +589,7 @@ async fn test_prune_executions_bulk_includes_running_instances() {
         executions_before.len() >= 3,
         "Expected at least 3 executions before bulk prune"
     );
-    
+
     let info_before = admin.get_instance_info(instance_id).await.unwrap();
     assert_eq!(info_before.status, "Running");
 
@@ -593,11 +600,14 @@ async fn test_prune_executions_bulk_includes_running_instances() {
                 instance_ids: Some(vec![instance_id.to_string()]),
                 ..Default::default()
             },
-            PruneOptions { keep_last: Some(1), ..Default::default() },
+            PruneOptions {
+                keep_last: Some(1),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
-    
+
     // Key assertion: bulk prune should have processed this Running instance
     assert_eq!(
         prune_result.instances_processed, 1,
@@ -611,7 +621,10 @@ async fn test_prune_executions_bulk_includes_running_instances() {
     // Verify instance still Running with correct execution
     let info_after = admin.get_instance_info(instance_id).await.unwrap();
     assert_eq!(info_after.status, "Running");
-    assert_eq!(info_after.current_execution_id, info_before.current_execution_id);
+    assert_eq!(
+        info_after.current_execution_id,
+        info_before.current_execution_id
+    );
 
     let executions_after = admin.list_executions(instance_id).await.unwrap();
     assert_eq!(executions_after.len(), 1);

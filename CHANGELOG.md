@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-01-06
+
+### Added
+
+- **Instance lifecycle management** (ProviderAdmin trait implementation):
+  - `list_children(instance_id)` - list child instances of a parent orchestration
+  - `get_parent_id(instance_id)` - get parent instance for sub-orchestrations
+  - `delete_instances_atomic(ids, force)` - atomically delete multiple instances with cascade
+  - `delete_instance_bulk(filter)` - bulk delete terminal instances with filtering
+  - `prune_executions(instance_id, options)` - prune old executions keeping recent history
+  - `prune_executions_bulk(filter, options)` - bulk prune across multiple instances
+
+- **New migration 0002**: `0002_add_deletion_and_pruning_support.sql`
+  - Adds `parent_instance_id` column to instances table
+  - Adds `idx_instances_parent` index for efficient child lookups
+  - New stored procedures: `list_children`, `get_parent_id`, `delete_instances_atomic`, `prune_executions`
+  - Modified: `get_instance_info` now returns `parent_instance_id`
+  - Modified: `ack_orchestration_item` now stores `parent_instance_id` from metadata
+
+- 19 new provider validation tests:
+  - Deletion tests (12): `test_delete_terminal_instances`, `test_delete_running_rejected_force_succeeds`,
+    `test_delete_nonexistent_instance`, `test_delete_cleans_queues_and_locks`, `test_cascade_delete_hierarchy`,
+    `test_force_delete_prevents_ack_recreation`, `test_list_children`, `test_delete_get_parent_id`,
+    `test_delete_get_instance_tree`, `test_delete_instances_atomic`, `test_delete_instances_atomic_force`,
+    `test_delete_instances_atomic_orphan_detection`
+  - Prune tests (3): `test_prune_options_combinations`, `test_prune_safety`, `test_prune_bulk`
+  - Bulk deletion tests (4): `test_delete_instance_bulk_filter_combinations`, 
+    `test_delete_instance_bulk_safety_and_limits`, `test_delete_instance_bulk_completed_before_filter`,
+    `test_delete_instance_bulk_cascades_to_children`
+
+- Regression tests for `prune_executions_bulk` bug:
+  - `test_prune_running_instance_prunes_terminal_executions`
+  - `test_prune_executions_bulk_includes_running_instances`
+
+### Fixed
+
+- **Bug fix**: `prune_executions_bulk` now includes Running instances in the query.
+  Previously, Running instances were excluded, preventing pruning of old terminal executions
+  for long-running orchestrations using ContinueAsNew. The stored procedure already protects
+  the current Running execution, so this was unnecessarily restrictive.
+
+### Changed
+
+- Updated to duroxide 0.1.11 from crates.io
+- Provider now passes `parent_instance_id` in metadata to `ack_orchestration_item`
+- Schema migrations documentation added: [docs/schema_migrations.md](docs/schema_migrations.md)
+
+### Notes
+
+- Total validation tests: 101 (82 + 19 lifecycle management)
+- Total regression tests: 4 (new)
+- Migration 0002 is additive and backward-compatible with existing databases
+- Requires duroxide 0.1.11+ for ProviderAdmin lifecycle management features
+
 ## [0.1.8] - 2025-01-03
 
 ### Added
