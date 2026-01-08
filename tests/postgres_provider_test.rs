@@ -247,10 +247,33 @@ mod long_polling_tests {
     use duroxide::provider_validation::long_polling;
 
     // PostgreSQL provider uses short polling (returns immediately when no work)
+    //
+    // STOPGAP: These tests require warmup queries because duroxide's short-poll
+    // validation has a hardcoded 100ms threshold (see duroxide issue #51).
+    // PostgreSQL stored procedure calls take ~70-80ms over network, and first
+    // queries have additional latency from query plan compilation.
+    //
+    // Once duroxide #51 is fixed to make the threshold configurable, remove the
+    // warmup queries and use the standard provider_validation_test! macro.
+    // See: https://github.com/affandar/duroxide/issues/51
     #[tokio::test]
     async fn test_short_poll_returns_immediately() {
         let factory = PostgresProviderFactory::new();
         let provider = factory.create_provider().await;
+        // STOPGAP for duroxide #51: Warm up connection pool and query plan cache
+        // Remove once short_poll_threshold() is configurable via ProviderFactory
+        let _ = provider
+            .fetch_orchestration_item(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::ZERO,
+            )
+            .await;
+        let _ = provider
+            .fetch_orchestration_item(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::ZERO,
+            )
+            .await;
         long_polling::test_short_poll_returns_immediately(&*provider).await;
         factory.cleanup_schema().await;
     }
@@ -259,6 +282,14 @@ mod long_polling_tests {
     async fn test_short_poll_work_item_returns_immediately() {
         let factory = PostgresProviderFactory::new();
         let provider = factory.create_provider().await;
+        // STOPGAP for duroxide #51: Warm up connection pool and query plan cache
+        // Remove once short_poll_threshold() is configurable via ProviderFactory
+        let _ = provider
+            .fetch_work_item(std::time::Duration::from_secs(1), std::time::Duration::ZERO)
+            .await;
+        let _ = provider
+            .fetch_work_item(std::time::Duration::from_secs(1), std::time::Duration::ZERO)
+            .await;
         long_polling::test_short_poll_work_item_returns_immediately(&*provider).await;
         factory.cleanup_schema().await;
     }

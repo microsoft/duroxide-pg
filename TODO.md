@@ -2,6 +2,7 @@
 
 - fetch_orchestration_item review as listed below
 - remove all dead code masked by allow dead code
+- **BLOCKED on duroxide #51**: Short-poll validation tests use warmup workaround due to hardcoded 100ms threshold in `duroxide/src/provider_validation/long_polling.rs`. See [GitHub issue #51](https://github.com/affandar/duroxide/issues/51). Once fixed, remove warmup queries from `tests/postgres_provider_test.rs` and configure `short_poll_threshold()`.
 
 ## fetch_orchestration_item Stored Procedure Efficiency Review
 
