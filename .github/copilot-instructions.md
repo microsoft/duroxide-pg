@@ -1,5 +1,16 @@
 # Duroxide-PG Copilot Instructions
 
+## Important Guidelines
+
+> **DO NOT** commit, push to remote, or publish to crates.io unless explicitly asked by the user.
+> 
+> Always wait for explicit user confirmation before:
+> - Running `git commit`
+> - Pushing commits to remote branches
+> - Creating pull requests
+> - Publishing to crates.io
+> - Any other action that affects version control or external systems
+
 ## Project Overview
 This is a **PostgreSQL provider** for [Duroxide](https://github.com/affandar/duroxide), a durable task orchestration framework for Rust. It implements the `Provider` and `ProviderAdmin` traits, storing orchestration state, history, and work queues in PostgreSQL using stored procedures.
 

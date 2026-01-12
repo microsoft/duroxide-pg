@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.13] - 2026-01-07
+
+### Fixed
+
+- `cleanup_schema()` now drops all stored procedures in addition to tables (fixes #4)
+  - Previously only dropped tables, leaving stored procedures orphaned in public schema
+  - Essential for test isolation when using public schema (DROP SCHEMA CASCADE only runs for custom schemas)
+  - Adds DROP FUNCTION statements for all 22 stored procedures
+- `prune_executions_bulk()` now includes running instances, matching SQLite behavior
+  - Running instances may have old ContinuedAsNew executions that need pruning
+  - The underlying `prune_executions()` safely skips the current execution regardless of status
+
+### Changed
+
+- Update to duroxide 0.1.11 (bug fix for version extraction during completion-only replay)
+  - No breaking changes for provider implementations
+
+### Notes
+
+- Total validation tests: 99 (unchanged)
+
 ## [0.1.12] - 2026-01-06
 
 ### Fixed

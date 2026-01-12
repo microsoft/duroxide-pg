@@ -1,6 +1,20 @@
 # Migration System
 
-This project uses a custom migration system for PostgreSQL schema management. Migrations are stored as SQL files in the `migrations/` directory and are automatically applied when the provider is initialized.
+This project uses a custom migration system for PostgreSQL schema management with **automatic versioning and tracking**. Migrations are stored as SQL files in the `migrations/` directory and are automatically applied when the provider is initialized.
+
+## Schema Versioning
+
+duroxide-pg tracks schema versions automatically:
+
+- Each migration has a **version number** (extracted from filename, e.g., `0001_initial_schema.sql` → version 1)
+- Applied migrations are recorded in a **`_duroxide_migrations` table** within each schema
+- The migration runner **automatically applies pending migrations** on provider startup
+- **Multi-tenant safe**: Each PostgreSQL schema has its own independent migration history
+
+This means you can:
+- Deploy new versions without manual schema updates
+- Roll forward safely (new migrations apply automatically)
+- Inspect migration history via `SELECT * FROM {schema}._duroxide_migrations`
 
 ## Migration Files
 

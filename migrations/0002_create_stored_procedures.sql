@@ -14,14 +14,17 @@ BEGIN
     -- ============================================================================
 
     -- Procedure: cleanup_schema
-    -- Drops all tables in the schema (for testing only)
-    -- SAFETY: Never drops the "public" schema itself, only tables within it
+    -- Drops all tables AND stored procedures in the schema (for testing only)
+    -- SAFETY: Never drops the "public" schema itself, only objects within it
+    -- NOTE: Function drops are essential for public schema cleanup since
+    -- DROP SCHEMA CASCADE only runs for non-public schemas
     EXECUTE format('DROP FUNCTION IF EXISTS %I.cleanup_schema()', v_schema_name);
 
     EXECUTE format('
         CREATE OR REPLACE FUNCTION %I.cleanup_schema()
         RETURNS VOID AS $cleanup$
         BEGIN
+            -- Drop tables first
             DROP TABLE IF EXISTS %I.instances CASCADE;
             DROP TABLE IF EXISTS %I.executions CASCADE;
             DROP TABLE IF EXISTS %I.history CASCADE;
@@ -29,10 +32,41 @@ BEGIN
             DROP TABLE IF EXISTS %I.worker_queue CASCADE;
             DROP TABLE IF EXISTS %I.instance_locks CASCADE;
             DROP TABLE IF EXISTS %I._duroxide_migrations CASCADE;
+            
+            -- Drop all stored procedures (required for public schema cleanup)
+            DROP FUNCTION IF EXISTS %I.cleanup_schema();
+            DROP FUNCTION IF EXISTS %I.list_instances();
+            DROP FUNCTION IF EXISTS %I.list_executions(TEXT);
+            DROP FUNCTION IF EXISTS %I.latest_execution_id(TEXT);
+            DROP FUNCTION IF EXISTS %I.list_instances_by_status(TEXT);
+            DROP FUNCTION IF EXISTS %I.get_instance_info(TEXT);
+            DROP FUNCTION IF EXISTS %I.get_execution_info(TEXT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.get_system_metrics();
+            DROP FUNCTION IF EXISTS %I.get_queue_depths(BIGINT);
+            DROP FUNCTION IF EXISTS %I.enqueue_worker_work(TEXT);
+            DROP FUNCTION IF EXISTS %I.ack_worker(TEXT, TEXT, TEXT);
+            DROP FUNCTION IF EXISTS %I.renew_work_item_lock(TEXT, BIGINT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.fetch_work_item(BIGINT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.abandon_work_item(TEXT, BIGINT, BOOLEAN);
+            DROP FUNCTION IF EXISTS %I.enqueue_orchestrator_work(TEXT, TEXT, TIMESTAMPTZ, TEXT, TEXT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.fetch_orchestration_item(BIGINT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.ack_orchestration_item(TEXT, BIGINT, JSONB, JSONB, JSONB, JSONB);
+            DROP FUNCTION IF EXISTS %I.abandon_orchestration_item(TEXT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.abandon_orchestration_item(TEXT, BIGINT, BOOLEAN);
+            DROP FUNCTION IF EXISTS %I.renew_orchestration_item_lock(TEXT, BIGINT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.fetch_history(TEXT);
+            DROP FUNCTION IF EXISTS %I.fetch_history_with_execution(TEXT, BIGINT);
+            DROP FUNCTION IF EXISTS %I.append_history(TEXT, BIGINT, JSONB);
         END;
         $cleanup$ LANGUAGE plpgsql;
     ', v_schema_name, v_schema_name, v_schema_name, v_schema_name, 
-       v_schema_name, v_schema_name, v_schema_name, v_schema_name);
+       v_schema_name, v_schema_name, v_schema_name, v_schema_name,
+       v_schema_name, v_schema_name, v_schema_name, v_schema_name,
+       v_schema_name, v_schema_name, v_schema_name, v_schema_name,
+       v_schema_name, v_schema_name, v_schema_name, v_schema_name,
+       v_schema_name, v_schema_name, v_schema_name, v_schema_name,
+       v_schema_name, v_schema_name, v_schema_name, v_schema_name,
+       v_schema_name, v_schema_name, v_schema_name);
 
     -- ============================================================================
     -- Simple Query Procedures (Phase 3)
