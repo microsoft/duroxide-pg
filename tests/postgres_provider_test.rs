@@ -280,6 +280,7 @@ mod cancellation_tests {
     provider_validation_test!(cancellation::test_renew_fails_when_entry_deleted);
     provider_validation_test!(cancellation::test_cancelling_nonexistent_activities_is_idempotent);
     provider_validation_test!(cancellation::test_batch_cancellation_deletes_multiple_activities);
+    provider_validation_test!(cancellation::test_same_activity_in_worker_items_and_cancelled_is_noop);
 }
 
 mod long_polling_tests {

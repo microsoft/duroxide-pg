@@ -166,7 +166,7 @@ pub async fn run_single_test(
             handles.push(ctx.schedule_activity("StressTask", format!("task-{i}")));
         }
         for handle in handles {
-            handle.into_activity().await?;
+            handle.await?;
         }
         Ok("done".to_string())
     };
@@ -185,7 +185,7 @@ pub async fn run_single_test(
 
     let rt = duroxide::runtime::Runtime::start_with_options(
         provider.clone(),
-        Arc::new(activity_registry),
+        activity_registry,
         orchestration_registry,
         options,
     )

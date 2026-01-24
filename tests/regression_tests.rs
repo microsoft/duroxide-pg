@@ -97,7 +97,6 @@ async fn test_parallel_suborchestrations_no_deadlock() {
     let child = |ctx: OrchestrationContext, input: String| async move {
         let result = ctx
             .schedule_activity("DoWork", input)
-            .into_activity()
             .await?;
         Ok(result)
     };
@@ -118,8 +117,8 @@ async fn test_parallel_suborchestrations_no_deadlock() {
         let outputs: Vec<String> = results
             .into_iter()
             .filter_map(|out| match out {
-                duroxide::DurableOutput::SubOrchestration(Ok(s)) => Some(s),
-                _ => None,
+                Ok(s) => Some(s),
+                Err(_) => None,
             })
             .collect();
 
@@ -139,7 +138,7 @@ async fn test_parallel_suborchestrations_no_deadlock() {
 
     let rt = runtime::Runtime::start_with_options(
         store.clone(),
-        Arc::new(activity_registry),
+        activity_registry,
         orchestration_registry,
         options,
     )
@@ -226,7 +225,6 @@ async fn test_parallel_suborchestrations_stress() {
 
     let child = |ctx: OrchestrationContext, input: String| async move {
         ctx.schedule_activity("Work", input.clone())
-            .into_activity()
             .await
     };
 
@@ -237,7 +235,7 @@ async fn test_parallel_suborchestrations_stress() {
         let results = ctx.join(futures).await;
         let count = results
             .iter()
-            .filter(|r| matches!(r, duroxide::DurableOutput::SubOrchestration(Ok(_))))
+            .filter(|r| matches!(r, Ok(_)))
             .count();
         Ok(format!("done:{count}"))
     };
@@ -254,7 +252,7 @@ async fn test_parallel_suborchestrations_stress() {
 
     let rt = runtime::Runtime::start_with_options(
         store.clone(),
-        Arc::new(activity_registry),
+        activity_registry,
         orchestration_registry,
         options,
     )
@@ -346,7 +344,6 @@ async fn test_prune_running_instance_prunes_terminal_executions() {
 
         // Do some work
         ctx.schedule_activity("Work", format!("iteration-{count}"))
-            .into_activity()
             .await?;
 
         if count < 3 {
@@ -372,7 +369,7 @@ async fn test_prune_running_instance_prunes_terminal_executions() {
 
     let rt = runtime::Runtime::start_with_options(
         store.clone(),
-        Arc::new(activity_registry),
+        activity_registry,
         orchestration_registry,
         options,
     )
@@ -527,14 +524,13 @@ async fn test_prune_executions_bulk_includes_running_instances() {
         let count: i32 = input.parse().unwrap_or(0);
 
         ctx.schedule_activity("Work", format!("iteration-{count}"))
-            .into_activity()
             .await?;
 
         if count < 2 {
             return ctx.continue_as_new(format!("{}", count + 1)).await;
         } else {
             // Stay running - wait for an event that will never be raised
-            let _: String = ctx.schedule_wait("never_fired").into_event().await;
+            let _: String = ctx.schedule_wait("never_fired").await;
         }
 
         Ok(format!("completed-{count}"))
@@ -551,7 +547,7 @@ async fn test_prune_executions_bulk_includes_running_instances() {
 
     let rt = runtime::Runtime::start_with_options(
         store.clone(),
-        Arc::new(activity_registry),
+        activity_registry,
         orchestration_registry,
         options,
     )

@@ -736,8 +736,7 @@ mod batch_tests {
 
         // Create activities with configurable delay
         let delay = activity_delay_ms;
-        let activity_registry = Arc::new(
-            ActivityRegistry::builder()
+        let activity_registry = ActivityRegistry::builder()
                 .register(
                     "SlowTask",
                     move |_ctx: ActivityContext, input: String| async move {
@@ -745,8 +744,7 @@ mod batch_tests {
                         Ok(format!("processed: {input}"))
                     },
                 )
-                .build(),
-        );
+                .build();
 
         // Simple orchestration that does one activity
         let orchestration_registry = OrchestrationRegistry::builder()
@@ -754,7 +752,6 @@ mod batch_tests {
                 "BatchOrch",
                 |ctx: OrchestrationContext, input: String| async move {
                     ctx.schedule_activity("SlowTask", input)
-                        .into_activity()
                         .await?;
                     Ok("done".to_string())
                 },

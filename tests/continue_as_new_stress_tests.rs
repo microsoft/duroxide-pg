@@ -7,7 +7,6 @@ use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::runtime::{self, OrchestrationStatus};
 use duroxide::{ActivityContext, Client, EventKind, OrchestrationContext, OrchestrationRegistry};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
@@ -56,7 +55,7 @@ async fn concurrent_continue_as_new_chains() {
     let activities = ActivityRegistry::builder().build();
 
     let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activities), orchestrations)
+        runtime::Runtime::start_with_store(store.clone(), activities, orchestrations)
             .await;
 
     let client = Client::new(store.clone());
@@ -268,7 +267,6 @@ async fn instance_actor_pattern_stress_test() {
                     k8s_name: input_data.k8s_name.clone(),
                 },
             )
-            .into_activity_typed::<GetInstanceConnectionOutput>()
             .await
             .map_err(|e| format!("Failed to get instance connection: {e}"))?;
 
@@ -285,7 +283,6 @@ async fn instance_actor_pattern_stress_test() {
 
                 // Wait and retry
                 ctx.schedule_timer(std::time::Duration::from_millis(1000))
-                    .into_timer()
                     .await; // 30 seconds
 
                 input_data.iteration += 1;
@@ -303,7 +300,6 @@ async fn instance_actor_pattern_stress_test() {
                     connection_string: connection_string.clone(),
                 },
             )
-            .into_activity_typed::<TestConnectionOutput>()
             .await;
 
         // Step 4: Determine health status
@@ -330,7 +326,6 @@ async fn instance_actor_pattern_stress_test() {
                     error_message,
                 },
             )
-            .into_activity_typed::<RecordHealthCheckOutput>()
             .await
             .map_err(|e| format!("Failed to record health check: {e}"))?;
 
@@ -343,7 +338,6 @@ async fn instance_actor_pattern_stress_test() {
                     health_status: status.to_string(),
                 },
             )
-            .into_activity_typed::<UpdateInstanceHealthOutput>()
             .await
             .map_err(|e| format!("Failed to update instance health: {e}"))?;
 
@@ -351,7 +345,6 @@ async fn instance_actor_pattern_stress_test() {
 
         // Step 7: Wait before next check
         ctx.schedule_timer(std::time::Duration::from_millis(1000))
-            .into_timer()
             .await; // 30 seconds
 
         ctx.trace_info("Restarting instance actor with continue-as-new");
@@ -376,7 +369,7 @@ async fn instance_actor_pattern_stress_test() {
         .build();
 
     let rt =
-        runtime::Runtime::start_with_store(store.clone(), Arc::new(activities), orchestrations)
+        runtime::Runtime::start_with_store(store.clone(), activities, orchestrations)
             .await;
 
     let client = Client::new(store.clone());
