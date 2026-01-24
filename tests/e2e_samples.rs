@@ -51,13 +51,9 @@ async fn sample_hello_world_fs() {
     // Orchestrator: emit a trace, call Hello twice, return result using input
     let orchestration = |ctx: OrchestrationContext, input: String| async move {
         ctx.trace_info("hello_world started");
-        let res = ctx
-            .schedule_activity("Hello", "Rust")
-            .await?;
+        let res = ctx.schedule_activity("Hello", "Rust").await?;
         ctx.trace_info(format!("hello_world result={res} "));
-        let res1 = ctx
-            .schedule_activity("Hello", input)
-            .await?;
+        let res1 = ctx.schedule_activity("Hello", input).await?;
         ctx.trace_info(format!("hello_world result={res1} "));
         Ok(res1)
     };
@@ -119,21 +115,12 @@ async fn sample_basic_control_flow_fs() {
 
     // Orchestrator: get a flag and branch
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
-        let flag = ctx
-            .schedule_activity("GetFlag", "")
-            .await
-            .unwrap();
+        let flag = ctx.schedule_activity("GetFlag", "").await.unwrap();
         ctx.trace_info(format!("control_flow flag decided = {flag}"));
         if flag == "yes" {
-            Ok(ctx
-                .schedule_activity("SayYes", "")
-                .await
-                .unwrap())
+            Ok(ctx.schedule_activity("SayYes", "").await.unwrap())
         } else {
-            Ok(ctx
-                .schedule_activity("SayNo", "")
-                .await
-                .unwrap())
+            Ok(ctx.schedule_activity("SayNo", "").await.unwrap())
         }
     };
 
@@ -190,10 +177,7 @@ async fn sample_loop_fs() {
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
         let mut acc = String::from("start");
         for i in 0..3 {
-            acc = ctx
-                .schedule_activity("Append", acc)
-                .await
-                .unwrap();
+            acc = ctx.schedule_activity("Append", acc).await.unwrap();
             ctx.trace_info(format!("loop iteration {i} completed acc={acc}"));
         }
         Ok(acc)
@@ -260,20 +244,14 @@ async fn sample_error_handling_fs() {
 
     // Orchestrator: try fragile, on error call Recover
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
-        match ctx
-            .schedule_activity("Fragile", "bad")
-            .await
-        {
+        match ctx.schedule_activity("Fragile", "bad").await {
             Ok(v) => {
                 ctx.trace_info(format!("fragile succeeded value={v}"));
                 Ok(v)
             }
             Err(e) => {
                 ctx.trace_warn(format!("fragile failed error={e}"));
-                let rec = ctx
-                    .schedule_activity("Recover", "")
-                    .await
-                    .unwrap();
+                let rec = ctx.schedule_activity("Recover", "").await.unwrap();
                 if rec != "recovered" {
                     ctx.trace_error(format!("unexpected recovery value={rec}"));
                 }
@@ -661,10 +639,7 @@ async fn sample_sub_orchestration_basic_fs() {
         .build();
 
     let child_upper = |ctx: OrchestrationContext, input: String| async move {
-        let up = ctx
-            .schedule_activity("Upper", input)
-            .await
-            .unwrap();
+        let up = ctx.schedule_activity("Upper", input).await.unwrap();
         Ok(up)
     };
     let parent = |ctx: OrchestrationContext, input: String| async move {
@@ -727,10 +702,7 @@ async fn sample_sub_orchestration_fanout_fs() {
         .build();
 
     let child_sum = |ctx: OrchestrationContext, input: String| async move {
-        let s = ctx
-            .schedule_activity("Add", input)
-            .await
-            .unwrap();
+        let s = ctx.schedule_activity("Add", input).await.unwrap();
         Ok(s)
     };
     let parent = |ctx: OrchestrationContext, _input: String| async move {
@@ -798,23 +770,14 @@ async fn sample_sub_orchestration_chained_fs() {
         .build();
 
     let leaf = |ctx: OrchestrationContext, input: String| async move {
-        Ok(ctx
-            .schedule_activity("AppendX", input)
-            .await
-            .unwrap())
+        Ok(ctx.schedule_activity("AppendX", input).await.unwrap())
     };
     let mid = |ctx: OrchestrationContext, input: String| async move {
-        let r = ctx
-            .schedule_sub_orchestration("Leaf", input)
-            .await
-            .unwrap();
+        let r = ctx.schedule_sub_orchestration("Leaf", input).await.unwrap();
         Ok(format!("{r}-mid"))
     };
     let root = |ctx: OrchestrationContext, input: String| async move {
-        let r = ctx
-            .schedule_sub_orchestration("Mid", input)
-            .await
-            .unwrap();
+        let r = ctx.schedule_sub_orchestration("Mid", input).await.unwrap();
         Ok(format!("root:{r}"))
     };
 
@@ -872,10 +835,7 @@ async fn sample_detached_orchestration_scheduling_fs() {
     let chained = |ctx: OrchestrationContext, input: String| async move {
         ctx.schedule_timer(std::time::Duration::from_millis(5))
             .await;
-        Ok(ctx
-            .schedule_activity("Echo", input)
-            .await
-            .unwrap())
+        Ok(ctx.schedule_activity("Echo", input).await.unwrap())
     };
     let coordinator = |ctx: OrchestrationContext, _input: String| async move {
         ctx.schedule_orchestration("Chained", "W1", "A");
@@ -1070,9 +1030,7 @@ async fn sample_typed_event_fs() {
 
     let activity_registry = ActivityRegistry::builder().build();
     let orch = |ctx: OrchestrationContext, _in: ()| async move {
-        let ack: Ack = ctx
-            .schedule_wait_typed::<Ack>("Ready")
-            .await;
+        let ack: Ack = ctx.schedule_wait_typed::<Ack>("Ready").await;
         Ok::<_, String>(serde_json::to_string(&ack).unwrap())
     };
     let orchestration_registry = OrchestrationRegistry::builder()
@@ -1213,9 +1171,7 @@ async fn sample_mixed_string_and_typed_string_orch_fs() {
         .register("MixedStringOrch", orch)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), activity_registry, orch_reg)
-            .await;
+    let rt = runtime::Runtime::start_with_store(store.clone(), activity_registry, orch_reg).await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-mixed-string", "MixedStringOrch", "")
@@ -1617,9 +1573,7 @@ async fn sample_basic_error_handling_fs() {
     // Simple orchestration that calls the activity
     let orchestration = |ctx: OrchestrationContext, input: String| async move {
         ctx.trace_info("Starting validation");
-        let result = ctx
-            .schedule_activity("ValidateInput", input)
-            .await?;
+        let result = ctx.schedule_activity("ValidateInput", input).await?;
         ctx.trace_info(format!("Validation result: {result}"));
         Ok(result)
     };
@@ -1716,9 +1670,7 @@ async fn sample_nested_function_error_handling_fs() {
             .schedule_activity("ProcessData", data.to_string())
             .await?;
         ctx.trace_info("Starting formatting");
-        let formatted = ctx
-            .schedule_activity("FormatOutput", processed)
-            .await?;
+        let formatted = ctx.schedule_activity("FormatOutput", processed).await?;
         Ok(formatted)
     }
 
@@ -1819,19 +1771,14 @@ async fn sample_error_recovery_fs() {
     let orchestration = |ctx: OrchestrationContext, input: String| async move {
         ctx.trace_info("Starting orchestration");
 
-        match ctx
-            .schedule_activity("ProcessData", input.clone())
-            .await
-        {
+        match ctx.schedule_activity("ProcessData", input.clone()).await {
             Ok(result) => {
                 ctx.trace_info("Processing succeeded");
                 Ok(result)
             }
             Err(e) => {
                 ctx.trace_info("Processing failed, logging error");
-                let _ = ctx
-                    .schedule_activity("LogError", e.clone())
-                    .await;
+                let _ = ctx.schedule_activity("LogError", e.clone()).await;
                 Err(format!("Failed to process '{input}': {e}"))
             }
         }

@@ -737,22 +737,21 @@ mod batch_tests {
         // Create activities with configurable delay
         let delay = activity_delay_ms;
         let activity_registry = ActivityRegistry::builder()
-                .register(
-                    "SlowTask",
-                    move |_ctx: ActivityContext, input: String| async move {
-                        tokio::time::sleep(Duration::from_millis(delay)).await;
-                        Ok(format!("processed: {input}"))
-                    },
-                )
-                .build();
+            .register(
+                "SlowTask",
+                move |_ctx: ActivityContext, input: String| async move {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    Ok(format!("processed: {input}"))
+                },
+            )
+            .build();
 
         // Simple orchestration that does one activity
         let orchestration_registry = OrchestrationRegistry::builder()
             .register(
                 "BatchOrch",
                 |ctx: OrchestrationContext, input: String| async move {
-                    ctx.schedule_activity("SlowTask", input)
-                        .await?;
+                    ctx.schedule_activity("SlowTask", input).await?;
                     Ok("done".to_string())
                 },
             )

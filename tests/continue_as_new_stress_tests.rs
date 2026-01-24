@@ -54,9 +54,7 @@ async fn concurrent_continue_as_new_chains() {
 
     let activities = ActivityRegistry::builder().build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), activities, orchestrations)
-            .await;
+    let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
 
     let client = Client::new(store.clone());
 
@@ -368,9 +366,7 @@ async fn instance_actor_pattern_stress_test() {
         .register_typed("cms-update-instance-health", update_instance_health)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), activities, orchestrations)
-            .await;
+    let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
 
     let client = Client::new(store.clone());
 

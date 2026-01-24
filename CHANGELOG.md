@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-01-23
+
+### Changed
+
+- **Updated duroxide dependency from 0.1.11 to 0.1.12**
+  - Significant API changes from duroxide 0.1.12:
+    - `ActivityRegistry` now passed directly (no longer wrapped in `Arc`)
+    - `DurableFuture` is directly awaitable (removed `into_activity()`, `into_timer()`, `into_sub_orchestration()`, `into_event()`)
+    - `DurableOutput` enum replaced with `Either2`/`Either3` for select operations
+    - `ctx.select(vec![...])` replaced with `ctx.select2()`/`ctx.select3()`
+    - `ctx.join()` now returns `Vec<T>` directly (not `Vec<DurableOutput>`)
+  - New validation test: `test_same_activity_in_worker_items_and_cancelled_is_noop`
+
+### Fixed
+
+- Updated all E2E test files to use new duroxide 0.1.12 API patterns
+- Fixed clippy warnings in test files
+
 ## [0.1.9] - 2026-01-06
 
 ### Added
