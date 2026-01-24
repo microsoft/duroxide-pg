@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11] - 2026-01-24
+
+### Changed
+
+- **Updated duroxide dependency from 0.1.11 to 0.1.13**
+  - duroxide 0.1.12 changes:
+    - Unobserved future cancellation with proper `DurableFuture` drop semantics
+    - Simplified `ActivityRegistry` API (takes value instead of Arc)
+    - Improved dispatcher backoff logic
+  - duroxide 0.1.13 changes:
+    - **Breaking:** `utcnow()` renamed to `utc_now()` for Rust naming convention
+    - System calls (`new_guid()`, `utc_now()`) reimplemented as regular activities
+    - Reserved activity prefix `__duroxide_syscall:` for builtin activities
+    - Fixes determinism bugs where syscalls returned fresh values on replay
+
+### Fixed
+
+- Updated `tests/e2e_samples.rs` to use `ctx.utc_now()` (renamed from `ctx.utcnow()`)
+
+### Improved
+
+- Enhanced `prompts/duroxide-update-sync.md` with:
+  - Safety guidelines for not pushing without permission
+  - GitHub release check step
+  - Run ALL tests (not just validation tests)
+  - STOPGAP marker search step
+  - Provider trait changes checklist
+  - Quick reference commands section
+
 ## [0.1.10] - 2026-01-23
 
 ### Changed

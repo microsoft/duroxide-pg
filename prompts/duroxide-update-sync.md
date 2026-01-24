@@ -4,6 +4,20 @@
 
 ---
 
+## Important Guidelines
+
+> **DO NOT** push to any remote git repository or publish to crates.io unless explicitly asked by the user.
+> 
+> **DO** ask the user for confirmation before:
+> - Pushing commits to remote branches
+> - Creating pull requests  
+> - Publishing to crates.io
+> - Any other action that affects external systems
+>
+> When in doubt about how to proceed, **ask the user** for guidance.
+
+---
+
 ## When to Use
 
 Use this prompt when:
@@ -25,19 +39,25 @@ grep -A2 'duroxide' Cargo.toml
 
 Note the current version specification.
 
-### Step 2: Update Dependency
+### Step 2: Check for New Releases
+
+```bash
+gh release list --repo affandar/duroxide --limit 5
+```
+
+### Step 3: Update Dependency
 
 ```bash
 cargo update duroxide && cargo fetch
 ```
 
-### Step 3: Locate New Source
+### Step 4: Locate New Source
 
 ```bash
 find ~/.cargo/registry/src -type d -name "duroxide-*" | sort -V | tail -1
 ```
 
-### Step 4: Read CHANGELOG.md
+### Step 5: Read CHANGELOG.md
 
 Read the CHANGELOG.md from the duroxide source to understand what changed:
 
@@ -53,7 +73,7 @@ cat $(find ~/.cargo/registry/src -type d -name "duroxide-*" | sort -V | tail -1)
 - Changes to stress test infrastructure
 - Memory optimizations or API changes
 
-### Step 5: Read Provider Implementation Guide
+### Step 6: Read Provider Implementation Guide
 
 ```bash
 cat $(find ~/.cargo/registry/src -type d -name "duroxide-*" | sort -V | tail -1)/docs/provider-implementation-guide.md
@@ -66,7 +86,7 @@ cat $(find ~/.cargo/registry/src -type d -name "duroxide-*" | sort -V | tail -1)
 - Schema changes needed
 - Instance creation or locking behavior changes
 
-### Step 6: Read Provider Testing Guide
+### Step 7: Read Provider Testing Guide
 
 ```bash
 cat $(find ~/.cargo/registry/src -type d -name "duroxide-*" | sort -V | tail -1)/docs/provider-testing-guide.md
@@ -74,11 +94,11 @@ cat $(find ~/.cargo/registry/src -type d -name "duroxide-*" | sort -V | tail -1)
 
 **Key things to check:**
 - New validation tests to add
-- Updated test counts (e.g., "62 tests" → "64 tests")
+- Updated test counts (e.g., "92 tests" → "95 tests")
 - Changes to `ProviderFactory` or `ProviderStressFactory` traits
 - New stress test scenarios
 
-### Step 7: Verify Build
+### Step 8: Verify Build
 
 ```bash
 cargo build
@@ -91,30 +111,77 @@ Check for:
 
 If code changes are needed, implement them. If migrations are needed:
 1. Create new migration file `migrations/NNNN_description.sql`
-2. Update `0001_initial_schema.sql` with the complete schema (this is the single source of truth)
-3. **Note:** For future releases, consider adding migration delta scripts similar to duroxide-pg to support incremental upgrades
+2. Create companion diff file `migrations/NNNN_diff.md` (see existing examples)
+3. **Note:** `0001_initial_schema.sql` is the baseline schema; avoid modifying it
 
-### Step 8: Run Validation Tests
+### Step 9: Run ALL Tests
+
+**IMPORTANT:** Run the complete test suite, not just validation tests.
 
 ```bash
-cargo test --test postgres_provider_test -- --nocapture
+cargo nextest run
 ```
 
+This runs:
+- Provider validation tests (`postgres_provider_test.rs`) 
+- E2E sample tests (`e2e_samples.rs`)
+- Basic tests (`basic_tests.rs`)
+- Regression tests (`regression_tests.rs`)
+- Long-poll tests (`longpoll_tests.rs`)
+- Multi-node tests (`multi_node_tests.rs`)
+- Any other test files
+
 Check for:
+- Compilation errors from API changes (e.g., renamed methods)
 - New tests that need wrappers added
 - Failing tests indicating behavioral changes
 - Removed tests that should be cleaned up
 
-### Step 9: Generate Summary Report
+If tests fail due to breaking changes (like renamed APIs), fix them before proceeding.
+
+### Step 10: Search for STOPGAP Markers
+
+```bash
+grep -rn "STOPGAP\|BLOCKED\|TODO.*duroxide" --include="*.rs" .
+```
+
+For each marker, check if the related issue is now fixed and if cleanup can be performed.
+
+### Step 11: Generate Summary Report
 
 After completing the above, provide a summary with:
 
 1. **Version Change:** `X.Y.Z` → `A.B.C`
 2. **Breaking Changes:** List any breaking changes affecting this provider
-3. **New Features:** Features that could be leveraged
-4. **New Tests:** New validation tests to add (with count)
-5. **Required Code Changes:** Specific changes needed in duroxide-pg-opt
-6. **Action Items:** Prioritized list of tasks
+3. **Code Changes Made:** Any fixes applied (e.g., API renames)
+4. **New Features:** Features that could be leveraged
+5. **New Tests:** New validation tests to add (with count)
+6. **Test Results:** Full test suite results (passed/failed/skipped)
+7. **Action Items:** Prioritized list of remaining tasks
+
+---
+
+## Provider Trait Changes Checklist
+
+When duroxide updates the Provider trait:
+
+1. **New methods added:**
+   - [ ] Implement in `src/provider.rs`
+   - [ ] Add corresponding stored procedure in `migrations/` if needed
+   - [ ] Create migration diff file (`NNNN_diff.md`)
+
+2. **Method signature changes:**
+   - [ ] Update implementation in `src/provider.rs`
+   - [ ] Update stored procedure if return type changed
+   - [ ] Check all usages in tests
+
+3. **New validation tests:**
+   - [ ] Add to `tests/postgres_provider_test.rs`
+   - [ ] Use `provider_validation_test!` macro
+
+4. **API renames (like `utcnow()` → `utc_now()`):**
+   - [ ] Update all test files that use the renamed API
+   - [ ] Check `tests/e2e_samples.rs` and other test files
 
 ---
 
@@ -123,34 +190,61 @@ After completing the above, provide a summary with:
 ```markdown
 ## Duroxide Update Summary
 
-**Version Change:** 0.1.5 → 0.1.6
+**Version Change:** 0.1.11 → 0.1.13
 
 ### Breaking Changes
-- None
+- `utcnow()` renamed to `utc_now()` (Rust naming convention)
+
+### Code Changes Made
+- Fixed `tests/e2e_samples.rs`: `ctx.utcnow()` → `ctx.utc_now()`
 
 ### New Features
-- Large payload stress test
-- `HistoryManager` memory optimizations (full_history_len, is_full_history_empty, full_history_iter)
+- System calls reimplemented as regular activities
+- Reserved activity prefix `__duroxide_syscall:`
 
 ### New Validation Tests
-- Count: 62 (unchanged from previous)
+- Count: 102 (unchanged from previous)
 - New tests: None
 
-### Required Code Changes
-- None required for compatibility
+### Test Results
+- **Total:** 212 tests
+- **Passed:** 212 ✅
+- **Failed:** 0
+- **Skipped:** 20 (stress/perf tests)
 
 ### Action Items
 1. ✅ Update Cargo.lock (done)
-2. ⏳ Consider adding large payload stress test to pg-stress
-3. ⏳ Review memory optimization patterns for applicability
+2. ✅ Fix breaking API changes (done)
+3. ⏳ Bump duroxide-pg-opt version
+4. ⏳ Update CHANGELOG.md
 ```
 
 ---
 
-## Quick One-Liner
-
-For quick version check without full sync:
+## Quick Reference
 
 ```bash
+# Check duroxide version in Cargo.lock
+grep -A1 'name = "duroxide"' Cargo.lock | head -2
+
+# Find all duroxide trait implementations
+grep -n "impl.*Provider.*for PostgresProvider" src/provider.rs
+
+# Count validation tests
+grep -c "provider_validation_test" tests/postgres_provider_test.rs
+
+# Run specific test module
+cargo nextest run atomicity_tests
+
+# Run all tests (RECOMMENDED)
+cargo nextest run
+
+# Run just validation tests
+cargo nextest run --test postgres_provider_test
+
+# Quick version check without full sync
 cargo update duroxide --dry-run 2>&1 | grep duroxide
+
+# Search for workarounds that might be cleanable
+grep -rn "STOPGAP\|BLOCKED\|TODO.*duroxide" --include="*.rs" .
 ```
