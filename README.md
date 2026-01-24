@@ -58,12 +58,11 @@ let provider = PostgresProvider::new_with_schema(
 - Poison message detection with attempt count tracking
 - Lock renewal for long-running orchestrations and activities
 
-## Latest Release (0.1.13)
+## Latest Release (0.1.14)
 
-- Update to duroxide 0.1.12 with simplified future API
-- `DurableFuture` now awaitable directly (no `.into_activity()` needed)
-- `ctx.select2()` replaces `ctx.select(vec![...])`
-- 99 provider validation tests + 25 e2e sample tests passing
+- Update to duroxide 0.1.13 (system calls reimplemented as regular activities)
+- API fix: `utcnow()` renamed to `utc_now()` (Rust naming convention)
+- 135 provider validation tests passing
 - See [CHANGELOG.md](CHANGELOG.md) for full version history
 
 ## License

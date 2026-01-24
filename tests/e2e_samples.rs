@@ -544,7 +544,7 @@ async fn sample_system_activities_fs() {
     let activity_registry = ActivityRegistry::builder().build();
 
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
-        let now = ctx.utcnow().await?;
+        let now = ctx.utc_now().await?;
         let now_ms = now
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
