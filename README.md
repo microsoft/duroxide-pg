@@ -58,10 +58,10 @@ let provider = PostgresProvider::new_with_schema(
 - Poison message detection with attempt count tracking
 - Lock renewal for long-running orchestrations and activities
 
-## Latest Release (0.1.14)
+## Latest Release (0.1.15)
 
-- Update to duroxide 0.1.13 (system calls reimplemented as regular activities)
-- API fix: `utcnow()` renamed to `utc_now()` (Rust naming convention)
+- Update to duroxide 0.1.14 (fixes fire-and-forget orchestration replay bug)
+- Upstream fix: `ctx.schedule_orchestration()` now correctly records history events
 - 135 provider validation tests passing
 - See [CHANGELOG.md](CHANGELOG.md) for full version history
 

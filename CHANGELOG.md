@@ -5,17 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.14] - 2026-01-24
+## [0.1.15] - 2026-01-24
 
 ### Changed
 
-- Update to duroxide 0.1.13
+- Update to duroxide 0.1.14
+
+### Fixed
+
+- Upstream fix: fire-and-forget orchestrations (`ctx.schedule_orchestration()`) now correctly record `OrchestrationChained` events in history
+  - Previously, detached orchestrations followed by activities would fail replay with nondeterminism error
+  - This was a duroxide bug fixed in 0.1.14
+
+### Notes
+
+- Total validation tests: 135 (unchanged)
+- duroxide-pg 0.1.14 yanked (depended on yanked duroxide 0.1.13)
+
+## [0.1.14] - 2026-01-24 [YANKED]
+
+### Changed
+
+- Update to duroxide 0.1.13 (yanked)
 - `utcnow()` renamed to `utc_now()` in test files (breaking API change in duroxide)
 
 ### Notes
 
 - Total validation tests: 135 (unchanged)
 - duroxide 0.1.13 reimplements system calls as regular activities, simplifying replay
+- **YANKED:** Depends on yanked duroxide 0.1.13
 
 ## [0.1.13] - 2026-01-24
 
