@@ -372,6 +372,7 @@ mod deletion_tests {
     provider_validation_test!(deletion::test_delete_instances_atomic);
     provider_validation_test!(deletion::test_delete_instances_atomic_force);
     provider_validation_test!(deletion::test_delete_instances_atomic_orphan_detection);
+    provider_validation_test!(deletion::test_stale_activity_after_delete_recreate);
 }
 
 mod prune_tests {

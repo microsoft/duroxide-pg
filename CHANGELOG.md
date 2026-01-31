@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.13] - 2026-01-30
+
+### Changed
+
+- **Updated duroxide dependency from 0.1.14 to 0.1.15**
+  - duroxide 0.1.15 changes:
+    - Simplified metrics facade with consistent atomic counters
+    - Code coverage improvements to 91.9%
+    - New code coverage guide and Copilot skill
+
+### Added
+
+- New validation test: `deletion::test_stale_activity_after_delete_recreate`
+  - Tests that stale activity completion after delete+recreate doesn't corrupt the new instance
+
+### Internal
+
+- Total validation tests: 103 (up from 102)
+- All 213 tests pass
+
 ## [0.1.12] - 2026-01-24
 
 ### Changed
