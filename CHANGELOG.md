@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.17] - 2026-01-30
+
+### Changed
+
+- Update to duroxide 0.1.15
+
+### Fixed
+
+- **CRITICAL:** Fix `ack_orchestration_item` cancellation ordering
+  - Worker items are now inserted BEFORE cancelled activities are deleted
+  - Enables "schedule-then-cancel" pattern where an activity is both scheduled AND cancelled in the same call
+  - Previously, activities scheduled and cancelled in the same turn would remain in the queue
+
+### Added
+
+- Migration 0011: `0011_fix_cancellation_ordering.sql`
+- 2 new cancellation validation tests from duroxide 0.1.15:
+  - `test_same_activity_in_worker_items_and_cancelled_is_noop`
+  - `test_stale_activity_after_delete_recreate`
+
+### Notes
+
+- Total validation tests: 101 (down from 135 - duroxide 0.1.15 consolidated some tests)
+
 ## [0.1.16] - 2026-01-25
 
 ### Fixed
