@@ -58,11 +58,10 @@ let provider = PostgresProvider::new_with_schema(
 - Poison message detection with attempt count tracking
 - Lock renewal for long-running orchestrations and activities
 
-## Latest Release (0.1.17)
+## Latest Release (0.1.18)
 
-- Update to duroxide 0.1.15
-- Fix cancellation ordering: worker items inserted before cancelled activities deleted
-- Supports "schedule-then-cancel" pattern for activity futures
+- Update to duroxide 0.1.16
+- Supports new `ActivityCancelRequested` and `SubOrchestrationCancelRequested` history events
 - 101 provider validation tests passing
 - See [CHANGELOG.md](CHANGELOG.md) for full version history
 
