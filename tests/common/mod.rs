@@ -165,6 +165,7 @@ pub async fn test_create_execution(
         .fetch_orchestration_item(
             std::time::Duration::from_secs(30),
             std::time::Duration::ZERO,
+            None,
         ) // 30 second lock timeout
         .await
         .map_err(|e| e.message.clone())?

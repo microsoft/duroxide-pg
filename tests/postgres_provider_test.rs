@@ -1,8 +1,9 @@
 use std::sync::{Arc, Once};
 
 use duroxide::provider_validation::{
-    atomicity, cancellation, error_handling, instance_creation, instance_locking, lock_expiration,
-    management, multi_execution, queue_semantics, deletion, prune, bulk_deletion,
+    atomicity, cancellation, capability_filtering, error_handling, instance_creation,
+    instance_locking, lock_expiration, management, multi_execution, queue_semantics, deletion,
+    prune, bulk_deletion,
 };
 use duroxide::provider_validations::ProviderFactory;
 use duroxide::providers::Provider;
@@ -119,6 +120,43 @@ impl ProviderFactory for PostgresProviderFactory {
 
     fn lock_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.lock_timeout_ms)
+    }
+
+    async fn corrupt_instance_history(&self, instance: &str) {
+        let schema = self.current_schema_name.lock().unwrap().clone().unwrap();
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&self.database_url)
+            .await
+            .expect("Failed to connect for corruption");
+
+        let query = format!(
+            "UPDATE {schema}.history SET event_data = '{{\"garbage\": true}}' WHERE instance_id = $1"
+        );
+        sqlx::query(&query)
+            .bind(instance)
+            .execute(&pool)
+            .await
+            .expect("Failed to corrupt history");
+    }
+
+    async fn get_max_attempt_count(&self, instance: &str) -> u32 {
+        let schema = self.current_schema_name.lock().unwrap().clone().unwrap();
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&self.database_url)
+            .await
+            .expect("Failed to connect for attempt count");
+
+        let query = format!(
+            "SELECT COALESCE(MAX(attempt_count), 0) FROM {schema}.orchestrator_queue WHERE instance_id = $1"
+        );
+        let count: (i32,) = sqlx::query_as(&query)
+            .bind(instance)
+            .fetch_one(&pool)
+            .await
+            .expect("Failed to get attempt count");
+        count.0 as u32
     }
 }
 
@@ -266,12 +304,14 @@ mod long_polling_tests {
             .fetch_orchestration_item(
                 std::time::Duration::from_secs(1),
                 std::time::Duration::ZERO,
+                None,
             )
             .await;
         let _ = provider
             .fetch_orchestration_item(
                 std::time::Duration::from_secs(1),
                 std::time::Duration::ZERO,
+                None,
             )
             .await;
         long_polling::test_short_poll_returns_immediately(&*provider).await;
@@ -357,4 +397,29 @@ mod bulk_deletion_tests {
     provider_validation_test!(bulk_deletion::test_delete_instance_bulk_safety_and_limits);
     provider_validation_test!(bulk_deletion::test_delete_instance_bulk_completed_before_filter);
     provider_validation_test!(bulk_deletion::test_delete_instance_bulk_cascades_to_children);
+}
+
+mod capability_filtering_tests {
+    use super::*;
+
+    provider_validation_test!(capability_filtering::test_fetch_with_filter_none_returns_any_item);
+    provider_validation_test!(capability_filtering::test_fetch_with_compatible_filter_returns_item);
+    provider_validation_test!(capability_filtering::test_fetch_with_incompatible_filter_skips_item);
+    provider_validation_test!(capability_filtering::test_fetch_filter_skips_incompatible_selects_compatible);
+    provider_validation_test!(capability_filtering::test_fetch_filter_does_not_lock_skipped_instances);
+    provider_validation_test!(capability_filtering::test_fetch_filter_null_pinned_version_always_compatible);
+    provider_validation_test!(capability_filtering::test_fetch_filter_boundary_versions);
+    provider_validation_test!(capability_filtering::test_pinned_version_stored_via_ack_metadata);
+    provider_validation_test!(capability_filtering::test_pinned_version_immutable_across_ack_cycles);
+    provider_validation_test!(capability_filtering::test_continue_as_new_execution_gets_own_pinned_version);
+    provider_validation_test!(capability_filtering::test_filter_with_empty_supported_versions_returns_nothing);
+    provider_validation_test!(capability_filtering::test_concurrent_filtered_fetch_no_double_lock);
+    provider_validation_test!(capability_filtering::test_ack_stores_pinned_version_via_metadata_update);
+    provider_validation_test!(capability_filtering::test_provider_updates_pinned_version_when_told);
+    provider_validation_test!(capability_filtering::test_fetch_corrupted_history_filtered_vs_unfiltered);
+    provider_validation_test!(capability_filtering::test_fetch_deserialization_error_increments_attempt_count);
+    provider_validation_test!(capability_filtering::test_fetch_deserialization_error_eventually_reaches_poison);
+    provider_validation_test!(capability_filtering::test_fetch_filter_applied_before_history_deserialization);
+    provider_validation_test!(capability_filtering::test_fetch_single_range_only_uses_first_range);
+    provider_validation_test!(capability_filtering::test_ack_appends_event_to_corrupted_history);
 }

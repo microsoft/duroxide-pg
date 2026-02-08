@@ -222,6 +222,7 @@ async fn test_enqueue_for_orchestrator() {
         .fetch_orchestration_item(
             std::time::Duration::from_secs(30),
             std::time::Duration::ZERO,
+            None,
         ) // 30 second lock timeout
         .await
         .expect("fetch_orchestration_item should succeed")
@@ -365,6 +366,7 @@ async fn test_fetch_orchestration_item_empty_queue() {
         .fetch_orchestration_item(
             std::time::Duration::from_secs(30),
             std::time::Duration::ZERO,
+            None,
         ) // 30 second lock timeout
         .await
         .expect("fetch should succeed");
@@ -471,6 +473,7 @@ async fn test_list_instances_and_executions() {
             .fetch_orchestration_item(
                 std::time::Duration::from_secs(30),
                 std::time::Duration::ZERO,
+                None,
             ) // 30 second lock timeout
             .await
             .expect("fetch_orchestration_item should succeed")

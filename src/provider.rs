@@ -1,9 +1,9 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use duroxide::providers::{
-    DeleteInstanceResult, ExecutionInfo, ExecutionMetadata, InstanceFilter, InstanceInfo,
-    OrchestrationItem, Provider, ProviderAdmin, ProviderError, PruneOptions, PruneResult,
-    QueueDepths, ScheduledActivityIdentifier, SystemMetrics, WorkItem,
+    DeleteInstanceResult, DispatcherCapabilityFilter, ExecutionInfo, ExecutionMetadata,
+    InstanceFilter, InstanceInfo, OrchestrationItem, Provider, ProviderAdmin, ProviderError,
+    PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier, SystemMetrics, WorkItem,
 };
 use duroxide::Event;
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
@@ -182,6 +182,7 @@ impl Provider for PostgresProvider {
         &self,
         lock_timeout: Duration,
         _poll_timeout: Duration,
+        filter: Option<&DispatcherCapabilityFilter>,
     ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
         let start = std::time::Instant::now();
 
@@ -191,6 +192,20 @@ impl Provider for PostgresProvider {
         // Convert Duration to milliseconds
         let lock_timeout_ms = lock_timeout.as_millis() as i64;
         let mut _last_error: Option<ProviderError> = None;
+
+        // Extract version filter from capability filter
+        let (min_packed, max_packed) = if let Some(f) = filter {
+            if let Some(range) = f.supported_duroxide_versions.first() {
+                let min = range.min.major as i64 * 1_000_000 + range.min.minor as i64 * 1_000 + range.min.patch as i64;
+                let max = range.max.major as i64 * 1_000_000 + range.max.minor as i64 * 1_000 + range.max.patch as i64;
+                (Some(min), Some(max))
+            } else {
+                // Empty supported_duroxide_versions = supports nothing
+                return Ok(None);
+            }
+        } else {
+            (None, None)
+        };
 
         for attempt in 0..=MAX_RETRIES {
             let now_ms = Self::now_millis();
@@ -208,11 +223,13 @@ impl Provider for PostgresProvider {
                 )>,
                 SqlxError,
             > = sqlx::query_as(&format!(
-                "SELECT * FROM {}.fetch_orchestration_item($1, $2)",
+                "SELECT * FROM {}.fetch_orchestration_item($1, $2, $3, $4)",
                 self.schema_name
             ))
             .bind(now_ms)
             .bind(lock_timeout_ms)
+            .bind(min_packed)
+            .bind(max_packed)
             .fetch_optional(&*self.pool)
             .await;
 
@@ -250,12 +267,19 @@ impl Provider for PostgresProvider {
                 attempt_count,
             )) = row
             {
-                let history: Vec<Event> = serde_json::from_value(history_json).map_err(|e| {
-                    ProviderError::permanent(
-                        "fetch_orchestration_item",
-                        format!("Failed to deserialize history: {e}"),
-                    )
-                })?;
+                let (history, history_error) = match serde_json::from_value::<Vec<Event>>(history_json) {
+                    Ok(h) => (h, None),
+                    Err(e) => {
+                        let error_msg = format!("Failed to deserialize history: {e}");
+                        warn!(
+                            target = "duroxide::providers::postgres",
+                            instance = %instance_id,
+                            error = %error_msg,
+                            "History deserialization failed, returning item with history_error"
+                        );
+                        (vec![], Some(error_msg))
+                    }
+                };
 
                 let messages: Vec<WorkItem> =
                     serde_json::from_value(messages_json).map_err(|e| {
@@ -287,6 +311,7 @@ impl Provider for PostgresProvider {
                         version: orchestration_version,
                         history,
                         messages,
+                        history_error,
                     },
                     lock_token,
                     attempt_count as u32,
@@ -368,6 +393,13 @@ impl Provider for PostgresProvider {
             "status": metadata.status,
             "output": metadata.output,
             "parent_instance_id": metadata.parent_instance_id,
+            "pinned_duroxide_version": metadata.pinned_duroxide_version.as_ref().map(|v| {
+                serde_json::json!({
+                    "major": v.major,
+                    "minor": v.minor,
+                    "patch": v.patch,
+                })
+            }),
         });
 
         // Serialize cancelled activities for lock stealing
@@ -384,11 +416,13 @@ impl Provider for PostgresProvider {
         let cancelled_activities_json = serde_json::Value::Array(cancelled_activities_json);
 
         for attempt in 0..=MAX_RETRIES {
+            let now_ms = Self::now_millis();
             let result = sqlx::query(&format!(
-                "SELECT {}.ack_orchestration_item($1, $2, $3, $4, $5, $6, $7)",
+                "SELECT {}.ack_orchestration_item($1, $2, $3, $4, $5, $6, $7, $8)",
                 self.schema_name
             ))
             .bind(lock_token)
+            .bind(now_ms)
             .bind(execution_id as i64)
             .bind(&history_delta_json)
             .bind(&worker_items_json)

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.19] - 2026-02-09
+
+- Updated duroxide dependency from 0.1.16 to 0.1.17
+- **Provider Capability Filtering (Phase 1):** SQL-level version filtering before lock acquisition
+  - `fetch_orchestration_item` now accepts `DispatcherCapabilityFilter` parameter
+  - New `duroxide_version_major/minor/patch` columns on `executions` table
+  - Pinned version stored via `ack_orchestration_item` metadata
+  - NULL versions treated as always compatible (backward compat)
+- **History deserialization contract:** History errors now surface via `history_error` field
+  instead of returning `ProviderError`, enabling poison message detection
+- Migration 0013: `add_capability_filtering` (additive, safe for rolling upgrades)
+- Total validation tests: 120 (up from 100)
+
 ## [0.1.18] - 2026-02-03
 
 ### Changed
