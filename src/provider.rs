@@ -1,9 +1,9 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use duroxide::providers::{
-    DeleteInstanceResult, ExecutionInfo, ExecutionMetadata, InstanceFilter, InstanceInfo,
-    OrchestrationItem, Provider, ProviderAdmin, ProviderError, PruneOptions, PruneResult,
-    QueueDepths, ScheduledActivityIdentifier, SystemMetrics, WorkItem,
+    DeleteInstanceResult, DispatcherCapabilityFilter, ExecutionInfo, ExecutionMetadata,
+    InstanceFilter, InstanceInfo, OrchestrationItem, Provider, ProviderAdmin, ProviderError,
+    PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier, SystemMetrics, WorkItem,
 };
 use duroxide::Event;
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
@@ -351,6 +351,7 @@ impl PostgresProvider {
     async fn do_fetch_orchestration_item(
         &self,
         lock_timeout: Duration,
+        filter: Option<&DispatcherCapabilityFilter>,
     ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
         let start = std::time::Instant::now();
 
@@ -360,6 +361,28 @@ impl PostgresProvider {
         // Convert Duration to milliseconds
         let lock_timeout_ms = lock_timeout.as_millis() as i64;
         let mut _last_error: Option<ProviderError> = None;
+
+        // Extract version filter parameters
+        let (min_packed, max_packed): (Option<i64>, Option<i64>) = if let Some(cap_filter) = filter
+        {
+            match cap_filter.supported_duroxide_versions.first() {
+                Some(range) => {
+                    let min = range.min.major as i64 * 1_000_000
+                        + range.min.minor as i64 * 1_000
+                        + range.min.patch as i64;
+                    let max = range.max.major as i64 * 1_000_000
+                        + range.max.minor as i64 * 1_000
+                        + range.max.patch as i64;
+                    (Some(min), Some(max))
+                }
+                None => {
+                    // Empty supported_duroxide_versions = "supports nothing" → no candidate.
+                    return Ok(None);
+                }
+            }
+        } else {
+            (None, None)
+        };
 
         for attempt in 0..=MAX_RETRIES {
             let now_ms = self.now_millis();
@@ -382,11 +405,13 @@ impl PostgresProvider {
                 )>,
                 SqlxError,
             > = sqlx::query_as(&format!(
-                "SELECT * FROM {}.fetch_orchestration_item($1, $2)",
+                "SELECT * FROM {}.fetch_orchestration_item($1, $2, $3, $4)",
                 self.schema_name
             ))
             .bind(now_ms)
             .bind(lock_timeout_ms)
+            .bind(min_packed)
+            .bind(max_packed)
             .fetch_optional(&*self.pool)
             .await;
 
@@ -424,12 +449,20 @@ impl PostgresProvider {
                 attempt_count,
             )) = row
             {
-                let history: Vec<Event> = serde_json::from_value(history_json).map_err(|e| {
-                    ProviderError::permanent(
-                        "fetch_orchestration_item",
-                        format!("Failed to deserialize history: {e}"),
-                    )
-                })?;
+                let (history, history_error) =
+                    match serde_json::from_value::<Vec<Event>>(history_json) {
+                        Ok(h) => (h, None),
+                        Err(e) => {
+                            let error_msg = format!("Failed to deserialize history: {e}");
+                            tracing::warn!(
+                                target = "duroxide::providers::postgres",
+                                instance = %instance_id,
+                                error = %error_msg,
+                                "History deserialization failed, returning item with history_error"
+                            );
+                            (vec![], Some(error_msg))
+                        }
+                    };
 
                 let messages: Vec<WorkItem> =
                     serde_json::from_value(messages_json).map_err(|e| {
@@ -464,6 +497,7 @@ impl PostgresProvider {
                         version: orchestration_version,
                         history,
                         messages,
+                        history_error,
                     },
                     lock_token,
                     attempt_count as u32,
@@ -587,12 +621,15 @@ impl Provider for PostgresProvider {
         &self,
         lock_timeout: Duration,
         poll_timeout: Duration,
+        filter: Option<&DispatcherCapabilityFilter>,
     ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
         // Fast path: Duration::ZERO means "do not wait".
         // Avoid long-poll notifier bookkeeping to keep behavior deterministic
         // and reduce contention/overhead on hot paths.
         if poll_timeout.is_zero() {
-            return self.do_fetch_orchestration_item(lock_timeout).await;
+            return self
+                .do_fetch_orchestration_item(lock_timeout, filter)
+                .await;
         }
 
         // Long-poll pattern: register interest BEFORE checking to avoid race
@@ -605,7 +642,9 @@ impl Provider for PostgresProvider {
             notified.as_mut().enable();
 
             // Step 2: Try to fetch
-            let result = self.do_fetch_orchestration_item(lock_timeout).await?;
+            let result = self
+                .do_fetch_orchestration_item(lock_timeout, filter)
+                .await?;
             if result.is_some() {
                 return Ok(result);
             }
@@ -616,7 +655,7 @@ impl Provider for PostgresProvider {
             tokio::select! {
                 _ = &mut notified => {
                     // Woken by notifier (NOTIFY or timer) - fetch now
-                    return self.do_fetch_orchestration_item(lock_timeout).await;
+                    return self.do_fetch_orchestration_item(lock_timeout, filter).await;
                 }
                 _ = tokio::time::sleep(poll_timeout) => {
                     // Timeout - return None, let runtime handle idle sleep
@@ -626,7 +665,7 @@ impl Provider for PostgresProvider {
         }
 
         // Long-poll disabled - try once and return immediately (old behavior)
-        self.do_fetch_orchestration_item(lock_timeout).await
+        self.do_fetch_orchestration_item(lock_timeout, filter).await
     }
 
     #[instrument(skip(self), fields(lock_token = %lock_token, execution_id = execution_id), target = "duroxide::providers::postgres")]
@@ -697,6 +736,13 @@ impl Provider for PostgresProvider {
             "status": metadata.status,
             "output": metadata.output,
             "parent_instance_id": metadata.parent_instance_id,
+            "pinned_duroxide_version": metadata.pinned_duroxide_version.as_ref().map(|v| {
+                serde_json::json!({
+                    "major": v.major,
+                    "minor": v.minor,
+                    "patch": v.patch,
+                })
+            }),
         });
 
         // Serialize cancelled_activities for lock-stealing cancellation

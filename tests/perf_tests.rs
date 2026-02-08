@@ -67,7 +67,7 @@ async fn perf_idle_stability() {
     let provider_clone = provider.clone();
     let fetch_handle = tokio::spawn(async move {
         provider_clone
-            .fetch_orchestration_item(Duration::from_secs(60), Duration::from_secs(25))
+            .fetch_orchestration_item(Duration::from_secs(60), Duration::from_secs(25), None)
             .await
     });
 
@@ -116,7 +116,7 @@ async fn perf_notify_wake_latency() {
     let fetch_handle = tokio::spawn(async move {
         // This should block on notify, not poll
         provider_clone
-            .fetch_orchestration_item(Duration::from_secs(60), Duration::from_secs(30))
+            .fetch_orchestration_item(Duration::from_secs(60), Duration::from_secs(30), None)
             .await
     });
 
@@ -201,7 +201,7 @@ async fn perf_immediate_work_latency() {
         let fetch_handle = tokio::spawn(async move {
             let start = Instant::now();
             let result = provider_clone
-                .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10))
+                .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10), None)
                 .await;
             (start.elapsed(), result)
         });

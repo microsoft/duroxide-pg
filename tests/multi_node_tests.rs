@@ -100,7 +100,7 @@ async fn multi_node_shared_visibility() {
 
     // Node B should be able to fetch it
     let result = node_b
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(500))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(500), None)
         .await
         .expect("Node B fetch failed");
 
@@ -158,7 +158,7 @@ async fn multi_node_work_distribution() {
             // Each node tries to fetch multiple times
             for _ in 0..5 {
                 if let Ok(Some((item, token, _))) = node
-                    .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(100))
+                    .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(100), None)
                     .await
                 {
                     fetched.push(item.instance.clone());
@@ -237,7 +237,7 @@ async fn delayed_work_cross_node_visibility() {
     // Start long-polling with 200ms timeout - should wake up around 500ms when work becomes visible
     let start = Instant::now();
     let result = node_b
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(200))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(200), None)
         .await
         .expect("Fetch failed");
 
@@ -308,7 +308,7 @@ async fn staggered_delayed_work_visibility() {
     let mut fetched = vec![];
     for _ in 0..10 {
         if let Ok(Some((item, _token, _))) = node_b
-            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(100))
+            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(100), None)
             .await
         {
             fetched.push(item.instance.clone());
@@ -367,7 +367,7 @@ async fn multi_node_timer_coordination() {
 
     for _ in 0..5 {
         if let Ok(Some((item, _token, _))) = reader
-            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(100))
+            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(100), None)
             .await
         {
             fetched.push(item.instance.clone());
@@ -441,7 +441,7 @@ async fn clock_drift_progressive() {
     let mut fetched = vec![];
     for _ in 0..10 {
         if let Ok(Some((item, _token, _))) = reader
-            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(50))
+            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(50), None)
             .await
         {
             fetched.push(item.instance.clone());
@@ -494,7 +494,7 @@ async fn clock_jump_forward_simulation() {
     let reader = create_provider(&schema, true).await;
 
     let result = reader
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(200))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(200), None)
         .await
         .expect("Fetch failed");
 
@@ -543,7 +543,7 @@ async fn multi_node_failover() {
     // Node A fetches with a short lock timeout
     let lock_timeout = Duration::from_secs(1);
     let result = node_a
-        .fetch_orchestration_item(lock_timeout, Duration::from_millis(100))
+        .fetch_orchestration_item(lock_timeout, Duration::from_millis(100), None)
         .await
         .expect("Fetch failed");
 
@@ -557,7 +557,7 @@ async fn multi_node_failover() {
 
     // Node B should now be able to pick up the work
     let result = node_b
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(500))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(500), None)
         .await
         .expect("Fetch failed");
 
@@ -614,7 +614,7 @@ async fn multi_node_lock_race() {
 
             // All nodes try to fetch simultaneously
             let result = node
-                .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(100))
+                .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(100), None)
                 .await;
 
             match result {
@@ -685,7 +685,7 @@ async fn multi_node_lock_race_longpoll() {
             let start = Instant::now();
             // All nodes try to fetch simultaneously with long-poll timeout
             let result = node
-                .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(500))
+                .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(500), None)
                 .await;
 
             let elapsed = start.elapsed();
@@ -765,7 +765,7 @@ async fn multi_node_notify_propagation() {
 
             // Wait for work with 5 second timeout
             let result = listener
-                .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5))
+                .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5), None)
                 .await;
 
             let elapsed = start.elapsed();

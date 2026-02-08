@@ -93,7 +93,7 @@ async fn fault_notifier_panic() {
 
     // Fetch should still work (via do_fetch, then poll_timeout fallback)
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(1))
+        .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(1), None)
         .await
         .expect("Fetch failed");
 
@@ -144,7 +144,7 @@ async fn fault_refresh_query_error() {
         .expect("Failed to enqueue work");
 
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2))
+        .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2), None)
         .await
         .expect("Fetch failed");
 
@@ -205,7 +205,7 @@ async fn fault_heap_corruption_negative_timer() {
     // Should find work immediately (no crash)
     let start = Instant::now();
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2))
+        .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2), None)
         .await
         .expect("Fetch failed");
 
@@ -311,7 +311,7 @@ async fn fault_injection_clock_skew_late_visibility() {
 
     // Use ZERO poll_timeout to check immediately without waiting
     let result = node_b
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::ZERO)
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::ZERO, None)
         .await
         .expect("Fetch failed");
 
@@ -327,7 +327,7 @@ async fn fault_injection_clock_skew_late_visibility() {
     tokio::time::sleep(Duration::from_millis(second_wait_ms)).await;
 
     let result = node_b
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(200))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(200), None)
         .await
         .expect("Fetch failed");
 
@@ -378,7 +378,7 @@ async fn fault_injection_clock_skew_early_visibility() {
     tokio::time::sleep(Duration::from_millis(350)).await;
 
     let result = node_b
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(100))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_millis(100), None)
         .await
         .expect("Fetch failed");
 
@@ -420,7 +420,7 @@ async fn fault_injection_symmetric_clock_skew() {
     let fetch_handle = tokio::spawn(async move {
         let start = Instant::now();
         let result = node_b_clone
-            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(3))
+            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(3), None)
             .await
             .expect("Fetch failed");
         let elapsed = start.elapsed();

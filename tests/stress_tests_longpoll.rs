@@ -85,7 +85,7 @@ async fn stress_high_notify_rate() {
     let start = Instant::now();
     while fetched < insert_count && start.elapsed() < Duration::from_secs(60) {
         if let Some((_, lock_token, _)) = provider
-            .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2))
+            .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2), None)
             .await
             .expect("Fetch failed")
         {
@@ -200,7 +200,7 @@ async fn stress_many_timers() {
     let start = Instant::now();
     while fetched < timer_count && start.elapsed() < Duration::from_secs(60) {
         if let Some((_, lock_token, _)) = provider
-            .fetch_orchestration_item(Duration::from_secs(10), Duration::from_secs(5))
+            .fetch_orchestration_item(Duration::from_secs(10), Duration::from_secs(5), None)
             .await
             .expect("Fetch failed")
         {
@@ -296,7 +296,7 @@ async fn stress_connection_flapping() {
     let fetch_start = Instant::now();
     while fetched < insert_count {
         if let Some((_, lock_token, _)) = provider
-            .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2))
+            .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2), None)
             .await
             .expect("Fetch failed")
         {

@@ -82,7 +82,7 @@ async fn fetch_returns_immediately_when_work_exists() {
     // Fetch should return immediately
     let start = Instant::now();
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5), None)
         .await
         .expect("Fetch failed");
 
@@ -112,7 +112,7 @@ async fn fetch_times_out_after_poll_timeout() {
     let start = Instant::now();
 
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(30), poll_timeout)
+        .fetch_orchestration_item(Duration::from_secs(30), poll_timeout, None)
         .await
         .expect("Fetch failed");
 
@@ -157,7 +157,7 @@ async fn fetch_works_without_long_poll_enabled() {
     // No work exists - with long-poll disabled, should return immediately
     let start = Instant::now();
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5), None)
         .await
         .expect("Fetch failed");
 
@@ -198,7 +198,7 @@ async fn fetch_waits_for_notify_when_no_work() {
     let fetch_handle = tokio::spawn(async move {
         let start = Instant::now();
         let result = provider_clone
-            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(30))
+            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(30), None)
             .await
             .expect("Fetch failed");
         (result, start.elapsed())
@@ -266,7 +266,7 @@ async fn e2e_immediate_work_detected() {
     let fetch_handle = tokio::spawn(async move {
         let start = Instant::now();
         let result = provider_clone
-            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(30))
+            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(30), None)
             .await
             .expect("Fetch failed");
         (result, start.elapsed())
@@ -328,7 +328,7 @@ async fn e2e_multiple_dispatchers_wake() {
         let handle = tokio::spawn(async move {
             let start = Instant::now();
             let result = p
-                .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10))
+                .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10), None)
                 .await;
             (i, result, start.elapsed())
         });
@@ -485,7 +485,7 @@ async fn resilience_work_before_startup() {
 
     let start = Instant::now();
     let result = provider2
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5), None)
         .await
         .expect("Fetch failed");
 
@@ -540,7 +540,7 @@ async fn resilience_notify_during_busy() {
 
     // Fetch first item (simulating dispatcher is now "busy" processing)
     let result1 = provider
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5), None)
         .await
         .expect("Fetch failed");
     assert!(result1.is_some(), "Should find first work");
@@ -580,7 +580,7 @@ async fn resilience_notify_during_busy() {
     // Next fetch should find the second work item
     let start = Instant::now();
     let result2 = provider
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5), None)
         .await
         .expect("Fetch failed");
 
@@ -672,7 +672,7 @@ async fn resilience_refresh_catches_missed_notify() {
     // Fetch should eventually find work via refresh query (within refresh interval)
     let start = Instant::now();
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5), None)
         .await
         .expect("Fetch failed");
 
@@ -745,7 +745,7 @@ async fn resilience_notifier_disabled_finds_work() {
     // Fetch should still find work immediately (do_fetch() runs first)
     let start = Instant::now();
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(2))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(2), None)
         .await
         .expect("Fetch failed");
 
@@ -785,7 +785,7 @@ async fn resilience_notifier_disabled_returns_immediately_when_empty() {
     // No work exists - without notifier, should return immediately (not wait)
     let start = Instant::now();
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5), None)
         .await
         .expect("Fetch failed");
 
@@ -864,7 +864,7 @@ async fn timer_precision_100ms_grace() {
 
     // Start fetch - should wait until visible_at + grace_period (~2.1s)
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10), None)
         .await
         .expect("Fetch failed");
 
@@ -951,7 +951,7 @@ async fn timer_precision_many_timers() {
     let mut fetch_times = Vec::new();
     for _ in 0..5 {
         let result = provider
-            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10))
+            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10), None)
             .await
             .expect("Fetch failed");
 
@@ -1072,7 +1072,7 @@ async fn timer_precision_under_load() {
         let expected_time_ms = base_delay_ms + (i as u64 * interval_ms);
 
         let result = provider
-            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10))
+            .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10), None)
             .await
             .expect("Fetch failed");
 
@@ -1220,7 +1220,7 @@ async fn e2e_timer_fires_correctly() {
 
     // Start fetch - should wait until visible_at + grace_period (~3.1s)
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(10), None)
         .await
         .expect("Fetch failed");
 
@@ -1303,7 +1303,7 @@ async fn resilience_notifier_dead() {
     // (do_fetch() runs first, before waiting on notify)
     let start = Instant::now();
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5))
+        .fetch_orchestration_item(Duration::from_secs(30), Duration::from_secs(5), None)
         .await
         .expect("Fetch failed");
 
@@ -1355,7 +1355,7 @@ async fn resilience_connection_drop() {
 
     // Fetch should work normally
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2))
+        .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2), None)
         .await
         .expect("Fetch failed");
 
@@ -1394,7 +1394,7 @@ async fn resilience_connection_drop() {
 
     let start = Instant::now();
     let result = provider
-        .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2))
+        .fetch_orchestration_item(Duration::from_secs(5), Duration::from_secs(2), None)
         .await
         .expect("Fetch failed");
 
