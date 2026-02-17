@@ -79,6 +79,18 @@ cargo nextest run --features db-metrics -j 1
 cargo test --features db-metrics -- --test-threads=1
 ```
 
+### Connection Exhaustion Under High Parallelism
+
+Each test runtime creates a connection pool (default 10 max connections) **plus** a dedicated `PgListener` connection for LISTEN/NOTIFY. At high parallelism (e.g., 14 cores), peak PostgreSQL connections can reach **~117**. If PostgreSQL `max_connections` is set to the default 100, e2e tests will fail with timeouts due to connection exhaustion.
+
+This is worse than duroxide-pg (~104 peak) because of the extra PgListener connection per runtime.
+
+**Fix:** Increase PostgreSQL `max_connections` to at least 300:
+```bash
+docker exec <container> psql -U postgres -c "ALTER SYSTEM SET max_connections = 500;"
+docker restart <container>
+```
+
 ### Key Cargo Features
 
 - `test-fault-injection` (default): Enables `FaultInjector` for testing clock skew, notifier failures
@@ -111,13 +123,14 @@ All provider operations use schema-qualified stored procedures (e.g., `schema.fe
 
 Every migration that modifies schema or stored procedures **must** have a companion `NNNN_diff.md` file. This is required because git diffs for SQL migrations only show the new code, not the delta from the previous version.
 
-The diff file should document:
-1. **Summary** - What the migration adds/changes
-2. **Schema Changes** - New tables, columns, indexes
-3. **New/Modified Stored Procedures** - Function signatures and purpose
-4. **Breaking Changes** - Any incompatibilities with previous versions
+**Diff format requirements:** Each changed function must be shown **in full** with `+`/`-` diff markers on changed lines. This ensures the reader always knows which function a change belongs to (the `CREATE OR REPLACE FUNCTION` line is always visible at the top of each block). Do NOT use standard unified diff with small context windows — those lose function boundaries in large stored procedures.
 
-Example: See [migrations/0002_diff.md](../migrations/0002_diff.md)
+The diff file should contain:
+1. **Table Changes** — New tables (full column list), modified tables (mark new columns with `+`)
+2. **New Indexes** — Any indexes added by the migration
+3. **Function Changes** — For each changed function: full function body in a `diff` code block with `+`/`-` markers. New functions shown in full in a `sql` code block. Signature changes called out separately.
+
+Example: See [migrations/0004_diff.md](../migrations/0004_diff.md)
 
 ### Time Handling
 

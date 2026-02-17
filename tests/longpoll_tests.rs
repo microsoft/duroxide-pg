@@ -402,7 +402,7 @@ async fn e2e_worker_and_orch_separate() {
     let worker_handle = tokio::spawn(async move {
         let start = Instant::now();
         let result = p
-            .fetch_work_item(Duration::from_secs(30), Duration::from_secs(2))
+            .fetch_work_item(Duration::from_secs(30), Duration::from_secs(2), None)
             .await;
         (result, start.elapsed())
     });

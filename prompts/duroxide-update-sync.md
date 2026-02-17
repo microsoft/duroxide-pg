@@ -111,10 +111,35 @@ Check for:
 
 If code changes are needed, implement them. If migrations are needed:
 1. Create new migration file `migrations/NNNN_description.sql`
-2. Create companion diff file `migrations/NNNN_diff.md` (see existing examples)
+2. Create companion diff file `migrations/NNNN_diff.md` — each changed function must be shown **in full** with `+`/`-` diff markers (not small-context unified diff). See [migrations/0004_diff.md](../migrations/0004_diff.md) for format.
 3. **Note:** `0001_initial_schema.sql` is the baseline schema; avoid modifying it
 
-### Step 9: Run ALL Tests
+### Step 9: Sync E2E Tests from Duroxide Main Repo
+
+**IMPORTANT:** Check for new or changed e2e tests in the duroxide main repo ([github.com/affandar/duroxide](https://github.com/affandar/duroxide/tree/main/tests)) and copy them.
+
+Use the GitHub MCP tools to fetch test file contents from the duroxide repo's `tests/e2e_samples.rs` and `tests/session_e2e_tests.rs`, then compare with local tests:
+
+```bash
+# List local tests
+grep -o 'async fn [a-z_0-9]*' tests/e2e_samples.rs | sort
+grep -o 'async fn [a-z_0-9]*' tests/session_e2e_tests.rs | sort
+```
+
+Compare against the lists from the duroxide repo (fetched via GitHub).
+
+When copying tests from the duroxide main repo to this provider repo:
+- Replace `common::create_sqlite_store_disk()` → `common::create_postgres_store()`
+- Replace `create_runtime(activities, orchestrations)` → `Runtime::start_with_store(store.clone(), activities, orchestrations)`
+- Replace `create_runtime_with_options(activities, orchestrations, options)` → `Runtime::start_with_options(store.clone(), activities, orchestrations, options)`
+- Add `common::cleanup_schema(&schema).await;` after `rt.shutdown(None).await;`
+- Increase short timeouts (5s/10s) to 30s for PostgreSQL latency
+- For tests with `max_sessions_per_runtime: 1`, add `dispatcher_long_poll_timeout: Duration::from_secs(2)` to prevent capacity-blocked slots from sleeping for the full long-poll timeout
+- Add any new imports (`semver::Version`, `std::sync::atomic::*`, etc.)
+
+> ⚠️ **Do not skip this step.** Provider e2e tests must stay in sync with the main repo to ensure feature parity.
+
+### Step 10: Run ALL Tests
 
 **IMPORTANT:** Run the complete test suite, not just validation tests.
 
@@ -139,7 +164,7 @@ Check for:
 
 If tests fail due to breaking changes (like renamed APIs), fix them before proceeding.
 
-### Step 10: Search for STOPGAP Markers
+### Step 11: Search for STOPGAP Markers
 
 ```bash
 grep -rn "STOPGAP\|BLOCKED\|TODO.*duroxide" --include="*.rs" .
@@ -147,7 +172,7 @@ grep -rn "STOPGAP\|BLOCKED\|TODO.*duroxide" --include="*.rs" .
 
 For each marker, check if the related issue is now fixed and if cleanup can be performed.
 
-### Step 11: Generate Summary Report
+### Step 12: Generate Summary Report
 
 After completing the above, provide a summary with:
 

@@ -311,11 +311,16 @@ impl Notifier {
     }
 
     /// Wake all waiting dispatchers for the given queue type.
+    ///
+    /// Worker uses `notify_waiters()` so that ALL worker slots wake up.
+    /// This is required for session routing: a session-bound item can only
+    /// be served by the slot that owns the session, so waking just one
+    /// slot (which might be the wrong one) would cause a deadlock.
     fn wake_dispatchers(&self, is_orch: bool) {
         if is_orch {
             self.orch_notify.notify_one();
         } else {
-            self.worker_notify.notify_one();
+            self.worker_notify.notify_waiters();
         }
     }
 
@@ -333,11 +338,11 @@ impl Notifier {
             }
         }
 
-        // Pop expired worker timers
+        // Pop expired worker timers (notify_waiters for session routing correctness)
         while let Some(Reverse(fire_at)) = self.worker_heap.peek() {
             if *fire_at <= now {
                 self.worker_heap.pop();
-                self.worker_notify.notify_one();
+                self.worker_notify.notify_waiters();
             } else {
                 break;
             }
@@ -478,7 +483,7 @@ impl Notifier {
 
                     // Wake all dispatchers to catch any missed NOTIFYs during disconnect
                     self.orch_notify.notify_one();
-                    self.worker_notify.notify_one();
+                    self.worker_notify.notify_waiters();
 
                     // Force immediate refresh to rebuild timer heaps
                     self.next_refresh = Instant::now();

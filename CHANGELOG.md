@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.16] - 2026-02-17
+
+- Updated duroxide dependency from 0.1.17 to 0.1.18
+- **Activity Session Affinity:** Full session routing for worker queue items
+  - `fetch_work_item` now accepts `SessionFetchConfig` for session-aware routing
+  - New `renew_session_lock` stored procedure for session heartbeats
+  - New `cleanup_orphaned_sessions` stored procedure for idle session cleanup
+  - `ack_worker` and `renew_work_item_lock` piggyback `last_activity_at` updates on session rows
+  - `ack_orchestration_item` extracts `session_id` from `ActivityExecute` worker items
+- **Notifier fix:** Changed worker `notify_one()` to `notify_waiters()` to prevent session-routing
+  deadlock when per-slot worker identities are used (no `worker_node_id`)
+- Migration 0004: `add_session_support` (new `sessions` table, `worker_queue.session_id` column, session routing logic)
+- Added 33 session validation tests (total validation tests: 152)
+- Added 7 session e2e tests
+
 ## [0.1.15] - 2026-02-09
 
 - Updated duroxide dependency from 0.1.16 to 0.1.17
