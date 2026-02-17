@@ -62,6 +62,16 @@ cargo nextest run --test stress_tests --run-ignored only
 # or: cargo test --test stress_tests -- --ignored
 ```
 
+### Connection Exhaustion Under High Parallelism
+
+Each test runtime creates a connection pool (default 10 max connections). At high parallelism (e.g., 14 cores), peak PostgreSQL connections can reach **~104**. If PostgreSQL `max_connections` is set to the default 100, tests will fail with timeouts due to connection exhaustion.
+
+**Fix:** Increase PostgreSQL `max_connections` to at least 300:
+```bash
+docker exec <container> psql -U postgres -c "ALTER SYSTEM SET max_connections = 500;"
+docker restart <container>
+```
+
 ### Stress Testing
 ```bash
 # Quick stress test (10 seconds)
@@ -118,7 +128,14 @@ The script:
 3. Diffs them and generates `migrations/NNNN_diff.md`
 4. Cleans up temp schemas
 
-Example output: See [migrations/0009_diff.md](../migrations/0009_diff.md)
+**Diff format requirements:** Each changed function must be shown **in full** with `+`/`-` diff markers on changed lines. This ensures the reader always knows which function a change belongs to (the `CREATE OR REPLACE FUNCTION` line is always visible at the top of each block). Do NOT use standard unified diff with small context windows — those lose function boundaries in large stored procedures.
+
+The diff file should contain:
+1. **Table Changes** — New tables (full column list), modified tables (mark new columns with `+`)
+2. **New Indexes** — Any indexes added by the migration
+3. **Function Changes** — For each changed function: full function body in a `diff` code block with `+`/`-` markers. New functions shown in full in a `sql` code block. Signature changes called out separately.
+
+Example output: See [migrations/0014_diff.md](../migrations/0014_diff.md)
 
 ### Updating duroxide Dependency
 Follow the detailed guide in [prompts/update-duroxide-dependency.md](../prompts/update-duroxide-dependency.md). Key steps:

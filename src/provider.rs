@@ -3,7 +3,8 @@ use chrono::{TimeZone, Utc};
 use duroxide::providers::{
     DeleteInstanceResult, DispatcherCapabilityFilter, ExecutionInfo, ExecutionMetadata,
     InstanceFilter, InstanceInfo, OrchestrationItem, Provider, ProviderAdmin, ProviderError,
-    PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier, SystemMetrics, WorkItem,
+    PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier, SessionFetchConfig,
+    SystemMetrics, WorkItem,
 };
 use duroxide::Event;
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
@@ -649,23 +650,25 @@ impl Provider for PostgresProvider {
 
         let now_ms = Self::now_millis();
 
-        // Extract activity identification for ActivityExecute items (for cancellation support)
-        let (instance_id, execution_id, activity_id) = match &item {
+        // Extract activity identification and session_id for ActivityExecute items
+        let (instance_id, execution_id, activity_id, session_id) = match &item {
             WorkItem::ActivityExecute {
                 instance,
                 execution_id,
                 id,
+                session_id,
                 ..
             } => (
                 Some(instance.clone()),
                 Some(*execution_id as i64),
                 Some(*id as i64),
+                session_id.clone(),
             ),
-            _ => (None, None, None),
+            _ => (None, None, None, None),
         };
 
         sqlx::query(&format!(
-            "SELECT {}.enqueue_worker_work($1, $2, $3, $4, $5)",
+            "SELECT {}.enqueue_worker_work($1, $2, $3, $4, $5, $6)",
             self.schema_name
         ))
         .bind(work_item)
@@ -673,6 +676,7 @@ impl Provider for PostgresProvider {
         .bind(&instance_id)
         .bind(execution_id)
         .bind(activity_id)
+        .bind(&session_id)
         .execute(&*self.pool)
         .await
         .map_err(|e| {
@@ -694,18 +698,30 @@ impl Provider for PostgresProvider {
         &self,
         lock_timeout: Duration,
         _poll_timeout: Duration,
+        session: Option<&SessionFetchConfig>,
     ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
         let start = std::time::Instant::now();
 
         // Convert Duration to milliseconds
         let lock_timeout_ms = lock_timeout.as_millis() as i64;
 
+        // Extract session parameters
+        let (owner_id, session_lock_timeout_ms): (Option<&str>, Option<i64>) = match session {
+            Some(config) => (
+                Some(&config.owner_id),
+                Some(config.lock_timeout.as_millis() as i64),
+            ),
+            None => (None, None),
+        };
+
         let row = match sqlx::query_as::<_, (String, String, i32)>(&format!(
-            "SELECT * FROM {}.fetch_work_item($1, $2)",
+            "SELECT * FROM {}.fetch_work_item($1, $2, $3, $4)",
             self.schema_name
         ))
         .bind(Self::now_millis())
         .bind(lock_timeout_ms)
+        .bind(owner_id)
+        .bind(session_lock_timeout_ms)
         .fetch_optional(&*self.pool)
         .await
         {
@@ -1178,6 +1194,71 @@ impl Provider for PostgresProvider {
             .into_iter()
             .filter_map(|event_data| serde_json::from_str::<Event>(&event_data).ok())
             .collect())
+    }
+
+    #[instrument(skip(self), target = "duroxide::providers::postgres")]
+    async fn renew_session_lock(
+        &self,
+        owner_ids: &[&str],
+        extend_for: Duration,
+        idle_timeout: Duration,
+    ) -> Result<usize, ProviderError> {
+        if owner_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let now_ms = Self::now_millis();
+        let extend_ms = extend_for.as_millis() as i64;
+        let idle_timeout_ms = idle_timeout.as_millis() as i64;
+        let owner_ids_vec: Vec<&str> = owner_ids.to_vec();
+
+        let result = sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT {}.renew_session_lock($1, $2, $3, $4)",
+            self.schema_name
+        ))
+        .bind(&owner_ids_vec)
+        .bind(now_ms)
+        .bind(extend_ms)
+        .bind(idle_timeout_ms)
+        .fetch_one(&*self.pool)
+        .await
+        .map_err(|e| Self::sqlx_to_provider_error("renew_session_lock", e))?;
+
+        debug!(
+            target = "duroxide::providers::postgres",
+            operation = "renew_session_lock",
+            owner_count = owner_ids.len(),
+            sessions_renewed = result,
+            "Session locks renewed"
+        );
+
+        Ok(result as usize)
+    }
+
+    #[instrument(skip(self), target = "duroxide::providers::postgres")]
+    async fn cleanup_orphaned_sessions(
+        &self,
+        _idle_timeout: Duration,
+    ) -> Result<usize, ProviderError> {
+        let now_ms = Self::now_millis();
+
+        let result = sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT {}.cleanup_orphaned_sessions($1)",
+            self.schema_name
+        ))
+        .bind(now_ms)
+        .fetch_one(&*self.pool)
+        .await
+        .map_err(|e| Self::sqlx_to_provider_error("cleanup_orphaned_sessions", e))?;
+
+        debug!(
+            target = "duroxide::providers::postgres",
+            operation = "cleanup_orphaned_sessions",
+            sessions_cleaned = result,
+            "Orphaned sessions cleaned up"
+        );
+
+        Ok(result as usize)
     }
 
     fn as_management_capability(&self) -> Option<&dyn ProviderAdmin> {

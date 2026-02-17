@@ -3,7 +3,7 @@ use std::sync::{Arc, Once};
 use duroxide::provider_validation::{
     atomicity, cancellation, capability_filtering, error_handling, instance_creation,
     instance_locking, lock_expiration, management, multi_execution, queue_semantics, deletion,
-    prune, bulk_deletion,
+    prune, bulk_deletion, sessions,
 };
 use duroxide::provider_validations::ProviderFactory;
 use duroxide::providers::Provider;
@@ -47,6 +47,7 @@ async fn reset_schema(database_url: &str, schema_name: &str) {
 
     if schema_name == "public" {
         let tables = [
+            "sessions",
             "instances",
             "executions",
             "history",
@@ -325,10 +326,10 @@ mod long_polling_tests {
         // STOPGAP for duroxide #51: Warm up connection pool and query plan cache
         // Remove once short_poll_threshold() is configurable via ProviderFactory
         let _ = provider
-            .fetch_work_item(std::time::Duration::from_secs(1), std::time::Duration::ZERO)
+            .fetch_work_item(std::time::Duration::from_secs(1), std::time::Duration::ZERO, None)
             .await;
         let _ = provider
-            .fetch_work_item(std::time::Duration::from_secs(1), std::time::Duration::ZERO)
+            .fetch_work_item(std::time::Duration::from_secs(1), std::time::Duration::ZERO, None)
             .await;
         long_polling::test_short_poll_work_item_returns_immediately(&*provider).await;
         factory.cleanup_schema().await;
@@ -422,4 +423,42 @@ mod capability_filtering_tests {
     provider_validation_test!(capability_filtering::test_fetch_filter_applied_before_history_deserialization);
     provider_validation_test!(capability_filtering::test_fetch_single_range_only_uses_first_range);
     provider_validation_test!(capability_filtering::test_ack_appends_event_to_corrupted_history);
+}
+
+mod session_tests {
+    use super::*;
+
+    provider_validation_test!(sessions::test_non_session_items_fetchable_by_any_worker);
+    provider_validation_test!(sessions::test_session_item_claimable_when_no_session);
+    provider_validation_test!(sessions::test_session_affinity_same_worker);
+    provider_validation_test!(sessions::test_session_affinity_blocks_other_worker);
+    provider_validation_test!(sessions::test_different_sessions_different_workers);
+    provider_validation_test!(sessions::test_mixed_session_and_non_session_items);
+    provider_validation_test!(sessions::test_session_claimable_after_lock_expiry);
+    provider_validation_test!(sessions::test_none_session_skips_session_items);
+    provider_validation_test!(sessions::test_some_session_returns_all_items);
+    provider_validation_test!(sessions::test_session_lock_expires_new_owner_gets_redelivery);
+    provider_validation_test!(sessions::test_session_lock_expires_same_worker_reacquires);
+    provider_validation_test!(sessions::test_renew_session_lock_active);
+    provider_validation_test!(sessions::test_renew_session_lock_skips_idle);
+    provider_validation_test!(sessions::test_renew_session_lock_no_sessions);
+    provider_validation_test!(sessions::test_cleanup_removes_expired_no_items);
+    provider_validation_test!(sessions::test_cleanup_keeps_sessions_with_pending_items);
+    provider_validation_test!(sessions::test_cleanup_keeps_active_sessions);
+    provider_validation_test!(sessions::test_ack_updates_session_last_activity);
+    provider_validation_test!(sessions::test_renew_work_item_updates_session_last_activity);
+    provider_validation_test!(sessions::test_session_items_processed_in_order);
+    provider_validation_test!(sessions::test_non_session_items_returned_with_session_config);
+    provider_validation_test!(sessions::test_shared_worker_id_any_caller_can_fetch_owned_session);
+    provider_validation_test!(sessions::test_concurrent_session_claim_only_one_wins);
+    provider_validation_test!(sessions::test_session_takeover_after_lock_expiry);
+    provider_validation_test!(sessions::test_cleanup_then_new_item_recreates_session);
+    provider_validation_test!(sessions::test_abandoned_session_item_retryable);
+    provider_validation_test!(sessions::test_abandoned_session_item_ignore_attempt);
+    provider_validation_test!(sessions::test_renew_session_lock_after_expiry_returns_zero);
+    provider_validation_test!(sessions::test_original_worker_reclaims_expired_session);
+    provider_validation_test!(sessions::test_activity_lock_expires_session_lock_valid_same_worker_refetches);
+    provider_validation_test!(sessions::test_both_locks_expire_different_worker_claims);
+    provider_validation_test!(sessions::test_session_lock_expires_activity_lock_valid_ack_succeeds);
+    provider_validation_test!(sessions::test_session_lock_renewal_extends_past_original_timeout);
 }

@@ -6,6 +6,7 @@ use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::runtime::{self};
 use duroxide::{ActivityContext, Client, OrchestrationContext, OrchestrationRegistry};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
@@ -939,6 +940,79 @@ async fn sample_detached_orchestration_scheduling_fs() {
             }
             _ => unreachable!(),
         }
+    }
+
+    rt.shutdown(None).await;
+    common::cleanup_schema(&schema_name).await;
+}
+
+/// Detached sub-orchestration followed by an activity in the parent.
+/// Verifies that the parent completes normally after scheduling a fire-and-forget
+/// child, and the child also completes independently.
+#[tokio::test]
+async fn sample_detached_then_activity_fs() {
+    init_test_logging();
+    use duroxide::OrchestrationStatus;
+    let (store, schema_name) = common::create_postgres_store().await;
+
+    let activity_registry = ActivityRegistry::builder()
+        .register("Echo", |_ctx: ActivityContext, input: String| async move { Ok(input) })
+        .build();
+
+    let child = |ctx: OrchestrationContext, input: String| async move {
+        ctx.schedule_timer(Duration::from_millis(5)).await;
+        Ok(format!("child-{input}"))
+    };
+    let parent = |ctx: OrchestrationContext, _input: String| async move {
+        // Fire-and-forget: schedule detached orchestration
+        ctx.schedule_orchestration("Child", "detached-child", "payload");
+        // Then await an activity - this requires OrchestrationChained to be recorded
+        // for replay to work correctly
+        let result = ctx.schedule_activity("Echo", "hello").await?;
+        Ok(result)
+    };
+
+    let orchestration_registry = OrchestrationRegistry::builder()
+        .register("Child", child)
+        .register("Parent", parent)
+        .build();
+
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        activity_registry,
+        orchestration_registry,
+    )
+    .await;
+    let client = Client::new(store.clone());
+    client
+        .start_orchestration("ParentInstance", "Parent", "")
+        .await
+        .unwrap();
+
+    // Parent should complete with Echo result
+    match client
+        .wait_for_orchestration("ParentInstance", std::time::Duration::from_secs(30))
+        .await
+        .unwrap()
+    {
+        OrchestrationStatus::Completed { output } => assert_eq!(output, "hello"),
+        OrchestrationStatus::Failed { details } => {
+            panic!("parent orchestration failed: {}", details.display_message())
+        }
+        _ => panic!("unexpected orchestration status"),
+    }
+
+    // Child should also complete
+    match client
+        .wait_for_orchestration("detached-child", std::time::Duration::from_secs(30))
+        .await
+        .unwrap()
+    {
+        OrchestrationStatus::Completed { output } => assert_eq!(output, "child-payload"),
+        OrchestrationStatus::Failed { details } => {
+            panic!("child orchestration failed: {}", details.display_message())
+        }
+        _ => panic!("unexpected child status"),
     }
 
     rt.shutdown(None).await;
@@ -1905,6 +1979,141 @@ async fn sample_error_recovery_fs() {
         }
         _ => panic!("unexpected orchestration status"),
     }
+
+    rt.shutdown(None).await;
+    common::cleanup_schema(&schema_name).await;
+}
+
+/// Self-pruning eternal orchestration: processes batches in a loop using
+/// continue_as_new, pruning old executions after each iteration to keep
+/// the instance history bounded.
+#[tokio::test]
+async fn sample_self_pruning_eternal_orchestration() {
+    init_test_logging();
+    use duroxide::providers::PruneOptions;
+
+    let (store, schema_name) = common::create_postgres_store().await;
+
+    // Track how many times we pruned and total executions deleted
+    let prune_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let executions_pruned = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let prune_count_clone = prune_count.clone();
+    let executions_pruned_clone = executions_pruned.clone();
+
+    let activity_registry = ActivityRegistry::builder()
+        .register("ProcessBatch", |_ctx: ActivityContext, batch_num: String| async move {
+            // Simulate batch processing
+            Ok(format!("Processed batch {batch_num}"))
+        })
+        .register("PruneSelf", move |ctx: ActivityContext, _input: String| {
+            let prune_count = prune_count_clone.clone();
+            let executions_pruned = executions_pruned_clone.clone();
+            async move {
+                let client = ctx.get_client();
+                let instance_id = ctx.instance_id().to_string();
+
+                // Prune all but the current execution (keep_last: 1)
+                let result = client
+                    .prune_executions(
+                        &instance_id,
+                        PruneOptions {
+                            keep_last: Some(1),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                prune_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                executions_pruned.fetch_add(result.executions_deleted, std::sync::atomic::Ordering::SeqCst);
+
+                Ok(format!("Pruned {} executions", result.executions_deleted))
+            }
+        })
+        .build();
+
+    // Eternal orchestration that processes 5 batches then completes
+    let orchestration = |ctx: OrchestrationContext, state_str: String| async move {
+        #[derive(Serialize, Deserialize)]
+        struct State {
+            batch_num: u32,
+            total_batches: u32,
+        }
+
+        let state: State = serde_json::from_str(&state_str).unwrap_or(State {
+            batch_num: 0,
+            total_batches: 5,
+        });
+
+        // Process current batch
+        let _result = ctx
+            .schedule_activity("ProcessBatch", state.batch_num.to_string())
+            .await?;
+
+        // Prune old executions (keep only current) - do this on every iteration
+        let _prune_result = ctx.schedule_activity("PruneSelf", "".to_string()).await?;
+
+        if state.batch_num >= state.total_batches - 1 {
+            // Done processing all batches (after pruning)
+            return Ok(format!("Completed {} batches", state.total_batches));
+        }
+
+        // Continue with next batch
+        let next_state = State {
+            batch_num: state.batch_num + 1,
+            total_batches: state.total_batches,
+        };
+        ctx.continue_as_new(serde_json::to_string(&next_state).unwrap()).await
+    };
+
+    let orchestration_registry = OrchestrationRegistry::builder()
+        .register("SelfPruningOrch", orchestration)
+        .build();
+
+    let rt = runtime::Runtime::start_with_store(
+        store.clone(),
+        activity_registry,
+        orchestration_registry,
+    )
+    .await;
+
+    let client = Client::new(store.clone());
+
+    // Start the self-pruning orchestration
+    client
+        .start_orchestration("inst-self-prune", "SelfPruningOrch", "{}")
+        .await
+        .unwrap();
+
+    // Wait for completion (5 batches = 5 executions, prune after each)
+    match client
+        .wait_for_orchestration("inst-self-prune", std::time::Duration::from_secs(30))
+        .await
+        .unwrap()
+    {
+        runtime::OrchestrationStatus::Completed { output } => {
+            assert!(output.contains("Completed 5 batches"));
+        }
+        runtime::OrchestrationStatus::Failed { details } => {
+            panic!("orchestration failed: {}", details.display_message())
+        }
+        _ => panic!("unexpected orchestration status"),
+    }
+
+    // Verify pruning occurred (5 times, once per batch)
+    let prunes = prune_count.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(prunes >= 4, "Should have pruned at least 4 times");
+
+    let pruned = executions_pruned.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(pruned >= 3, "Should have pruned at least 3 executions total");
+
+    // Verify only 1 execution remains (the final one)
+    let executions = client.list_executions("inst-self-prune").await.unwrap();
+    assert_eq!(
+        executions.len(),
+        1,
+        "Only final execution should remain after self-pruning"
+    );
 
     rt.shutdown(None).await;
     common::cleanup_schema(&schema_name).await;

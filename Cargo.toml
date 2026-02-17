@@ -3,7 +3,7 @@ members = [".", "pg-stress"]
 
 [package]
 name = "duroxide-pg"
-version = "0.1.19"
+version = "0.1.20"
 edition = "2021"
 authors = ["Affan Dar <affandar@gmail.com>"]
 description = "A PostgreSQL-based provider implementation for Duroxide, a durable task orchestration framework"
@@ -28,7 +28,7 @@ exclude = [
 ]
 
 [dependencies]
-duroxide = { version = "0.1.17", features = ["provider-test"] }
+duroxide = { version = "0.1.18", features = ["provider-test"] }
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono"], default-features = false }

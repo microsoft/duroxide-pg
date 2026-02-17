@@ -58,12 +58,12 @@ let provider = PostgresProvider::new_with_schema(
 - Poison message detection with attempt count tracking
 - Lock renewal for long-running orchestrations and activities
 
-## Latest Release (0.1.19)
+## Latest Release (0.1.20)
 
-- Update to duroxide 0.1.17
-- Provider capability filtering (Phase 1) with SQL-level version matching
-- History deserialization errors now surface via `history_error` field for poison message detection
-- 120 provider validation tests passing
+- Updated to duroxide 0.1.18 with Activity Session Affinity support
+- New migration `0014_add_session_support.sql` — sessions table, session routing in fetch/ack
+- `renew_session_lock()` and `cleanup_orphaned_sessions()` provider methods
+- 24 session e2e tests, 33 session validation tests
 - See [CHANGELOG.md](CHANGELOG.md) for full version history
 
 ## License

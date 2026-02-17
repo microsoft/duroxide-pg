@@ -307,6 +307,7 @@ async fn test_enqueue_and_dequeue_worker() {
         id: 100u64,
         name: "TestActivity".to_string(),
         input: "activity_input".to_string(),
+        session_id: None,
     };
 
     // Enqueue worker work
@@ -320,6 +321,7 @@ async fn test_enqueue_and_dequeue_worker() {
         .fetch_work_item(
             std::time::Duration::from_secs(30),
             std::time::Duration::ZERO,
+            None,
         ) // 30 second lock timeout
         .await
         .expect("Should dequeue worker work")

@@ -92,12 +92,19 @@ The script:
 1. Creates temp schemas (before/after the target migration)
 2. Applies all migrations up to N-1 and N respectively
 3. Extracts DDL for tables, indexes, and functions
-4. Generates unified diff in `migrations/NNNN_diff.md`
+4. Generates per-function diff in `migrations/NNNN_diff.md`
 5. Cleans up temp schemas
+
+**Diff format requirements:** Each changed function must be shown **in full** with `+`/`-` diff markers on changed lines. This ensures the reader always knows which function a change belongs to (the `CREATE OR REPLACE FUNCTION` line is always visible at the top of each block). Do NOT use standard unified diff with small context windows — those lose function boundaries in large stored procedures.
+
+The diff file should contain:
+1. **Table Changes** — New tables (full column list), modified tables (mark new columns with `+`)
+2. **New Indexes** — Any indexes added by the migration
+3. **Function Changes** — For each changed function: full function body in a `diff` code block with `+`/`-` markers. New functions shown in full in a `sql` code block. Signature changes called out separately.
 
 > ⚠️ **Do not skip this step.** PRs with migrations but no diff file will be rejected.
 
-See [migrations/0009_diff.md](../migrations/0009_diff.md) for a complete example.
+See [migrations/0014_diff.md](../migrations/0014_diff.md) for a complete example.
 
 ### 4.4 Update src/migrations.rs
 - Add new migration to the `MIGRATIONS` array if you created one
@@ -119,18 +126,46 @@ mod new_module_tests {
 }
 ```
 
-## Step 6: Update Related Files
+## Step 6: Sync E2E Tests from Duroxide Main Repo
 
-### 6.1 Update stress tests if needed
+### 6.1 Sync e2e_samples tests
+Check `tests/e2e_samples.rs` in the **duroxide** main repo ([github.com/affandar/duroxide](https://github.com/affandar/duroxide/tree/main/tests)) for any new or changed tests. Compare test function names and copy any missing tests, adapting them for PostgreSQL.
+
+Use the GitHub MCP tools to fetch the test file contents from the duroxide repo, then compare with local tests:
+
+```bash
+# List tests in this repo
+grep -o 'async fn [a-z_0-9]*' tests/e2e_samples.rs | sort
+```
+
+Compare against the list from the duroxide repo's `tests/e2e_samples.rs` (fetched via GitHub).
+
+### 6.2 Sync session_e2e tests
+Same process for `tests/session_e2e_tests.rs` — compare local test names against the duroxide repo's `tests/session_e2e_tests.rs`.
+
+### 6.3 Adaptation pattern
+When copying tests from the duroxide main repo to this provider repo:
+- Replace `common::create_sqlite_store_disk()` → `common::create_postgres_store()`
+- Replace `create_runtime(activities, orchestrations)` → `Runtime::start_with_store(store.clone(), activities, orchestrations)`
+- Replace `create_runtime_with_options(activities, orchestrations, options)` → `Runtime::start_with_options(store.clone(), activities, orchestrations, options)`
+- Add `common::cleanup_schema(&schema).await;` after `rt.shutdown(None).await;`
+- Increase short timeouts (5s/10s) to 30s for PostgreSQL latency
+- Add any new imports (`semver::Version`, `std::sync::atomic::*`, etc.)
+
+> ⚠️ **Do not skip this step.** Provider e2e tests must stay in sync with the main repo to ensure feature parity.
+
+## Step 7: Update Related Files
+
+### 7.1 Update stress tests if needed
 - Check `tests/stress_tests.rs` for any config struct changes
 - Check `pg-stress/src/lib.rs` for the same
 
-### 6.2 Update basic tests
+### 7.2 Update basic tests
 - Check `tests/basic_tests.rs` for API signature changes
 
-## Step 7: Test Thoroughly
+## Step 8: Test Thoroughly
 
-### 7.1 Run all tests locally
+### 8.1 Run all tests locally
 ```bash
 # Ensure DATABASE_URL is set
 export DATABASE_URL=postgres://user:pass@localhost:5432/duroxide_test
@@ -142,7 +177,7 @@ cargo test
 cargo test <test_name> -- --nocapture
 ```
 
-### 7.2 Run flaky test detection
+### 8.2 Run flaky test detection
 For tests that were previously flaky, run multiple times:
 ```bash
 for i in {1..10}; do
@@ -151,7 +186,7 @@ for i in {1..10}; do
 done
 ```
 
-## Step 8: Update Documentation
+## Step 9: Update Documentation
 
 ### 8.1 Update CHANGELOG.md
 Add a new version entry with:
@@ -170,7 +205,7 @@ Bump duroxide-pg version appropriately:
 - MINOR: New features, backward compatible
 - PATCH: Bug fixes only
 
-## Step 9: Create Pull Request
+## Step 10: Create Pull Request
 
 > **STOP**: Ask the user before proceeding with any git push or PR creation.
 
@@ -195,7 +230,7 @@ gh pr create --title "Update to duroxide <version>" --body "<PR description>"
 - Check GitHub Actions workflow runs
 - Address any CI failures
 
-## Step 10: Post-Merge
+## Step 11: Post-Merge
 
 > **STOP**: Only proceed with publishing when explicitly requested by the user.
 
