@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.21] - 2026-02-20
+
+- Updated duroxide dependency from 0.1.18 to 0.1.19
+- **Custom Status:** Instance-scoped custom status for progress reporting
+  - New `custom_status TEXT` and `custom_status_version INTEGER` columns on `instances` table
+  - `ack_orchestration_item` now handles `CustomStatusUpdate::Set` / `Clear` from `ExecutionMetadata`
+  - New `get_custom_status` stored procedure and Provider method for polling status changes
+  - Custom status survives `ContinueAsNew` (stored on instances, not executions)
+- **Worker lock expiry validation:** `ack_worker` now rejects acks when the worker lock has expired
+  - Aligns with SQLite provider behavior (`locked_until > now` check)
+- **QueueMessage support:** `enqueue_for_orchestrator` and `fetch_work_item` now handle the new `QueueMessage` work item variant
+- Migration 0015: `add_custom_status` (additive schema change + stored procedure updates)
+- Added 7 custom status validation tests
+- Added 1 prune validation test (`test_prune_bulk_includes_running_instances`)
+- Added 2 lock expiration validation tests
+- Total validation tests: 164 (up from 153)
+
 ## [0.1.20] - 2026-02-17
 
 - Updated duroxide dependency from 0.1.17 to 0.1.18

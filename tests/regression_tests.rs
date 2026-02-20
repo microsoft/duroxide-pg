@@ -161,14 +161,14 @@ async fn test_parallel_suborchestrations_no_deadlock() {
             .wait_for_orchestration(&instance, Duration::from_secs(TIMEOUT_SECS))
             .await
         {
-            Ok(runtime::OrchestrationStatus::Completed { output }) => {
+            Ok(runtime::OrchestrationStatus::Completed { output, .. }) => {
                 assert!(
                     output.contains(&format!("completed:{NUM_CHILDREN}")),
                     "Expected all {NUM_CHILDREN} children to complete, got: {output}"
                 );
                 completed += 1;
             }
-            Ok(runtime::OrchestrationStatus::Failed { details }) => {
+            Ok(runtime::OrchestrationStatus::Failed { details, .. }) => {
                 eprintln!("Parent {} failed: {}", instance, details.display_message());
                 failed += 1;
             }
@@ -269,7 +269,7 @@ async fn test_parallel_suborchestrations_stress() {
     // Collect results
     let mut success = 0;
     for i in 0..NUM_PARENTS {
-        if let Ok(runtime::OrchestrationStatus::Completed { output }) = client
+        if let Ok(runtime::OrchestrationStatus::Completed { output, .. }) = client
             .wait_for_orchestration(&format!("stress-{i}"), Duration::from_secs(TIMEOUT_SECS))
             .await
         {

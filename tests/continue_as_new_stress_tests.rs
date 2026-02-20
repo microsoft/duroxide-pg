@@ -78,10 +78,10 @@ async fn concurrent_continue_as_new_chains() {
             .unwrap();
 
         match status {
-            OrchestrationStatus::Completed { output } => {
+            OrchestrationStatus::Completed { output, .. } => {
                 assert_eq!(output, "completed at 9");
             }
-            OrchestrationStatus::Failed { details } => {
+            OrchestrationStatus::Failed { details, .. } => {
                 panic!("Chain {} failed: {}", instance, details.display_message());
             }
             _ => panic!("Unexpected status for {instance}: {status:?}"),
@@ -397,14 +397,14 @@ async fn instance_actor_pattern_stress_test() {
             .unwrap();
 
         match status {
-            OrchestrationStatus::Completed { output } => {
+            OrchestrationStatus::Completed { output, .. } => {
                 assert!(output.contains("completed after 50 executions"));
                 tracing::info!(
                     "✓ Instance actor {} completed after 50 executions",
                     instance_id
                 );
             }
-            OrchestrationStatus::Failed { details } => {
+            OrchestrationStatus::Failed { details, .. } => {
                 eprintln!(
                     "\n❌ Instance actor {} failed: {}\n",
                     instance_id,

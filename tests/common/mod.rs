@@ -190,6 +190,7 @@ pub async fn test_create_execution(
                     input: input.to_string(),
                     parent_instance: parent_instance.map(|s| s.to_string()),
                     parent_id,
+                    carry_forward_events: None,
                 },
             )],
             vec![], // no worker items
