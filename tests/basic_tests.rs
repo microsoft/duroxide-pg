@@ -244,6 +244,7 @@ async fn test_enqueue_for_orchestrator() {
                     input: "test_input".to_string(),
                     parent_instance: None,
                     parent_id: None,
+                    carry_forward_events: None,
                 },
             )],
             vec![], // no worker items
@@ -496,6 +497,7 @@ async fn test_list_instances_and_executions() {
                         input: "input".to_string(),
                         parent_instance: None,
                         parent_id: None,
+                        carry_forward_events: None,
                     },
                 )],
                 vec![],

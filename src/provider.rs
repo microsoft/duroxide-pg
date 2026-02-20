@@ -1,10 +1,10 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use duroxide::providers::{
-    DeleteInstanceResult, DispatcherCapabilityFilter, ExecutionInfo, ExecutionMetadata,
-    InstanceFilter, InstanceInfo, OrchestrationItem, Provider, ProviderAdmin, ProviderError,
-    PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier, SessionFetchConfig,
-    SystemMetrics, WorkItem,
+    CustomStatusUpdate, DeleteInstanceResult, DispatcherCapabilityFilter, ExecutionInfo,
+    ExecutionMetadata, InstanceFilter, InstanceInfo, OrchestrationItem, Provider, ProviderAdmin,
+    ProviderError, PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier,
+    SessionFetchConfig, SystemMetrics, WorkItem,
 };
 use duroxide::Event;
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
@@ -591,6 +591,7 @@ impl PostgresProvider {
             WorkItem::SubOrchFailed {
                 parent_instance, ..
             } => parent_instance.as_str(),
+            WorkItem::QueueMessage { instance, .. } => instance.as_str(),
         };
 
         debug!(
@@ -742,6 +743,14 @@ impl Provider for PostgresProvider {
             )
         })?;
 
+        // Map custom_status to action/value for the stored procedure
+        let (custom_status_action, custom_status_value): (Option<&str>, Option<&str>) =
+            match &metadata.custom_status {
+                Some(CustomStatusUpdate::Set(s)) => (Some("set"), Some(s.as_str())),
+                Some(CustomStatusUpdate::Clear) => (Some("clear"), None),
+                None => (None, None),
+            };
+
         let metadata_json = serde_json::json!({
             "orchestration_name": metadata.orchestration_name,
             "orchestration_version": metadata.orchestration_version,
@@ -755,6 +764,8 @@ impl Provider for PostgresProvider {
                     "patch": v.patch,
                 })
             }),
+            "custom_status_action": custom_status_action,
+            "custom_status_value": custom_status_value,
         });
 
         // Serialize cancelled_activities for lock-stealing cancellation
@@ -1383,7 +1394,8 @@ impl Provider for PostgresProvider {
             | WorkItem::TimerFired { instance, .. }
             | WorkItem::ExternalRaised { instance, .. }
             | WorkItem::CancelInstance { instance, .. }
-            | WorkItem::ContinueAsNew { instance, .. } => instance,
+            | WorkItem::ContinueAsNew { instance, .. }
+            | WorkItem::QueueMessage { instance, .. } => instance,
             WorkItem::SubOrchCompleted {
                 parent_instance, ..
             }
@@ -1572,6 +1584,28 @@ impl Provider for PostgresProvider {
 
     fn as_management_capability(&self) -> Option<&dyn ProviderAdmin> {
         Some(self)
+    }
+
+    #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
+    async fn get_custom_status(
+        &self,
+        instance: &str,
+        last_seen_version: u64,
+    ) -> Result<Option<(Option<String>, u64)>, ProviderError> {
+        let row = sqlx::query_as::<_, (Option<String>, i64)>(&format!(
+            "SELECT * FROM {}.get_custom_status($1, $2)",
+            self.schema_name
+        ))
+        .bind(instance)
+        .bind(last_seen_version as i64)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| Self::sqlx_to_provider_error("get_custom_status", e))?;
+
+        match row {
+            Some((custom_status, version)) => Ok(Some((custom_status, version as u64))),
+            None => Ok(None),
+        }
     }
 }
 

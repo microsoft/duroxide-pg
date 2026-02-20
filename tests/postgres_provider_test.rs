@@ -1,8 +1,8 @@
 use std::sync::{Arc, Once};
 
 use duroxide::provider_validation::{
-    atomicity, bulk_deletion, cancellation, capability_filtering, deletion, error_handling,
-    instance_creation, instance_locking, lock_expiration, long_polling, management,
+    atomicity, bulk_deletion, cancellation, capability_filtering, custom_status, deletion,
+    error_handling, instance_creation, instance_locking, lock_expiration, long_polling, management,
     multi_execution, prune, queue_semantics, sessions,
 };
 use duroxide::provider_validations::ProviderFactory;
@@ -238,6 +238,8 @@ mod lock_expiration_tests {
     provider_validation_test!(lock_expiration::test_worker_lock_renewal_after_expiration);
     provider_validation_test!(lock_expiration::test_worker_lock_renewal_extends_timeout);
     provider_validation_test!(lock_expiration::test_worker_lock_renewal_after_ack);
+    provider_validation_test!(lock_expiration::test_orchestration_lock_renewal_after_expiration);
+    provider_validation_test!(lock_expiration::test_worker_ack_fails_after_lock_expiry);
 }
 
 mod multi_execution_tests {
@@ -419,6 +421,7 @@ mod prune_tests {
     provider_validation_test!(prune::test_prune_options_combinations);
     provider_validation_test!(prune::test_prune_safety);
     provider_validation_test!(prune::test_prune_bulk);
+    provider_validation_test!(prune::test_prune_bulk_includes_running_instances);
 }
 
 mod bulk_deletion_tests {
@@ -491,4 +494,16 @@ mod session_tests {
     provider_validation_test!(sessions::test_both_locks_expire_different_worker_claims);
     provider_validation_test!(sessions::test_session_lock_expires_activity_lock_valid_ack_succeeds);
     provider_validation_test!(sessions::test_session_lock_renewal_extends_past_original_timeout);
+}
+
+mod custom_status_tests {
+    use super::*;
+
+    provider_validation_test!(custom_status::test_custom_status_set);
+    provider_validation_test!(custom_status::test_custom_status_clear);
+    provider_validation_test!(custom_status::test_custom_status_none_preserves);
+    provider_validation_test!(custom_status::test_custom_status_version_increments);
+    provider_validation_test!(custom_status::test_custom_status_polling_no_change);
+    provider_validation_test!(custom_status::test_custom_status_nonexistent_instance);
+    provider_validation_test!(custom_status::test_custom_status_default_on_new_instance);
 }

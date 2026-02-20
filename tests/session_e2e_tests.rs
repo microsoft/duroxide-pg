@@ -77,7 +77,7 @@ async fn test_session_activity_basic() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "echo:hello|echo:world");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -206,7 +206,7 @@ async fn test_mixed_session_and_regular_activities() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "regular:a|session:b|regular:c");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -265,7 +265,7 @@ async fn test_multiple_sessions_in_orchestration() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "a|b|c");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -326,7 +326,7 @@ async fn test_session_with_worker_node_id_completes() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "done:a|done:b|done:c");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -401,7 +401,7 @@ async fn test_session_fan_out_same_session() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "fan:x|fan:y|fan:z");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -555,7 +555,7 @@ async fn test_copilot_sdk_session_pattern() {
             .await
             .unwrap()
         {
-            runtime::OrchestrationStatus::Completed { output } => {
+            runtime::OrchestrationStatus::Completed { output, .. } => {
                 assert!(
                     output.contains("assistant:reply-to-"),
                     "Conversation {conv_id} should have a reply, got: {output}"
@@ -635,7 +635,7 @@ async fn test_session_activity_typed() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "42");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -709,7 +709,7 @@ async fn test_session_worker_node_id_multiple_sessions_parallel() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "counted|counted|counted");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -770,7 +770,7 @@ async fn test_ephemeral_session_still_works() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "ephemeral-val");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -927,7 +927,7 @@ async fn test_two_slots_serve_same_session_concurrently() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "slow:a|fast:b");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -1022,7 +1022,7 @@ async fn test_ephemeral_same_session_serialized() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "slow:a|fast:b");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -1095,7 +1095,7 @@ async fn test_session_fan_out_fan_in() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "processed:0|processed:1|processed:2");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -1147,7 +1147,7 @@ async fn test_session_fan_out_mixed_with_regular() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "sess:a|reg:b|sess:c|reg:d");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -1209,7 +1209,7 @@ async fn test_fan_out_multiple_per_session_mixed() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(
                 output,
                 "tag:s1-a|tag:s1-b|tag:s2-a|tag:s2-b|tag:no-sess-a|tag:no-sess-b"
@@ -1277,7 +1277,7 @@ async fn test_session_survives_continue_as_new() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "tracked:iter-1");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -1348,7 +1348,7 @@ async fn test_session_continue_as_new_versioned_upgrade() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "done:from-v1+done:from-v2");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -1451,7 +1451,7 @@ async fn test_max_sessions_per_runtime_enforced() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "done|done");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -1537,7 +1537,7 @@ async fn test_same_session_shares_one_slot() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "ok|ok");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -1648,7 +1648,7 @@ async fn test_session_cap_blocks_then_unblocks() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "result-A|result-B");
         }
         other => panic!("Expected completed, got {:?}", other),
@@ -1779,7 +1779,7 @@ async fn test_multi_worker_complex_orchestration() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             let parts: Vec<&str> = output.split(';').collect();
             assert_eq!(parts.len(), 6, "Should have 6 results total, got: {output}");
 
@@ -1894,7 +1894,7 @@ async fn test_multi_worker_heterogeneous_config() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             let parts: Vec<&str> = output.split('|').collect();
             assert_eq!(parts.len(), 3, "Should have 3 results, got: {output}");
             for p in &parts {

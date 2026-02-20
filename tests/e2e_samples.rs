@@ -80,8 +80,8 @@ async fn sample_hello_world_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "Hello, World!"),
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "Hello, World!"),
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -146,8 +146,8 @@ async fn sample_basic_control_flow_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "picked_yes"),
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "picked_yes"),
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -205,8 +205,8 @@ async fn sample_loop_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "startxxx"),
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "startxxx"),
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -282,8 +282,8 @@ async fn sample_error_handling_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "recovered"),
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "recovered"),
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -348,10 +348,10 @@ async fn sample_timeout_with_timer_race_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             assert_eq!(details.display_message(), "timeout")
         }
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             panic!("expected timeout failure, got: {output}")
         }
         _ => panic!("unexpected orchestration status"),
@@ -420,8 +420,8 @@ async fn sample_select2_activity_vs_external_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => output,
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => output,
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -494,10 +494,10 @@ async fn dtf_legacy_gabbar_greetings_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "Hello, Gabbar!, Hello, Samba!")
         }
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -550,8 +550,8 @@ async fn sample_system_activities_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => output,
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => output,
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -610,8 +610,8 @@ async fn sample_status_polling_fs() {
         .await
         .unwrap()
     {
-        OrchestrationStatus::Completed { output } => assert_eq!(output, "done"),
-        OrchestrationStatus::Failed { details } => {
+        OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "done"),
+        OrchestrationStatus::Failed { details, .. } => {
             panic!("unexpected failure: {}", details.display_message())
         }
         _ => unreachable!(),
@@ -673,8 +673,8 @@ async fn sample_sub_orchestration_basic_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "parent:HI"),
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "parent:HI"),
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -743,8 +743,8 @@ async fn sample_sub_orchestration_fanout_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "total=10"),
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "total=10"),
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -805,8 +805,8 @@ async fn sample_sub_orchestration_chained_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "root:ax-mid"),
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "root:ax-mid"),
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -866,8 +866,8 @@ async fn sample_detached_orchestration_scheduling_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "scheduled"),
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "scheduled"),
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -881,10 +881,10 @@ async fn sample_detached_orchestration_scheduling_fs() {
             .await
             .unwrap()
         {
-            OrchestrationStatus::Completed { output } => {
+            OrchestrationStatus::Completed { output, .. } => {
                 assert!(output == "A" || output == "B");
             }
-            OrchestrationStatus::Failed { details } => {
+            OrchestrationStatus::Failed { details, .. } => {
                 panic!(
                     "scheduled orchestration failed: {}",
                     details.display_message()
@@ -944,8 +944,8 @@ async fn sample_detached_then_activity_fs() {
         .await
         .unwrap()
     {
-        OrchestrationStatus::Completed { output } => assert_eq!(output, "hello"),
-        OrchestrationStatus::Failed { details } => {
+        OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "hello"),
+        OrchestrationStatus::Failed { details, .. } => {
             panic!("parent orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -957,8 +957,8 @@ async fn sample_detached_then_activity_fs() {
         .await
         .unwrap()
     {
-        OrchestrationStatus::Completed { output } => assert_eq!(output, "child-payload"),
-        OrchestrationStatus::Failed { details } => {
+        OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "child-payload"),
+        OrchestrationStatus::Failed { details, .. } => {
             panic!("child orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected child status"),
@@ -1009,8 +1009,8 @@ async fn sample_continue_as_new_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "final:3"),
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "final:3"),
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -1254,8 +1254,8 @@ async fn sample_mixed_string_and_typed_string_orch_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => output,
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => output,
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -1301,8 +1301,8 @@ async fn sample_versioning_start_latest_vs_exact_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "v2"),
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "v2"),
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -1324,8 +1324,8 @@ async fn sample_versioning_start_latest_vs_exact_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "v1"),
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "v1"),
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -1379,8 +1379,8 @@ async fn sample_versioning_sub_orchestration_explicit_vs_policy_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => assert_eq!(output, "c1-c2"),
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "c1-c2"),
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -1435,11 +1435,11 @@ async fn sample_versioning_continue_as_new_upgrade_fs() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         match client.get_orchestration_status("inst-can-upgrade").await {
-            Ok(OrchestrationStatus::Completed { output }) => {
+            Ok(OrchestrationStatus::Completed { output, .. }) => {
                 assert_eq!(output, "upgraded:v1:state");
                 break;
             }
-            Ok(OrchestrationStatus::Failed { details }) => {
+            Ok(OrchestrationStatus::Failed { details, .. }) => {
                 panic!("unexpected failure: {}", details.display_message())
             }
             Ok(_) if std::time::Instant::now() < deadline => {
@@ -1672,10 +1672,10 @@ async fn sample_basic_error_handling_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "Valid: test");
         }
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -1692,10 +1692,10 @@ async fn sample_basic_error_handling_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             assert!(details.display_message().contains("Input cannot be empty"));
         }
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             panic!("Expected failure but got success: {output}")
         }
         _ => panic!("unexpected orchestration status"),
@@ -1776,10 +1776,10 @@ async fn sample_nested_function_error_handling_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "Final: Processed: test");
         }
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -1796,10 +1796,10 @@ async fn sample_nested_function_error_handling_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             assert!(details.display_message().contains("Processing failed"));
         }
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             panic!("Expected failure but got success: {output}")
         }
         _ => panic!("unexpected orchestration status"),
@@ -1878,10 +1878,10 @@ async fn sample_error_recovery_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert_eq!(output, "Processed: test");
         }
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
@@ -1898,12 +1898,12 @@ async fn sample_error_recovery_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             let error_msg = details.display_message();
             assert!(error_msg.contains("Failed to process 'error'"));
             assert!(error_msg.contains("Processing failed"));
         }
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             panic!("Expected failure but got success: {output}")
         }
         _ => panic!("unexpected orchestration status"),
@@ -2018,10 +2018,10 @@ async fn sample_self_pruning_eternal_orchestration() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output } => {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
             assert!(output.contains("Completed 5 batches"));
         }
-        runtime::OrchestrationStatus::Failed { details } => {
+        runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
         _ => panic!("unexpected orchestration status"),
