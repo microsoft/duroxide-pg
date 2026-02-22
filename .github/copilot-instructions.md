@@ -1,7 +1,7 @@
 # Duroxide-PG Copilot Instructions
 
 ## Project Overview
-This is a **PostgreSQL provider** for [Duroxide](https://github.com/affandar/duroxide), a durable task orchestration framework for Rust. It implements the `Provider` and `ProviderAdmin` traits, storing orchestration state, history, and work queues in PostgreSQL using stored procedures.
+This is a **PostgreSQL provider** for [Duroxide](https://github.com/microsoft/duroxide), a durable task orchestration framework for Rust. It implements the `Provider` and `ProviderAdmin` traits, storing orchestration state, history, and work queues in PostgreSQL using stored procedures.
 
 ## Architecture
 

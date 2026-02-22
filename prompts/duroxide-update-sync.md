@@ -28,7 +28,7 @@ Note the current version specification.
 ### Step 2: Check for New Releases
 
 ```bash
-gh release list --repo affandar/duroxide --limit 5
+gh release list --repo microsoft/duroxide --limit 5
 ```
 
 ### Step 3: Update Dependency
@@ -64,7 +64,7 @@ Check if any issues in `prompts/duroxide-blockers.md` have been fixed:
 
 ```bash
 # Check each issue status
-gh issue view 51 --repo affandar/duroxide
+gh issue view 51 --repo microsoft/duroxide
 ```
 
 ### Step 7: Run Tests

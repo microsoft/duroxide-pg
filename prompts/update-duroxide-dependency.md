@@ -23,7 +23,7 @@ Before starting the update:
 ## Step 1: Review duroxide Changes
 
 ### 1.1 Read the duroxide CHANGELOG
-- Visit https://github.com/affandar/duroxide/blob/main/CHANGELOG.md
+- Visit https://github.com/microsoft/duroxide/blob/main/CHANGELOG.md
 - Identify all changes since the current duroxide version in `Cargo.toml`
 - Pay special attention to:
   - **BREAKING** changes that affect the Provider trait
@@ -32,21 +32,21 @@ Before starting the update:
   - Database schema requirements
 
 ### 1.2 Read the duroxide README
-- Check https://github.com/affandar/duroxide/blob/main/README.md for any updated integration guidance
+- Check https://github.com/microsoft/duroxide/blob/main/README.md for any updated integration guidance
 
 ### 1.3 Review Provider Implementation Guide
-- Read https://github.com/affandar/duroxide/blob/main/docs/provider-implementation-guide.md
+- Read https://github.com/microsoft/duroxide/blob/main/docs/provider-implementation-guide.md
 - Note any new requirements for provider implementations
 - Check for new trait methods that need to be implemented
 
 ### 1.4 Review Provider Testing Guide  
-- Read https://github.com/affandar/duroxide/blob/main/docs/provider-testing-guide.md
+- Read https://github.com/microsoft/duroxide/blob/main/docs/provider-testing-guide.md
 - Identify new validation test modules that need to be added
 - Check for any test configuration changes (e.g., new config fields)
 
 ## Step 2: Check duroxide GitHub Issues
 
-- Visit https://github.com/affandar/duroxide/issues
+- Visit https://github.com/microsoft/duroxide/issues
 - Filter by label `duroxide-pg` to find any provider-specific issues
 - Review open and recently closed issues for test fixes or improvements
 
@@ -129,7 +129,7 @@ mod new_module_tests {
 ## Step 6: Sync E2E Tests from Duroxide Main Repo
 
 ### 6.1 Sync e2e_samples tests
-Check `tests/e2e_samples.rs` in the **duroxide** main repo ([github.com/affandar/duroxide](https://github.com/affandar/duroxide/tree/main/tests)) for any new or changed tests. Compare test function names and copy any missing tests, adapting them for PostgreSQL.
+Check `tests/e2e_samples.rs` in the **duroxide** main repo ([github.com/microsoft/duroxide](https://github.com/microsoft/duroxide/tree/main/tests)) for any new or changed tests. Compare test function names and copy any missing tests, adapting them for PostgreSQL.
 
 Use the GitHub MCP tools to fetch the test file contents from the duroxide repo, then compare with local tests:
 

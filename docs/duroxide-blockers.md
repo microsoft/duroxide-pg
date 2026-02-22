@@ -10,12 +10,12 @@
 
 1. **Check duroxide releases:**
    ```bash
-   gh release list --repo affandar/duroxide --limit 10
+   gh release list --repo microsoft/duroxide --limit 10
    ```
 
 2. **Check specific issue status:**
    ```bash
-   gh issue view <ISSUE_NUMBER> --repo affandar/duroxide
+   gh issue view <ISSUE_NUMBER> --repo microsoft/duroxide
    ```
 
 3. **Check current duroxide version in use:**
@@ -36,7 +36,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Issue** | [GitHub #51](https://github.com/affandar/duroxide/issues/51) |
+| **Issue** | [GitHub #51](https://github.com/microsoft/duroxide/issues/51) |
 | **Status** | 🔴 Open |
 | **Fixed In** | TBD |
 | **Workaround Location** | `tests/postgres_provider_test.rs` - `long_polling_tests` module |
@@ -79,7 +79,7 @@ Template for resolved blocker:
 
 | Field | Value |
 |-------|-------|
-| **Issue** | [GitHub #XX](https://github.com/affandar/duroxide/issues/XX) |
+| **Issue** | [GitHub #XX](https://github.com/microsoft/duroxide/issues/XX) |
 | **Status** | ✅ Resolved |
 | **Fixed In** | v0.1.X |
 | **Cleanup PR** | [#YY](link) |
