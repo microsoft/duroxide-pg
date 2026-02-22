@@ -1,11 +1,3 @@
-# ⚠️ This repository has moved
-
-**This repo has been relocated to [microsoft/duroxide-pg](https://github.com/microsoft/duroxide-pg).**
-
-All future development will happen there. This repository is archived and will no longer receive updates.
-
----
-
 # Duroxide PostgreSQL Provider
 
 A PostgreSQL-based provider implementation for [Duroxide](https://github.com/microsoft/duroxide), a durable task orchestration framework for Rust.
