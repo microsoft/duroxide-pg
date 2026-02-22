@@ -1,12 +1,12 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use duroxide::providers::{
-    CustomStatusUpdate, DeleteInstanceResult, DispatcherCapabilityFilter, ExecutionInfo,
+    DeleteInstanceResult, DispatcherCapabilityFilter, ExecutionInfo,
     ExecutionMetadata, InstanceFilter, InstanceInfo, OrchestrationItem, Provider, ProviderAdmin,
     ProviderError, PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier,
     SessionFetchConfig, SystemMetrics, WorkItem,
 };
-use duroxide::Event;
+use duroxide::{Event, EventKind};
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
 use std::sync::Arc;
 use std::time::Duration;
@@ -388,13 +388,20 @@ impl Provider for PostgresProvider {
             )
         })?;
 
-        // Map custom_status to action/value for the stored procedure
-        let (custom_status_action, custom_status_value): (Option<&str>, Option<&str>) =
-            match &metadata.custom_status {
-                Some(CustomStatusUpdate::Set(s)) => (Some("set"), Some(s.as_str())),
-                Some(CustomStatusUpdate::Clear) => (Some("clear"), None),
+        // Scan history_delta for the last CustomStatusUpdated event
+        let (custom_status_action, custom_status_value): (Option<&str>, Option<&str>) = {
+            let mut last_status: Option<&Option<String>> = None;
+            for event in &history_delta {
+                if let EventKind::CustomStatusUpdated { ref status } = event.kind {
+                    last_status = Some(status);
+                }
+            }
+            match last_status {
+                Some(Some(s)) => (Some("set"), Some(s.as_str())),
+                Some(None) => (Some("clear"), None),
                 None => (None, None),
-            };
+            }
+        };
 
         let metadata_json = serde_json::json!({
             "orchestration_name": metadata.orchestration_name,

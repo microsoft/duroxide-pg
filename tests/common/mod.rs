@@ -191,6 +191,7 @@ pub async fn test_create_execution(
                     parent_instance: parent_instance.map(|s| s.to_string()),
                     parent_id,
                     carry_forward_events: None,
+                    initial_custom_status: None,
                 },
             )],
             vec![], // no worker items

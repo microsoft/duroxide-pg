@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.22] - 2026-02-22
+
+- Updated duroxide dependency from 0.1.19 to 0.1.20
+- **Custom status as history events:** `ack_orchestration_item` now scans `history_delta` for
+  `CustomStatusUpdated` events instead of reading `ExecutionMetadata.custom_status`
+  - Removed `CustomStatusUpdate` enum usage (removed upstream in duroxide 0.1.20)
+  - Custom status is now fully durable and replayable via history events
+- **`short_poll_threshold()` override:** ProviderFactory now returns 500ms for PostgreSQL,
+  resolving duroxide #51 (removed warmup workarounds from short-poll tests)
+- Added `test_orphan_activity_after_instance_force_deletion` validation test
+- Total validation tests: 165 (up from 164)
+
 ## [0.1.21] - 2026-02-20
 
 - Updated duroxide dependency from 0.1.18 to 0.1.19

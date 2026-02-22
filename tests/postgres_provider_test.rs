@@ -123,6 +123,10 @@ impl ProviderFactory for PostgresProviderFactory {
         std::time::Duration::from_millis(self.lock_timeout_ms)
     }
 
+    fn short_poll_threshold(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(500)
+    }
+
     async fn corrupt_instance_history(&self, instance: &str) {
         let schema = self.current_schema_name.lock().unwrap().clone().unwrap();
         let pool = PgPoolOptions::new()
@@ -287,37 +291,11 @@ mod long_polling_tests {
     use super::*;
     use duroxide::provider_validation::long_polling;
 
-    // PostgreSQL provider uses short polling (returns immediately when no work)
-    //
-    // STOPGAP: These tests require warmup queries because duroxide's short-poll
-    // validation has a hardcoded 100ms threshold (see duroxide issue #51).
-    // PostgreSQL stored procedure calls take ~70-80ms over network, and first
-    // queries have additional latency from query plan compilation.
-    //
-    // Once duroxide #51 is fixed to make the threshold configurable, remove the
-    // warmup queries and use the standard provider_validation_test! macro.
-    // See: https://github.com/affandar/duroxide/issues/51
     #[tokio::test]
     async fn test_short_poll_returns_immediately() {
         let factory = PostgresProviderFactory::new();
         let provider = factory.create_provider().await;
-        // STOPGAP for duroxide #51: Warm up connection pool and query plan cache
-        // Remove once short_poll_threshold() is configurable via ProviderFactory
-        let _ = provider
-            .fetch_orchestration_item(
-                std::time::Duration::from_secs(1),
-                std::time::Duration::ZERO,
-                None,
-            )
-            .await;
-        let _ = provider
-            .fetch_orchestration_item(
-                std::time::Duration::from_secs(1),
-                std::time::Duration::ZERO,
-                None,
-            )
-            .await;
-        long_polling::test_short_poll_returns_immediately(&*provider).await;
+        long_polling::test_short_poll_returns_immediately(&*provider, factory.short_poll_threshold()).await;
         factory.cleanup_schema().await;
     }
 
@@ -325,15 +303,7 @@ mod long_polling_tests {
     async fn test_short_poll_work_item_returns_immediately() {
         let factory = PostgresProviderFactory::new();
         let provider = factory.create_provider().await;
-        // STOPGAP for duroxide #51: Warm up connection pool and query plan cache
-        // Remove once short_poll_threshold() is configurable via ProviderFactory
-        let _ = provider
-            .fetch_work_item(std::time::Duration::from_secs(1), std::time::Duration::ZERO, None)
-            .await;
-        let _ = provider
-            .fetch_work_item(std::time::Duration::from_secs(1), std::time::Duration::ZERO, None)
-            .await;
-        long_polling::test_short_poll_work_item_returns_immediately(&*provider).await;
+        long_polling::test_short_poll_work_item_returns_immediately(&*provider, factory.short_poll_threshold()).await;
         factory.cleanup_schema().await;
     }
 
@@ -369,6 +339,7 @@ mod cancellation_tests {
     provider_validation_test!(cancellation::test_cancelling_nonexistent_activities_is_idempotent);
     provider_validation_test!(cancellation::test_batch_cancellation_deletes_multiple_activities);
     provider_validation_test!(cancellation::test_same_activity_in_worker_items_and_cancelled_is_noop);
+    provider_validation_test!(cancellation::test_orphan_activity_after_instance_force_deletion);
 }
 
 mod deletion_tests {
