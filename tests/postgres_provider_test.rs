@@ -131,6 +131,10 @@ impl ProviderFactory for PostgresProviderFactory {
         std::time::Duration::from_millis(self.lock_timeout_ms)
     }
 
+    fn short_poll_threshold(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(500)
+    }
+
     async fn corrupt_instance_history(&self, instance: &str) {
         let schema = self.current_schema_name.lock().unwrap().clone().unwrap();
         let pool = PgPoolOptions::new()
@@ -314,6 +318,9 @@ mod cancellation_tests {
     provider_validation_test!(cancellation::test_renew_returns_missing_when_instance_deleted);
     provider_validation_test!(cancellation::test_ack_work_item_none_deletes_without_enqueue);
 
+    // Orphan activity test (new in duroxide 0.1.20)
+    provider_validation_test!(cancellation::test_orphan_activity_after_instance_force_deletion);
+
     // Lock-stealing cancellation tests (new in duroxide 0.1.8)
     provider_validation_test!(cancellation::test_cancelled_activities_deleted_from_worker_queue);
     provider_validation_test!(cancellation::test_ack_work_item_fails_when_entry_deleted);
@@ -355,15 +362,17 @@ mod long_polling_tests {
 
     #[tokio::test]
     async fn test_short_poll_returns_immediately() {
+        let factory = PostgresProviderFactory::new();
         let (provider, schema_name) = create_short_poll_provider().await;
-        long_polling::test_short_poll_returns_immediately(provider.as_ref()).await;
+        long_polling::test_short_poll_returns_immediately(provider.as_ref(), factory.short_poll_threshold()).await;
         reset_schema(&get_database_url(), &schema_name).await;
     }
 
     #[tokio::test]
     async fn test_short_poll_work_item_returns_immediately() {
+        let factory = PostgresProviderFactory::new();
         let (provider, schema_name) = create_short_poll_provider().await;
-        long_polling::test_short_poll_work_item_returns_immediately(provider.as_ref()).await;
+        long_polling::test_short_poll_work_item_returns_immediately(provider.as_ref(), factory.short_poll_threshold()).await;
         reset_schema(&get_database_url(), &schema_name).await;
     }
 

@@ -245,6 +245,7 @@ async fn test_enqueue_for_orchestrator() {
                     parent_instance: None,
                     parent_id: None,
                     carry_forward_events: None,
+                    initial_custom_status: None,
                 },
             )],
             vec![], // no worker items
@@ -498,6 +499,7 @@ async fn test_list_instances_and_executions() {
                         parent_instance: None,
                         parent_id: None,
                         carry_forward_events: None,
+                        initial_custom_status: None,
                     },
                 )],
                 vec![],
