@@ -58,11 +58,12 @@ let provider = PostgresProvider::new_with_schema(
 - Poison message detection with attempt count tracking
 - Lock renewal for long-running orchestrations and activities
 
-## Latest Release (0.1.22)
+## Latest Release (0.1.23)
 
-- Updated to duroxide 0.1.20 — custom status now uses history events instead of metadata
-- `short_poll_threshold()` configurable via ProviderFactory (resolves duroxide #51)
-- New validation test: `test_orphan_activity_after_instance_force_deletion`
+- Updated to duroxide 0.1.21 — orphan queue message handling
+- Drop QueueMessage items enqueued before orchestration starts
+- New validation test: `test_orphan_queue_messages_dropped`
+- New e2e test: `sample_config_hot_reload_persistent_events_fs`
 - See [CHANGELOG.md](CHANGELOG.md) for full version history
 
 ## License

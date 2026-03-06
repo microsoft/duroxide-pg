@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.23] - 2026-03-06
+
+- Updated duroxide dependency from 0.1.20 to 0.1.21
+- **Orphan queue message handling:** Drop `QueueMessage` items enqueued before orchestration
+  starts (detected via `orchestration_name == "Unknown"` with empty history and all-QueueMessage
+  batch). Non-QueueMessage items (e.g., `CancelInstance`) are kept for retry.
+- Added `test_orphan_queue_messages_dropped` validation test
+- Added `sample_config_hot_reload_persistent_events_fs` e2e test
+- Total validation tests: 166 (up from 165)
+
 ## [0.1.22] - 2026-02-22
 
 - Updated duroxide dependency from 0.1.19 to 0.1.20

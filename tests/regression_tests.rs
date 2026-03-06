@@ -94,10 +94,7 @@ async fn test_parallel_suborchestrations_no_deadlock() {
 
     // Child orchestration - does minimal work and completes
     let child = |ctx: OrchestrationContext, input: String| async move {
-        let result = ctx
-            .schedule_activity("DoWork", input)
-            
-            .await?;
+        let result = ctx.schedule_activity("DoWork", input).await?;
         Ok(result)
     };
 
@@ -114,10 +111,7 @@ async fn test_parallel_suborchestrations_no_deadlock() {
         // as all SubOrchCompleted messages arrive nearly simultaneously
         let results = ctx.join(futures).await;
 
-        let outputs: Vec<String> = results
-            .into_iter()
-            .filter_map(|out| out.ok())
-            .collect();
+        let outputs: Vec<String> = results.into_iter().filter_map(|out| out.ok()).collect();
 
         Ok(format!("completed:{}", outputs.len()))
     };
@@ -221,9 +215,7 @@ async fn test_parallel_suborchestrations_stress() {
         .build();
 
     let child = |ctx: OrchestrationContext, input: String| async move {
-        ctx.schedule_activity("Work", input.clone())
-            
-            .await
+        ctx.schedule_activity("Work", input.clone()).await
     };
 
     let parent = |ctx: OrchestrationContext, _input: String| async move {
@@ -231,10 +223,7 @@ async fn test_parallel_suborchestrations_stress() {
             .map(|i| ctx.schedule_sub_orchestration("StressChild", format!("c{i}")))
             .collect();
         let results = ctx.join(futures).await;
-        let count = results
-            .iter()
-            .filter(|r| r.is_ok())
-            .count();
+        let count = results.iter().filter(|r| r.is_ok()).count();
         Ok(format!("done:{count}"))
     };
 

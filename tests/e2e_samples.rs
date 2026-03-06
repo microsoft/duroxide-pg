@@ -52,15 +52,9 @@ async fn sample_hello_world_fs() {
     // Orchestrator: emit a trace, call Hello twice, return result using input
     let orchestration = |ctx: OrchestrationContext, input: String| async move {
         ctx.trace_info("hello_world started");
-        let res = ctx
-            .schedule_activity("Hello", "Rust")
-            
-            .await?;
+        let res = ctx.schedule_activity("Hello", "Rust").await?;
         ctx.trace_info(format!("hello_world result={res} "));
-        let res1 = ctx
-            .schedule_activity("Hello", input)
-            
-            .await?;
+        let res1 = ctx.schedule_activity("Hello", input).await?;
         ctx.trace_info(format!("hello_world result={res1} "));
         Ok(res1)
     };
@@ -86,7 +80,9 @@ async fn sample_hello_world_fs() {
         .await
         .unwrap()
     {
-        runtime::OrchestrationStatus::Completed { output, .. } => assert_eq!(output, "Hello, World!"),
+        runtime::OrchestrationStatus::Completed { output, .. } => {
+            assert_eq!(output, "Hello, World!")
+        }
         runtime::OrchestrationStatus::Failed { details, .. } => {
             panic!("orchestration failed: {}", details.display_message())
         }
@@ -122,24 +118,12 @@ async fn sample_basic_control_flow_fs() {
 
     // Orchestrator: get a flag and branch
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
-        let flag = ctx
-            .schedule_activity("GetFlag", "")
-            
-            .await
-            .unwrap();
+        let flag = ctx.schedule_activity("GetFlag", "").await.unwrap();
         ctx.trace_info(format!("control_flow flag decided = {flag}"));
         if flag == "yes" {
-            Ok(ctx
-                .schedule_activity("SayYes", "")
-                
-            .await
-                .unwrap())
+            Ok(ctx.schedule_activity("SayYes", "").await.unwrap())
         } else {
-            Ok(ctx
-                .schedule_activity("SayNo", "")
-                
-            .await
-                .unwrap())
+            Ok(ctx.schedule_activity("SayNo", "").await.unwrap())
         }
     };
 
@@ -196,11 +180,7 @@ async fn sample_loop_fs() {
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
         let mut acc = String::from("start");
         for i in 0..3 {
-            acc = ctx
-                .schedule_activity("Append", acc)
-                
-            .await
-                .unwrap();
+            acc = ctx.schedule_activity("Append", acc).await.unwrap();
             ctx.trace_info(format!("loop iteration {i} completed acc={acc}"));
         }
         Ok(acc)
@@ -267,22 +247,14 @@ async fn sample_error_handling_fs() {
 
     // Orchestrator: try fragile, on error call Recover
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
-        match ctx
-            .schedule_activity("Fragile", "bad")
-            
-            .await
-        {
+        match ctx.schedule_activity("Fragile", "bad").await {
             Ok(v) => {
                 ctx.trace_info(format!("fragile succeeded value={v}"));
                 Ok(v)
             }
             Err(e) => {
                 ctx.trace_warn(format!("fragile failed error={e}"));
-                let rec = ctx
-                    .schedule_activity("Recover", "")
-                    
-            .await
-                    .unwrap();
+                let rec = ctx.schedule_activity("Recover", "").await.unwrap();
                 if rec != "recovered" {
                     ctx.trace_error(format!("unexpected recovery value={rec}"));
                 }
@@ -666,17 +638,12 @@ async fn sample_sub_orchestration_basic_fs() {
         .build();
 
     let child_upper = |ctx: OrchestrationContext, input: String| async move {
-        let up = ctx
-            .schedule_activity("Upper", input)
-            
-            .await
-            .unwrap();
+        let up = ctx.schedule_activity("Upper", input).await.unwrap();
         Ok(up)
     };
     let parent = |ctx: OrchestrationContext, input: String| async move {
         let r = ctx
             .schedule_sub_orchestration("ChildUpper", input)
-            
             .await
             .unwrap();
         Ok(format!("parent:{r}"))
@@ -734,11 +701,7 @@ async fn sample_sub_orchestration_fanout_fs() {
         .build();
 
     let child_sum = |ctx: OrchestrationContext, input: String| async move {
-        let s = ctx
-            .schedule_activity("Add", input)
-            
-            .await
-            .unwrap();
+        let s = ctx.schedule_activity("Add", input).await.unwrap();
         Ok(s)
     };
     let parent = |ctx: OrchestrationContext, _input: String| async move {
@@ -803,26 +766,14 @@ async fn sample_sub_orchestration_chained_fs() {
         .build();
 
     let leaf = |ctx: OrchestrationContext, input: String| async move {
-        Ok(ctx
-            .schedule_activity("AppendX", input)
-            
-            .await
-            .unwrap())
+        Ok(ctx.schedule_activity("AppendX", input).await.unwrap())
     };
     let mid = |ctx: OrchestrationContext, input: String| async move {
-        let r = ctx
-            .schedule_sub_orchestration("Leaf", input)
-            
-            .await
-            .unwrap();
+        let r = ctx.schedule_sub_orchestration("Leaf", input).await.unwrap();
         Ok(format!("{r}-mid"))
     };
     let root = |ctx: OrchestrationContext, input: String| async move {
-        let r = ctx
-            .schedule_sub_orchestration("Mid", input)
-            
-            .await
-            .unwrap();
+        let r = ctx.schedule_sub_orchestration("Mid", input).await.unwrap();
         Ok(format!("root:{r}"))
     };
 
@@ -880,11 +831,7 @@ async fn sample_detached_orchestration_scheduling_fs() {
     let chained = |ctx: OrchestrationContext, input: String| async move {
         ctx.schedule_timer(std::time::Duration::from_millis(5))
             .await;
-        Ok(ctx
-            .schedule_activity("Echo", input)
-            
-            .await
-            .unwrap())
+        Ok(ctx.schedule_activity("Echo", input).await.unwrap())
     };
     let coordinator = |ctx: OrchestrationContext, _input: String| async move {
         ctx.schedule_orchestration("Chained", "W1", "A");
@@ -956,7 +903,9 @@ async fn sample_detached_then_activity_fs() {
     let (store, schema_name) = common::create_postgres_store().await;
 
     let activity_registry = ActivityRegistry::builder()
-        .register("Echo", |_ctx: ActivityContext, input: String| async move { Ok(input) })
+        .register("Echo", |_ctx: ActivityContext, input: String| async move {
+            Ok(input)
+        })
         .build();
 
     let child = |ctx: OrchestrationContext, input: String| async move {
@@ -1110,7 +1059,6 @@ async fn sample_typed_activity_and_orchestration_fs() {
     let orchestration = |ctx: OrchestrationContext, req: AddReq| async move {
         let out: AddRes = ctx
             .schedule_activity_typed::<AddReq, AddRes>("Add", &req)
-            
             .await?;
         Ok(out)
     };
@@ -1153,9 +1101,7 @@ async fn sample_typed_event_fs() {
 
     let activity_registry = ActivityRegistry::builder().build();
     let orch = |ctx: OrchestrationContext, _in: ()| async move {
-        let ack: Ack = ctx
-            .schedule_wait_typed::<Ack>("Ready")
-            .await;
+        let ack: Ack = ctx.schedule_wait_typed::<Ack>("Ready").await;
         Ok::<_, String>(serde_json::to_string(&ack).unwrap())
     };
     let orchestration_registry = OrchestrationRegistry::builder()
@@ -1294,9 +1240,7 @@ async fn sample_mixed_string_and_typed_string_orch_fs() {
         .register("MixedStringOrch", orch)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), activity_registry, orch_reg)
-            .await;
+    let rt = runtime::Runtime::start_with_store(store.clone(), activity_registry, orch_reg).await;
     let client = Client::new(store.clone());
     client
         .start_orchestration("inst-mixed-string", "MixedStringOrch", "")
@@ -1405,13 +1349,11 @@ async fn sample_versioning_sub_orchestration_explicit_vs_policy_fs() {
         // Explicit versioned call -> expect c1
         let a = ctx
             .schedule_sub_orchestration_versioned("Child", Some("1.0.0".to_string()), "exp")
-            
             .await
             .unwrap();
         // Policy-based call (Latest) -> expect c2
         let b = ctx
             .schedule_sub_orchestration("Child", "pol")
-            
             .await
             .unwrap();
         Ok(format!("{a}-{b}"))
@@ -1558,7 +1500,6 @@ async fn sample_cancellation_parent_cascades_to_children_fs() {
     let parent = |ctx: OrchestrationContext, _input: String| async move {
         let _ = ctx
             .schedule_sub_orchestration("ChildSample", "seed")
-            
             .await?;
         Ok::<_, String>("parent_done".to_string())
     };
@@ -1701,10 +1642,7 @@ async fn sample_basic_error_handling_fs() {
     // Simple orchestration that calls the activity
     let orchestration = |ctx: OrchestrationContext, input: String| async move {
         ctx.trace_info("Starting validation");
-        let result = ctx
-            .schedule_activity("ValidateInput", input)
-            
-            .await?;
+        let result = ctx.schedule_activity("ValidateInput", input).await?;
         ctx.trace_info(format!("Validation result: {result}"));
         Ok(result)
     };
@@ -1799,13 +1737,9 @@ async fn sample_nested_function_error_handling_fs() {
         ctx.trace_info("Starting processing");
         let processed = ctx
             .schedule_activity("ProcessData", data.to_string())
-            
             .await?;
         ctx.trace_info("Starting formatting");
-        let formatted = ctx
-            .schedule_activity("FormatOutput", processed)
-            
-            .await?;
+        let formatted = ctx.schedule_activity("FormatOutput", processed).await?;
         Ok(formatted)
     }
 
@@ -1906,21 +1840,14 @@ async fn sample_error_recovery_fs() {
     let orchestration = |ctx: OrchestrationContext, input: String| async move {
         ctx.trace_info("Starting orchestration");
 
-        match ctx
-            .schedule_activity("ProcessData", input.clone())
-            
-            .await
-        {
+        match ctx.schedule_activity("ProcessData", input.clone()).await {
             Ok(result) => {
                 ctx.trace_info("Processing succeeded");
                 Ok(result)
             }
             Err(e) => {
                 ctx.trace_info("Processing failed, logging error");
-                let _ = ctx
-                    .schedule_activity("LogError", e.clone())
-                    
-            .await;
+                let _ = ctx.schedule_activity("LogError", e.clone()).await;
                 Err(format!("Failed to process '{input}': {e}"))
             }
         }
@@ -2001,10 +1928,13 @@ async fn sample_self_pruning_eternal_orchestration() {
     let executions_pruned_clone = executions_pruned.clone();
 
     let activity_registry = ActivityRegistry::builder()
-        .register("ProcessBatch", |_ctx: ActivityContext, batch_num: String| async move {
-            // Simulate batch processing
-            Ok(format!("Processed batch {batch_num}"))
-        })
+        .register(
+            "ProcessBatch",
+            |_ctx: ActivityContext, batch_num: String| async move {
+                // Simulate batch processing
+                Ok(format!("Processed batch {batch_num}"))
+            },
+        )
         .register("PruneSelf", move |ctx: ActivityContext, _input: String| {
             let prune_count = prune_count_clone.clone();
             let executions_pruned = executions_pruned_clone.clone();
@@ -2025,7 +1955,10 @@ async fn sample_self_pruning_eternal_orchestration() {
                     .map_err(|e| e.to_string())?;
 
                 prune_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                executions_pruned.fetch_add(result.executions_deleted, std::sync::atomic::Ordering::SeqCst);
+                executions_pruned.fetch_add(
+                    result.executions_deleted,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
 
                 Ok(format!("Pruned {} executions", result.executions_deleted))
             }
@@ -2063,7 +1996,8 @@ async fn sample_self_pruning_eternal_orchestration() {
             batch_num: state.batch_num + 1,
             total_batches: state.total_batches,
         };
-        ctx.continue_as_new(serde_json::to_string(&next_state).unwrap()).await
+        ctx.continue_as_new(serde_json::to_string(&next_state).unwrap())
+            .await
     };
 
     let orchestration_registry = OrchestrationRegistry::builder()
@@ -2105,7 +2039,10 @@ async fn sample_self_pruning_eternal_orchestration() {
     assert!(prunes >= 4, "Should have pruned at least 4 times");
 
     let pruned = executions_pruned.load(std::sync::atomic::Ordering::SeqCst);
-    assert!(pruned >= 3, "Should have pruned at least 3 executions total");
+    assert!(
+        pruned >= 3,
+        "Should have pruned at least 3 executions total"
+    );
 
     // Verify only 1 execution remains (the final one)
     let executions = client.list_executions("inst-self-prune").await.unwrap();
@@ -2114,6 +2051,163 @@ async fn sample_self_pruning_eternal_orchestration() {
         1,
         "Only final execution should remain after self-pruning"
     );
+
+    rt.shutdown(None).await;
+    common::cleanup_schema(&schema_name).await;
+}
+
+/// Config hot-reload with persistent events (PostgreSQL version).
+///
+/// Demonstrates draining buffered events between work cycles using
+/// `dequeue_event` + `select2` with a short timeout as a non-blocking drain.
+///
+/// Note: Events enqueued *before* the orchestration starts may be dropped by the
+/// provider (orphan message semantics). This test only enqueues events after start.
+#[tokio::test]
+async fn sample_config_hot_reload_persistent_events_fs() {
+    init_test_logging();
+    let (store, schema_name) = common::create_postgres_store().await;
+
+    // Activity that "applies" a config value
+    let activity_registry = ActivityRegistry::builder()
+        .register(
+            "ApplyConfig",
+            |_ctx: ActivityContext, config: String| async move { Ok(format!("applied:{config}")) },
+        )
+        .build();
+
+    // Orchestration: run 3 work cycles. Between each cycle, drain any pending
+    // ConfigUpdate events that arrived (zero or more).
+    // After the final cycle, do one last drain to pick up any late arrivals.
+    let orchestration = |ctx: OrchestrationContext, _input: String| async move {
+        let mut log: Vec<String> = Vec::new();
+
+        for cycle in 0..3 {
+            // ── Drain pending config updates (non-blocking) ──
+            loop {
+                let config_wait = ctx.dequeue_event("ConfigUpdate");
+                let drain_timeout = ctx.schedule_timer(Duration::from_millis(50));
+                match ctx.select2(config_wait, drain_timeout).await {
+                    duroxide::Either2::First(config_json) => {
+                        let result = ctx.schedule_activity("ApplyConfig", &config_json).await?;
+                        log.push(result);
+                    }
+                    duroxide::Either2::Second(_) => break, // no more pending updates
+                }
+            }
+
+            // ── Mark cycle boundary, then simulate work ──
+            ctx.schedule_timer(Duration::from_millis(100)).await;
+            let _ = ctx
+                .schedule_activity("ApplyConfig", format!("cycle_{cycle}"))
+                .await?;
+            log.push(format!("cycle:{cycle}"));
+        }
+
+        // ── Final drain: pick up any events that arrived during the last cycle ──
+        loop {
+            let config_wait = ctx.dequeue_event("ConfigUpdate");
+            let drain_timeout = ctx.schedule_timer(Duration::from_millis(50));
+            match ctx.select2(config_wait, drain_timeout).await {
+                duroxide::Either2::First(config_json) => {
+                    let result = ctx.schedule_activity("ApplyConfig", &config_json).await?;
+                    log.push(result);
+                }
+                duroxide::Either2::Second(_) => break,
+            }
+        }
+
+        Ok(log.join(","))
+    };
+
+    let orchestration_registry = OrchestrationRegistry::builder()
+        .register("ConfigHotReload", orchestration)
+        .build();
+
+    let options = runtime::RuntimeOptions {
+        dispatcher_min_poll_interval: Duration::from_millis(10),
+        ..Default::default()
+    };
+
+    let rt = runtime::Runtime::start_with_options(
+        store.clone(),
+        activity_registry,
+        orchestration_registry,
+        options,
+    )
+    .await;
+    let client = Client::new(store.clone());
+
+    // Start the orchestration first — events enqueued before start may be
+    // dropped by the provider (orphan message semantics).
+    client
+        .start_orchestration("inst-hot-reload", "ConfigHotReload", "")
+        .await
+        .unwrap();
+
+    // Push two config updates immediately after start.
+    client
+        .enqueue_event("inst-hot-reload", "ConfigUpdate", "v1")
+        .await
+        .unwrap();
+    client
+        .enqueue_event("inst-hot-reload", "ConfigUpdate", "v2")
+        .await
+        .unwrap();
+
+    // Push a third update while the orchestration is running (arrives mid-flight)
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    client
+        .enqueue_event("inst-hot-reload", "ConfigUpdate", "v3")
+        .await
+        .unwrap();
+
+    let status = client
+        .wait_for_orchestration("inst-hot-reload", Duration::from_secs(10))
+        .await
+        .unwrap();
+    match status {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
+            let entries: Vec<&str> = output.split(',').collect();
+
+            let pos_v1 = entries
+                .iter()
+                .position(|e| *e == "applied:v1")
+                .unwrap_or_else(|| panic!("v1 missing from output: {output}"));
+            let pos_v2 = entries
+                .iter()
+                .position(|e| *e == "applied:v2")
+                .unwrap_or_else(|| panic!("v2 missing from output: {output}"));
+            let pos_v3 = entries
+                .iter()
+                .position(|e| *e == "applied:v3")
+                .unwrap_or_else(|| panic!("v3 missing from output: {output}"));
+            let pos_cycle0 = entries
+                .iter()
+                .position(|e| *e == "cycle:0")
+                .unwrap_or_else(|| panic!("cycle:0 missing from output: {output}"));
+
+            // FIFO ordering: v1 must come before v2, v2 before v3
+            assert!(
+                pos_v1 < pos_v2,
+                "v1 should come before v2 (FIFO), got: {output}"
+            );
+            assert!(
+                pos_v2 < pos_v3,
+                "v2 should come before v3 (FIFO), got: {output}"
+            );
+
+            // v3 arrived mid-flight → must come after cycle:0
+            assert!(
+                pos_v3 > pos_cycle0,
+                "v3 arrived mid-flight, should be drained after cycle:0, got: {output}"
+            );
+        }
+        runtime::OrchestrationStatus::Failed { details, .. } => {
+            panic!("orchestration failed: {}", details.display_message())
+        }
+        other => panic!("unexpected status: {:?}", other),
+    }
 
     rt.shutdown(None).await;
     common::cleanup_schema(&schema_name).await;

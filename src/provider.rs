@@ -1,10 +1,10 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use duroxide::providers::{
-    DeleteInstanceResult, DispatcherCapabilityFilter, ExecutionInfo,
-    ExecutionMetadata, InstanceFilter, InstanceInfo, OrchestrationItem, Provider, ProviderAdmin,
-    ProviderError, PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier,
-    SessionFetchConfig, SystemMetrics, WorkItem,
+    DeleteInstanceResult, DispatcherCapabilityFilter, ExecutionInfo, ExecutionMetadata,
+    InstanceFilter, InstanceInfo, OrchestrationItem, Provider, ProviderAdmin, ProviderError,
+    PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier, SessionFetchConfig,
+    SystemMetrics, WorkItem,
 };
 use duroxide::{Event, EventKind};
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
@@ -91,8 +91,6 @@ impl PostgresProvider {
             .unwrap()
             .as_millis() as i64
     }
-
-
 
     /// Get schema-qualified table name
     fn table_name(&self, table: &str) -> String {
@@ -197,8 +195,12 @@ impl Provider for PostgresProvider {
         // Extract version filter from capability filter
         let (min_packed, max_packed) = if let Some(f) = filter {
             if let Some(range) = f.supported_duroxide_versions.first() {
-                let min = range.min.major as i64 * 1_000_000 + range.min.minor as i64 * 1_000 + range.min.patch as i64;
-                let max = range.max.major as i64 * 1_000_000 + range.max.minor as i64 * 1_000 + range.max.patch as i64;
+                let min = range.min.major as i64 * 1_000_000
+                    + range.min.minor as i64 * 1_000
+                    + range.min.patch as i64;
+                let max = range.max.major as i64 * 1_000_000
+                    + range.max.minor as i64 * 1_000
+                    + range.max.patch as i64;
                 (Some(min), Some(max))
             } else {
                 // Empty supported_duroxide_versions = supports nothing
@@ -268,19 +270,20 @@ impl Provider for PostgresProvider {
                 attempt_count,
             )) = row
             {
-                let (history, history_error) = match serde_json::from_value::<Vec<Event>>(history_json) {
-                    Ok(h) => (h, None),
-                    Err(e) => {
-                        let error_msg = format!("Failed to deserialize history: {e}");
-                        warn!(
-                            target = "duroxide::providers::postgres",
-                            instance = %instance_id,
-                            error = %error_msg,
-                            "History deserialization failed, returning item with history_error"
-                        );
-                        (vec![], Some(error_msg))
-                    }
-                };
+                let (history, history_error) =
+                    match serde_json::from_value::<Vec<Event>>(history_json) {
+                        Ok(h) => (h, None),
+                        Err(e) => {
+                            let error_msg = format!("Failed to deserialize history: {e}");
+                            warn!(
+                                target = "duroxide::providers::postgres",
+                                instance = %instance_id,
+                                error = %error_msg,
+                                "History deserialization failed, returning item with history_error"
+                            );
+                            (vec![], Some(error_msg))
+                        }
+                    };
 
                 let messages: Vec<WorkItem> =
                     serde_json::from_value(messages_json).map_err(|e| {
@@ -303,6 +306,37 @@ impl Provider for PostgresProvider {
                     attempts = attempt + 1,
                     "Fetched orchestration item via stored procedure"
                 );
+
+                // Orphan queue messages: if orchestration_name is "Unknown", there's
+                // no history, and ALL messages are QueueMessage items, these are orphan
+                // events enqueued before the orchestration started. Drop them by acking
+                // with empty deltas. Other work items (CancelInstance, etc.) may
+                // legitimately race with StartOrchestration and must not be dropped.
+                if orchestration_name == "Unknown"
+                    && history.is_empty()
+                    && messages
+                        .iter()
+                        .all(|m| matches!(m, WorkItem::QueueMessage { .. }))
+                {
+                    let message_count = messages.len();
+                    tracing::warn!(
+                        target = "duroxide::providers::postgres",
+                        instance = %instance_id,
+                        message_count,
+                        "Dropping orphan queue messages — events enqueued before orchestration started are not supported"
+                    );
+                    self.ack_orchestration_item(
+                        &lock_token,
+                        execution_id as u64,
+                        vec![],
+                        vec![],
+                        vec![],
+                        ExecutionMetadata::default(),
+                        vec![],
+                    )
+                    .await?;
+                    return Ok(None);
+                }
 
                 return Ok(Some((
                     OrchestrationItem {
@@ -790,11 +824,7 @@ impl Provider for PostgresProvider {
             "Fetched activity work item via stored procedure"
         );
 
-        Ok(Some((
-            work_item,
-            lock_token,
-            attempt_count as u32,
-        )))
+        Ok(Some((work_item, lock_token, attempt_count as u32)))
     }
 
     #[instrument(skip(self), fields(token = %token), target = "duroxide::providers::postgres")]
@@ -1552,13 +1582,11 @@ impl ProviderAdmin for PostgresProvider {
     async fn get_parent_id(&self, instance_id: &str) -> Result<Option<String>, ProviderError> {
         // The stored procedure raises an exception if instance doesn't exist
         // Otherwise returns the parent_instance_id (which may be NULL)
-        let result: Result<Option<String>, _> = sqlx::query_scalar(&format!(
-            "SELECT {}.get_parent_id($1)",
-            self.schema_name
-        ))
-        .bind(instance_id)
-        .fetch_one(&*self.pool)
-        .await;
+        let result: Result<Option<String>, _> =
+            sqlx::query_scalar(&format!("SELECT {}.get_parent_id($1)", self.schema_name))
+                .bind(instance_id)
+                .fetch_one(&*self.pool)
+                .await;
 
         match result {
             Ok(parent_id) => Ok(parent_id),
@@ -1599,15 +1627,9 @@ impl ProviderAdmin for PostgresProvider {
         .map_err(|e| {
             let err_str = e.to_string();
             if err_str.contains("is Running") {
-                ProviderError::permanent(
-                    "delete_instances_atomic",
-                    err_str,
-                )
+                ProviderError::permanent("delete_instances_atomic", err_str)
             } else if err_str.contains("Orphan detected") {
-                ProviderError::permanent(
-                    "delete_instances_atomic",
-                    err_str,
-                )
+                ProviderError::permanent("delete_instances_atomic", err_str)
             } else {
                 Self::sqlx_to_provider_error("delete_instances_atomic", e)
             }
@@ -1666,7 +1688,12 @@ impl ProviderAdmin for PostgresProvider {
 
         // Add completed_before filter if provided
         if filter.completed_before.is_some() {
-            let param_num = filter.instance_ids.as_ref().map(|ids| ids.len()).unwrap_or(0) + 1;
+            let param_num = filter
+                .instance_ids
+                .as_ref()
+                .map(|ids| ids.len())
+                .unwrap_or(0)
+                + 1;
             sql.push_str(&format!(
                 " AND e.completed_at < TO_TIMESTAMP(${} / 1000.0)",
                 param_num
@@ -1675,8 +1702,16 @@ impl ProviderAdmin for PostgresProvider {
 
         // Add limit
         let limit = filter.limit.unwrap_or(1000);
-        let limit_param_num = filter.instance_ids.as_ref().map(|ids| ids.len()).unwrap_or(0)
-            + if filter.completed_before.is_some() { 1 } else { 0 }
+        let limit_param_num = filter
+            .instance_ids
+            .as_ref()
+            .map(|ids| ids.len())
+            .unwrap_or(0)
+            + if filter.completed_before.is_some() {
+                1
+            } else {
+                0
+            }
             + 1;
         sql.push_str(&format!(" LIMIT ${}", limit_param_num));
 
@@ -1805,7 +1840,12 @@ impl ProviderAdmin for PostgresProvider {
 
         // Add completed_before filter if provided
         if filter.completed_before.is_some() {
-            let param_num = filter.instance_ids.as_ref().map(|ids| ids.len()).unwrap_or(0) + 1;
+            let param_num = filter
+                .instance_ids
+                .as_ref()
+                .map(|ids| ids.len())
+                .unwrap_or(0)
+                + 1;
             sql.push_str(&format!(
                 " AND e.completed_at < TO_TIMESTAMP(${} / 1000.0)",
                 param_num
@@ -1814,8 +1854,16 @@ impl ProviderAdmin for PostgresProvider {
 
         // Add limit
         let limit = filter.limit.unwrap_or(1000);
-        let limit_param_num = filter.instance_ids.as_ref().map(|ids| ids.len()).unwrap_or(0)
-            + if filter.completed_before.is_some() { 1 } else { 0 }
+        let limit_param_num = filter
+            .instance_ids
+            .as_ref()
+            .map(|ids| ids.len())
+            .unwrap_or(0)
+            + if filter.completed_before.is_some() {
+                1
+            } else {
+                0
+            }
             + 1;
         sql.push_str(&format!(" LIMIT ${}", limit_param_num));
 

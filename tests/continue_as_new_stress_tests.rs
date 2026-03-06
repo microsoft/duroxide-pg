@@ -54,9 +54,7 @@ async fn concurrent_continue_as_new_chains() {
 
     let activities = ActivityRegistry::builder().build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), activities, orchestrations)
-            .await;
+    let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
 
     let client = Client::new(store.clone());
 
@@ -254,7 +252,6 @@ async fn instance_actor_pattern_stress_test() {
                     k8s_name: input_data.k8s_name.clone(),
                 },
             )
-            
             .await
             .map_err(|e| format!("Failed to get instance connection: {e}"))?;
 
@@ -288,7 +285,6 @@ async fn instance_actor_pattern_stress_test() {
                     connection_string: connection_string.clone(),
                 },
             )
-            
             .await;
 
         // Step 4: Determine health status
@@ -315,7 +311,6 @@ async fn instance_actor_pattern_stress_test() {
                     error_message,
                 },
             )
-            
             .await
             .map_err(|e| format!("Failed to record health check: {e}"))?;
 
@@ -328,7 +323,6 @@ async fn instance_actor_pattern_stress_test() {
                     health_status: status.to_string(),
                 },
             )
-            
             .await
             .map_err(|e| format!("Failed to update instance health: {e}"))?;
 
@@ -359,9 +353,7 @@ async fn instance_actor_pattern_stress_test() {
         .register_typed("cms-update-instance-health", update_instance_health)
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), activities, orchestrations)
-            .await;
+    let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
 
     let client = Client::new(store.clone());
 

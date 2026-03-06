@@ -1,9 +1,9 @@
 use std::sync::{Arc, Once};
 
 use duroxide::provider_validation::{
-    atomicity, cancellation, capability_filtering, custom_status, error_handling, instance_creation,
-    instance_locking, lock_expiration, management, multi_execution, queue_semantics, deletion,
-    prune, bulk_deletion, sessions,
+    atomicity, bulk_deletion, cancellation, capability_filtering, custom_status, deletion,
+    error_handling, instance_creation, instance_locking, lock_expiration, management,
+    multi_execution, prune, queue_semantics, sessions,
 };
 use duroxide::provider_validations::ProviderFactory;
 use duroxide::providers::Provider;
@@ -258,6 +258,7 @@ mod queue_semantics_tests {
     provider_validation_test!(queue_semantics::test_lost_lock_token_handling);
     provider_validation_test!(queue_semantics::test_worker_item_immediate_visibility);
     provider_validation_test!(queue_semantics::test_worker_delayed_visibility_skips_future_items);
+    provider_validation_test!(queue_semantics::test_orphan_queue_messages_dropped);
 }
 
 mod management_tests {
@@ -295,7 +296,11 @@ mod long_polling_tests {
     async fn test_short_poll_returns_immediately() {
         let factory = PostgresProviderFactory::new();
         let provider = factory.create_provider().await;
-        long_polling::test_short_poll_returns_immediately(&*provider, factory.short_poll_threshold()).await;
+        long_polling::test_short_poll_returns_immediately(
+            &*provider,
+            factory.short_poll_threshold(),
+        )
+        .await;
         factory.cleanup_schema().await;
     }
 
@@ -303,7 +308,11 @@ mod long_polling_tests {
     async fn test_short_poll_work_item_returns_immediately() {
         let factory = PostgresProviderFactory::new();
         let provider = factory.create_provider().await;
-        long_polling::test_short_poll_work_item_returns_immediately(&*provider, factory.short_poll_threshold()).await;
+        long_polling::test_short_poll_work_item_returns_immediately(
+            &*provider,
+            factory.short_poll_threshold(),
+        )
+        .await;
         factory.cleanup_schema().await;
     }
 
@@ -323,13 +332,23 @@ mod long_polling_tests {
 mod cancellation_tests {
     use super::*;
 
-    provider_validation_test!(cancellation::test_fetch_returns_running_state_for_active_orchestration);
-    provider_validation_test!(cancellation::test_fetch_returns_terminal_state_when_orchestration_completed);
-    provider_validation_test!(cancellation::test_fetch_returns_terminal_state_when_orchestration_failed);
-    provider_validation_test!(cancellation::test_fetch_returns_terminal_state_when_orchestration_continued_as_new);
+    provider_validation_test!(
+        cancellation::test_fetch_returns_running_state_for_active_orchestration
+    );
+    provider_validation_test!(
+        cancellation::test_fetch_returns_terminal_state_when_orchestration_completed
+    );
+    provider_validation_test!(
+        cancellation::test_fetch_returns_terminal_state_when_orchestration_failed
+    );
+    provider_validation_test!(
+        cancellation::test_fetch_returns_terminal_state_when_orchestration_continued_as_new
+    );
     provider_validation_test!(cancellation::test_fetch_returns_missing_state_when_instance_deleted);
     provider_validation_test!(cancellation::test_renew_returns_running_when_orchestration_active);
-    provider_validation_test!(cancellation::test_renew_returns_terminal_when_orchestration_completed);
+    provider_validation_test!(
+        cancellation::test_renew_returns_terminal_when_orchestration_completed
+    );
     provider_validation_test!(cancellation::test_renew_returns_missing_when_instance_deleted);
     provider_validation_test!(cancellation::test_ack_work_item_none_deletes_without_enqueue);
     // Lock-stealing tests
@@ -338,7 +357,9 @@ mod cancellation_tests {
     provider_validation_test!(cancellation::test_renew_fails_when_entry_deleted);
     provider_validation_test!(cancellation::test_cancelling_nonexistent_activities_is_idempotent);
     provider_validation_test!(cancellation::test_batch_cancellation_deletes_multiple_activities);
-    provider_validation_test!(cancellation::test_same_activity_in_worker_items_and_cancelled_is_noop);
+    provider_validation_test!(
+        cancellation::test_same_activity_in_worker_items_and_cancelled_is_noop
+    );
     provider_validation_test!(cancellation::test_orphan_activity_after_instance_force_deletion);
 }
 
@@ -384,21 +405,43 @@ mod capability_filtering_tests {
     provider_validation_test!(capability_filtering::test_fetch_with_filter_none_returns_any_item);
     provider_validation_test!(capability_filtering::test_fetch_with_compatible_filter_returns_item);
     provider_validation_test!(capability_filtering::test_fetch_with_incompatible_filter_skips_item);
-    provider_validation_test!(capability_filtering::test_fetch_filter_skips_incompatible_selects_compatible);
-    provider_validation_test!(capability_filtering::test_fetch_filter_does_not_lock_skipped_instances);
-    provider_validation_test!(capability_filtering::test_fetch_filter_null_pinned_version_always_compatible);
+    provider_validation_test!(
+        capability_filtering::test_fetch_filter_skips_incompatible_selects_compatible
+    );
+    provider_validation_test!(
+        capability_filtering::test_fetch_filter_does_not_lock_skipped_instances
+    );
+    provider_validation_test!(
+        capability_filtering::test_fetch_filter_null_pinned_version_always_compatible
+    );
     provider_validation_test!(capability_filtering::test_fetch_filter_boundary_versions);
     provider_validation_test!(capability_filtering::test_pinned_version_stored_via_ack_metadata);
-    provider_validation_test!(capability_filtering::test_pinned_version_immutable_across_ack_cycles);
-    provider_validation_test!(capability_filtering::test_continue_as_new_execution_gets_own_pinned_version);
-    provider_validation_test!(capability_filtering::test_filter_with_empty_supported_versions_returns_nothing);
+    provider_validation_test!(
+        capability_filtering::test_pinned_version_immutable_across_ack_cycles
+    );
+    provider_validation_test!(
+        capability_filtering::test_continue_as_new_execution_gets_own_pinned_version
+    );
+    provider_validation_test!(
+        capability_filtering::test_filter_with_empty_supported_versions_returns_nothing
+    );
     provider_validation_test!(capability_filtering::test_concurrent_filtered_fetch_no_double_lock);
-    provider_validation_test!(capability_filtering::test_ack_stores_pinned_version_via_metadata_update);
+    provider_validation_test!(
+        capability_filtering::test_ack_stores_pinned_version_via_metadata_update
+    );
     provider_validation_test!(capability_filtering::test_provider_updates_pinned_version_when_told);
-    provider_validation_test!(capability_filtering::test_fetch_corrupted_history_filtered_vs_unfiltered);
-    provider_validation_test!(capability_filtering::test_fetch_deserialization_error_increments_attempt_count);
-    provider_validation_test!(capability_filtering::test_fetch_deserialization_error_eventually_reaches_poison);
-    provider_validation_test!(capability_filtering::test_fetch_filter_applied_before_history_deserialization);
+    provider_validation_test!(
+        capability_filtering::test_fetch_corrupted_history_filtered_vs_unfiltered
+    );
+    provider_validation_test!(
+        capability_filtering::test_fetch_deserialization_error_increments_attempt_count
+    );
+    provider_validation_test!(
+        capability_filtering::test_fetch_deserialization_error_eventually_reaches_poison
+    );
+    provider_validation_test!(
+        capability_filtering::test_fetch_filter_applied_before_history_deserialization
+    );
     provider_validation_test!(capability_filtering::test_fetch_single_range_only_uses_first_range);
     provider_validation_test!(capability_filtering::test_ack_appends_event_to_corrupted_history);
 }
@@ -435,7 +478,9 @@ mod session_tests {
     provider_validation_test!(sessions::test_abandoned_session_item_ignore_attempt);
     provider_validation_test!(sessions::test_renew_session_lock_after_expiry_returns_zero);
     provider_validation_test!(sessions::test_original_worker_reclaims_expired_session);
-    provider_validation_test!(sessions::test_activity_lock_expires_session_lock_valid_same_worker_refetches);
+    provider_validation_test!(
+        sessions::test_activity_lock_expires_session_lock_valid_same_worker_refetches
+    );
     provider_validation_test!(sessions::test_both_locks_expire_different_worker_claims);
     provider_validation_test!(sessions::test_session_lock_expires_activity_lock_valid_ack_succeeds);
     provider_validation_test!(sessions::test_session_lock_renewal_extends_past_original_timeout);

@@ -62,8 +62,7 @@ async fn test_session_activity_basic() {
         )
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
+    let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
     let client = Client::new(store.clone());
 
     client
@@ -125,8 +124,7 @@ async fn test_session_id_visible_in_activity_context() {
         )
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
+    let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
     let client = Client::new(store.clone());
 
     client
@@ -165,15 +163,11 @@ async fn test_mixed_session_and_regular_activities() {
     let activities = ActivityRegistry::builder()
         .register(
             "SessionTask",
-            |_ctx: ActivityContext, input: String| async move {
-                Ok(format!("session:{input}"))
-            },
+            |_ctx: ActivityContext, input: String| async move { Ok(format!("session:{input}")) },
         )
         .register(
             "RegularTask",
-            |_ctx: ActivityContext, input: String| async move {
-                Ok(format!("regular:{input}"))
-            },
+            |_ctx: ActivityContext, input: String| async move { Ok(format!("regular:{input}")) },
         )
         .build();
 
@@ -191,8 +185,7 @@ async fn test_mixed_session_and_regular_activities() {
         )
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
+    let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
     let client = Client::new(store.clone());
 
     client
@@ -226,10 +219,9 @@ async fn test_multiple_sessions_in_orchestration() {
     let (store, schema) = common::create_postgres_store().await;
 
     let activities = ActivityRegistry::builder()
-        .register(
-            "Task",
-            |_ctx: ActivityContext, input: String| async move { Ok(input) },
-        )
+        .register("Task", |_ctx: ActivityContext, input: String| async move {
+            Ok(input)
+        })
         .build();
 
     let orchestrations = OrchestrationRegistry::builder()
@@ -250,8 +242,7 @@ async fn test_multiple_sessions_in_orchestration() {
         )
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
+    let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
     let client = Client::new(store.clone());
 
     client
@@ -286,12 +277,9 @@ async fn test_session_with_worker_node_id_completes() {
     let (store, schema) = common::create_postgres_store().await;
 
     let activities = ActivityRegistry::builder()
-        .register(
-            "Work",
-            |_ctx: ActivityContext, input: String| async move {
-                Ok(format!("done:{input}"))
-            },
-        )
+        .register("Work", |_ctx: ActivityContext, input: String| async move {
+            Ok(format!("done:{input}"))
+        })
         .build();
 
     let orchestrations = OrchestrationRegistry::builder()
@@ -318,13 +306,9 @@ async fn test_session_with_worker_node_id_completes() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -374,12 +358,9 @@ async fn test_session_fan_out_same_session() {
         .register(
             "FanOutOrch",
             |ctx: OrchestrationContext, _input: String| async move {
-                let f1 =
-                    ctx.schedule_activity_on_session("FanTask", "x", "fan-session");
-                let f2 =
-                    ctx.schedule_activity_on_session("FanTask", "y", "fan-session");
-                let f3 =
-                    ctx.schedule_activity_on_session("FanTask", "z", "fan-session");
+                let f1 = ctx.schedule_activity_on_session("FanTask", "x", "fan-session");
+                let f2 = ctx.schedule_activity_on_session("FanTask", "y", "fan-session");
+                let f3 = ctx.schedule_activity_on_session("FanTask", "z", "fan-session");
                 let (r1, r2, r3) = ctx.join3(f1, f2, f3).await;
                 Ok(format!("{}|{}|{}", r1?, r2?, r3?))
             },
@@ -393,13 +374,9 @@ async fn test_session_fan_out_same_session() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -540,13 +517,9 @@ async fn test_copilot_sdk_session_pattern() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     // Start 2 conversations
@@ -597,7 +570,6 @@ async fn test_copilot_sdk_session_pattern() {
     common::cleanup_schema(&schema).await;
 }
 
-
 // ============================================================================
 // Typed session activity
 // ============================================================================
@@ -615,10 +587,13 @@ async fn test_session_activity_typed() {
     let (store, schema) = common::create_postgres_store().await;
 
     let activities = ActivityRegistry::builder()
-        .register("Double", |_ctx: ActivityContext, input: String| async move {
-            let parsed: DoubleInput = serde_json::from_str(&input).unwrap();
-            Ok(serde_json::to_string(&(parsed.value * 2)).unwrap())
-        })
+        .register(
+            "Double",
+            |_ctx: ActivityContext, input: String| async move {
+                let parsed: DoubleInput = serde_json::from_str(&input).unwrap();
+                Ok(serde_json::to_string(&(parsed.value * 2)).unwrap())
+            },
+        )
         .build();
 
     let orchestrations = OrchestrationRegistry::builder()
@@ -626,15 +601,18 @@ async fn test_session_activity_typed() {
             "TypedSessionOrch",
             |ctx: OrchestrationContext, _input: String| async move {
                 let result: i32 = ctx
-                    .schedule_activity_on_session_typed("Double", &DoubleInput { value: 21 }, "typed-sess")
+                    .schedule_activity_on_session_typed(
+                        "Double",
+                        &DoubleInput { value: 21 },
+                        "typed-sess",
+                    )
                     .await?;
                 Ok(result.to_string())
             },
         )
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
+    let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
     let client = Client::new(store.clone());
 
     client
@@ -655,7 +633,6 @@ async fn test_session_activity_typed() {
     rt.shutdown(None).await;
     common::cleanup_schema(&schema).await;
 }
-
 
 // ============================================================================
 // Process-level session identity E2E tests
@@ -706,13 +683,9 @@ async fn test_session_worker_node_id_multiple_sessions_parallel() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -747,7 +720,9 @@ async fn test_ephemeral_session_still_works() {
     let (store, schema) = common::create_postgres_store().await;
 
     let activities = ActivityRegistry::builder()
-        .register("Echo", |_ctx: ActivityContext, input: String| async move { Ok(input) })
+        .register("Echo", |_ctx: ActivityContext, input: String| async move {
+            Ok(input)
+        })
         .build();
 
     let orchestrations = OrchestrationRegistry::builder()
@@ -768,13 +743,9 @@ async fn test_ephemeral_session_still_works() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -824,7 +795,8 @@ async fn test_session_with_worker_node_id_activity_context_has_session_id() {
         .register(
             "NodeIdSessionOrch",
             |ctx: OrchestrationContext, _input: String| async move {
-                ctx.schedule_activity_on_session("CheckSess", "", "my-session").await?;
+                ctx.schedule_activity_on_session("CheckSess", "", "my-session")
+                    .await?;
                 Ok("done".to_string())
             },
         )
@@ -836,13 +808,9 @@ async fn test_session_with_worker_node_id_activity_context_has_session_id() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -932,13 +900,9 @@ async fn test_two_slots_serve_same_session_concurrently() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -1031,13 +995,9 @@ async fn test_ephemeral_same_session_serialized() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -1079,26 +1039,30 @@ async fn test_session_fan_out_fan_in() {
     let (store, schema) = common::create_postgres_store().await;
 
     let activities = ActivityRegistry::builder()
-        .register("Process", |_ctx: ActivityContext, input: String| async move {
-            Ok(format!("processed:{input}"))
-        })
+        .register(
+            "Process",
+            |_ctx: ActivityContext, input: String| async move { Ok(format!("processed:{input}")) },
+        )
         .build();
 
     let orchestrations = OrchestrationRegistry::builder()
-        .register("FanOutOrch", |ctx: OrchestrationContext, _input: String| async move {
-            // Fan-out: schedule activities across 3 different sessions
-            let futures: Vec<_> = (0..3)
-                .map(|i| {
-                    let session = format!("session-{i}");
-                    ctx.schedule_activity_on_session("Process", i.to_string(), session)
-                })
-                .collect();
+        .register(
+            "FanOutOrch",
+            |ctx: OrchestrationContext, _input: String| async move {
+                // Fan-out: schedule activities across 3 different sessions
+                let futures: Vec<_> = (0..3)
+                    .map(|i| {
+                        let session = format!("session-{i}");
+                        ctx.schedule_activity_on_session("Process", i.to_string(), session)
+                    })
+                    .collect();
 
-            // Fan-in: wait for all to complete
-            let results = ctx.join(futures).await;
-            let outputs: Vec<String> = results.into_iter().collect::<Result<Vec<_>, _>>()?;
-            Ok(outputs.join("|"))
-        })
+                // Fan-in: wait for all to complete
+                let results = ctx.join(futures).await;
+                let outputs: Vec<String> = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+                Ok(outputs.join("|"))
+            },
+        )
         .build();
 
     let options = RuntimeOptions {
@@ -1107,13 +1071,9 @@ async fn test_session_fan_out_fan_in() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -1143,29 +1103,33 @@ async fn test_session_fan_out_mixed_with_regular() {
     let (store, schema) = common::create_postgres_store().await;
 
     let activities = ActivityRegistry::builder()
-        .register("SessionWork", |_ctx: ActivityContext, input: String| async move {
-            Ok(format!("sess:{input}"))
-        })
-        .register("RegularWork", |_ctx: ActivityContext, input: String| async move {
-            Ok(format!("reg:{input}"))
-        })
+        .register(
+            "SessionWork",
+            |_ctx: ActivityContext, input: String| async move { Ok(format!("sess:{input}")) },
+        )
+        .register(
+            "RegularWork",
+            |_ctx: ActivityContext, input: String| async move { Ok(format!("reg:{input}")) },
+        )
         .build();
 
     let orchestrations = OrchestrationRegistry::builder()
-        .register("MixedFanOrch", |ctx: OrchestrationContext, _input: String| async move {
-            let f1 = ctx.schedule_activity_on_session("SessionWork", "a", "s1");
-            let f2 = ctx.schedule_activity("RegularWork", "b");
-            let f3 = ctx.schedule_activity_on_session("SessionWork", "c", "s2");
-            let f4 = ctx.schedule_activity("RegularWork", "d");
+        .register(
+            "MixedFanOrch",
+            |ctx: OrchestrationContext, _input: String| async move {
+                let f1 = ctx.schedule_activity_on_session("SessionWork", "a", "s1");
+                let f2 = ctx.schedule_activity("RegularWork", "b");
+                let f3 = ctx.schedule_activity_on_session("SessionWork", "c", "s2");
+                let f4 = ctx.schedule_activity("RegularWork", "d");
 
-            let results = ctx.join(vec![f1, f2, f3, f4]).await;
-            let outputs: Vec<String> = results.into_iter().collect::<Result<Vec<_>, _>>()?;
-            Ok(outputs.join("|"))
-        })
+                let results = ctx.join(vec![f1, f2, f3, f4]).await;
+                let outputs: Vec<String> = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+                Ok(outputs.join("|"))
+            },
+        )
         .build();
 
-    let rt =
-        runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
+    let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
     let client = Client::new(store.clone());
 
     client
@@ -1202,18 +1166,21 @@ async fn test_fan_out_multiple_per_session_mixed() {
         .build();
 
     let orchestrations = OrchestrationRegistry::builder()
-        .register("MultiMixOrch", |ctx: OrchestrationContext, _input: String| async move {
-            let f1 = ctx.schedule_activity_on_session("Tag", "s1-a", "session-1");
-            let f2 = ctx.schedule_activity_on_session("Tag", "s1-b", "session-1");
-            let f3 = ctx.schedule_activity_on_session("Tag", "s2-a", "session-2");
-            let f4 = ctx.schedule_activity_on_session("Tag", "s2-b", "session-2");
-            let f5 = ctx.schedule_activity("Tag", "no-sess-a");
-            let f6 = ctx.schedule_activity("Tag", "no-sess-b");
+        .register(
+            "MultiMixOrch",
+            |ctx: OrchestrationContext, _input: String| async move {
+                let f1 = ctx.schedule_activity_on_session("Tag", "s1-a", "session-1");
+                let f2 = ctx.schedule_activity_on_session("Tag", "s1-b", "session-1");
+                let f3 = ctx.schedule_activity_on_session("Tag", "s2-a", "session-2");
+                let f4 = ctx.schedule_activity_on_session("Tag", "s2-b", "session-2");
+                let f5 = ctx.schedule_activity("Tag", "no-sess-a");
+                let f6 = ctx.schedule_activity("Tag", "no-sess-b");
 
-            let results = ctx.join(vec![f1, f2, f3, f4, f5, f6]).await;
-            let outputs: Vec<String> = results.into_iter().collect::<Result<Vec<_>, _>>()?;
-            Ok(outputs.join("|"))
-        })
+                let results = ctx.join(vec![f1, f2, f3, f4, f5, f6]).await;
+                let outputs: Vec<String> = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+                Ok(outputs.join("|"))
+            },
+        )
         .build();
 
     let options = RuntimeOptions {
@@ -1222,13 +1189,9 @@ async fn test_fan_out_multiple_per_session_mixed() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -1271,19 +1234,26 @@ async fn test_session_survives_continue_as_new() {
         .build();
 
     let orchestrations = OrchestrationRegistry::builder()
-        .register("SessionCAN", |ctx: OrchestrationContext, input: String| async move {
-            let iteration: u32 = input.parse().unwrap_or(0);
-            let r = ctx
-                .schedule_activity_on_session("Track", format!("iter-{iteration}"), "persistent-session")
-                .await?;
-            if iteration == 0 {
-                // First execution: CAN to iteration 1
-                ctx.continue_as_new("1").await
-            } else {
-                // Second execution: complete with both results
-                Ok(r)
-            }
-        })
+        .register(
+            "SessionCAN",
+            |ctx: OrchestrationContext, input: String| async move {
+                let iteration: u32 = input.parse().unwrap_or(0);
+                let r = ctx
+                    .schedule_activity_on_session(
+                        "Track",
+                        format!("iter-{iteration}"),
+                        "persistent-session",
+                    )
+                    .await?;
+                if iteration == 0 {
+                    // First execution: CAN to iteration 1
+                    ctx.continue_as_new("1").await
+                } else {
+                    // Second execution: complete with both results
+                    Ok(r)
+                }
+            },
+        )
         .build();
 
     let options = RuntimeOptions {
@@ -1293,13 +1263,9 @@ async fn test_session_survives_continue_as_new() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -1367,13 +1333,9 @@ async fn test_session_continue_as_new_versioned_upgrade() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -1417,7 +1379,8 @@ async fn test_session_idle_timeout_must_exceed_worker_renewal_interval() {
     };
 
     // This should panic
-    let _rt = runtime::Runtime::start_with_options(store, activities, orchestrations, options).await;
+    let _rt =
+        runtime::Runtime::start_with_options(store, activities, orchestrations, options).await;
 }
 
 // ============================================================================
@@ -1439,28 +1402,34 @@ async fn test_max_sessions_per_runtime_enforced() {
     let peak_c = peak.clone();
 
     let activities = ActivityRegistry::builder()
-        .register("SlowSession", move |_ctx: ActivityContext, _input: String| {
-            let conc = concurrent_c.clone();
-            let pk = peak_c.clone();
-            async move {
-                let cur = conc.fetch_add(1, AOrdering::SeqCst) + 1;
-                pk.fetch_max(cur, AOrdering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                conc.fetch_sub(1, AOrdering::SeqCst);
-                Ok("done".to_string())
-            }
-        })
+        .register(
+            "SlowSession",
+            move |_ctx: ActivityContext, _input: String| {
+                let conc = concurrent_c.clone();
+                let pk = peak_c.clone();
+                async move {
+                    let cur = conc.fetch_add(1, AOrdering::SeqCst) + 1;
+                    pk.fetch_max(cur, AOrdering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    conc.fetch_sub(1, AOrdering::SeqCst);
+                    Ok("done".to_string())
+                }
+            },
+        )
         .build();
 
     let orchestrations = OrchestrationRegistry::builder()
-        .register("TwoSessions", |ctx: OrchestrationContext, _input: String| async move {
-            let f1 = ctx.schedule_activity_on_session("SlowSession", "a", "session-A");
-            let f2 = ctx.schedule_activity_on_session("SlowSession", "b", "session-B");
-            let results = ctx.join(vec![f1, f2]).await;
-            let r1 = results[0].as_ref().map_err(|e| e.clone())?;
-            let r2 = results[1].as_ref().map_err(|e| e.clone())?;
-            Ok(format!("{r1}|{r2}"))
-        })
+        .register(
+            "TwoSessions",
+            |ctx: OrchestrationContext, _input: String| async move {
+                let f1 = ctx.schedule_activity_on_session("SlowSession", "a", "session-A");
+                let f2 = ctx.schedule_activity_on_session("SlowSession", "b", "session-B");
+                let results = ctx.join(vec![f1, f2]).await;
+                let r1 = results[0].as_ref().map_err(|e| e.clone())?;
+                let r2 = results[1].as_ref().map_err(|e| e.clone())?;
+                Ok(format!("{r1}|{r2}"))
+            },
+        )
         .build();
 
     let options = RuntimeOptions {
@@ -1470,13 +1439,9 @@ async fn test_max_sessions_per_runtime_enforced() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -1554,13 +1519,9 @@ async fn test_same_session_shares_one_slot() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -1617,14 +1578,17 @@ async fn test_session_cap_blocks_then_unblocks() {
         .build();
 
     let orchestrations = OrchestrationRegistry::builder()
-        .register("BlockUnblock", |ctx: OrchestrationContext, _input: String| async move {
-            let fa = ctx.schedule_activity_on_session("Tracked", "A", "session-A");
-            let fb = ctx.schedule_activity_on_session("Tracked", "B", "session-B");
-            let results = ctx.join(vec![fa, fb]).await;
-            let ra = results[0].as_ref().map_err(|e| e.clone())?;
-            let rb = results[1].as_ref().map_err(|e| e.clone())?;
-            Ok(format!("{ra}|{rb}"))
-        })
+        .register(
+            "BlockUnblock",
+            |ctx: OrchestrationContext, _input: String| async move {
+                let fa = ctx.schedule_activity_on_session("Tracked", "A", "session-A");
+                let fb = ctx.schedule_activity_on_session("Tracked", "B", "session-B");
+                let results = ctx.join(vec![fa, fb]).await;
+                let ra = results[0].as_ref().map_err(|e| e.clone())?;
+                let rb = results[1].as_ref().map_err(|e| e.clone())?;
+                Ok(format!("{ra}|{rb}"))
+            },
+        )
         .build();
 
     let options = RuntimeOptions {
@@ -1634,13 +1598,9 @@ async fn test_session_cap_blocks_then_unblocks() {
         ..Default::default()
     };
 
-    let rt = runtime::Runtime::start_with_options(
-        store.clone(),
-        activities,
-        orchestrations,
-        options,
-    )
-    .await;
+    let rt =
+        runtime::Runtime::start_with_options(store.clone(), activities, orchestrations, options)
+            .await;
     let client = Client::new(store.clone());
 
     client
@@ -1694,7 +1654,10 @@ async fn test_session_cap_blocks_then_unblocks() {
         .iter()
         .position(|e| e == "A-finished")
         .expect("A-finished missing");
-    let b_started = events.iter().position(|e| e == "B-started").expect("B-started missing");
+    let b_started = events
+        .iter()
+        .position(|e| e == "B-started")
+        .expect("B-started missing");
     assert!(
         a_finished < b_started,
         "B should start only after A finishes. Event log: {events:?}"
@@ -1725,15 +1688,21 @@ async fn test_multi_worker_complex_orchestration() {
                 let c = counter.clone();
                 async move {
                     c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    assert!(ctx.session_id().is_some(), "SessionWork must have a session_id");
+                    assert!(
+                        ctx.session_id().is_some(),
+                        "SessionWork must have a session_id"
+                    );
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     Ok(format!("session-result:{input}"))
                 }
             })
-            .register("PlainWork", |_ctx: ActivityContext, input: String| async move {
-                tokio::time::sleep(Duration::from_millis(30)).await;
-                Ok(format!("plain-result:{input}"))
-            })
+            .register(
+                "PlainWork",
+                |_ctx: ActivityContext, input: String| async move {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    Ok(format!("plain-result:{input}"))
+                },
+            )
             .build()
     }
 
@@ -1748,9 +1717,12 @@ async fn test_multi_worker_complex_orchestration() {
 
                     match cycle {
                         0 => {
-                            let s1 = ctx.schedule_activity_on_session("SessionWork", "a", "sess-alpha");
-                            let s2 = ctx.schedule_activity_on_session("SessionWork", "b", "sess-alpha");
-                            let s3 = ctx.schedule_activity_on_session("SessionWork", "c", "sess-beta");
+                            let s1 =
+                                ctx.schedule_activity_on_session("SessionWork", "a", "sess-alpha");
+                            let s2 =
+                                ctx.schedule_activity_on_session("SessionWork", "b", "sess-alpha");
+                            let s3 =
+                                ctx.schedule_activity_on_session("SessionWork", "c", "sess-beta");
                             let p1 = ctx.schedule_activity("PlainWork", "d");
                             let results = ctx.join(vec![s1, s2, s3, p1]).await;
                             let combined: Vec<String> = results
@@ -1758,7 +1730,8 @@ async fn test_multi_worker_complex_orchestration() {
                                 .map(|r| r.unwrap_or_else(|e| format!("ERR:{e}")))
                                 .collect();
 
-                            ctx.continue_as_new(format!("1|{}", combined.join(";"))).await
+                            ctx.continue_as_new(format!("1|{}", combined.join(";")))
+                                .await
                         }
                         1 => {
                             let r1 = ctx
@@ -1820,8 +1793,15 @@ async fn test_multi_worker_complex_orchestration() {
             let parts: Vec<&str> = output.split(';').collect();
             assert_eq!(parts.len(), 6, "Should have 6 results total, got: {output}");
 
-            let session_results: Vec<&&str> = parts.iter().filter(|p| p.contains("session-result:")).collect();
-            assert_eq!(session_results.len(), 5, "Should have 5 session results, got: {output}");
+            let session_results: Vec<&&str> = parts
+                .iter()
+                .filter(|p| p.contains("session-result:"))
+                .collect();
+            assert_eq!(
+                session_results.len(),
+                5,
+                "Should have 5 session results, got: {output}"
+            );
 
             assert!(
                 output.contains("plain-result:d"),
@@ -1870,18 +1850,21 @@ async fn test_multi_worker_heterogeneous_config() {
 
     fn build_orchestrations() -> OrchestrationRegistry {
         OrchestrationRegistry::builder()
-            .register("HeteroOrch", |ctx: OrchestrationContext, _input: String| async move {
-                let f1 = ctx.schedule_activity_on_session("Work", "1", "sess-X");
-                let f2 = ctx.schedule_activity_on_session("Work", "2", "sess-Y");
-                let f3 = ctx.schedule_activity_on_session("Work", "3", "sess-Z");
-                let results = ctx.join(vec![f1, f2, f3]).await;
-                let combined: String = results
-                    .into_iter()
-                    .map(|r| r.unwrap_or_else(|e| format!("ERR:{e}")))
-                    .collect::<Vec<_>>()
-                    .join("|");
-                Ok(combined)
-            })
+            .register(
+                "HeteroOrch",
+                |ctx: OrchestrationContext, _input: String| async move {
+                    let f1 = ctx.schedule_activity_on_session("Work", "1", "sess-X");
+                    let f2 = ctx.schedule_activity_on_session("Work", "2", "sess-Y");
+                    let f3 = ctx.schedule_activity_on_session("Work", "3", "sess-Z");
+                    let results = ctx.join(vec![f1, f2, f3]).await;
+                    let combined: String = results
+                        .into_iter()
+                        .map(|r| r.unwrap_or_else(|e| format!("ERR:{e}")))
+                        .collect::<Vec<_>>()
+                        .join("|");
+                    Ok(combined)
+                },
+            )
             .build()
     }
 
