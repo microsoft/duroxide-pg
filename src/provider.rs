@@ -4,7 +4,7 @@ use duroxide::providers::{
     DeleteInstanceResult, DispatcherCapabilityFilter, ExecutionInfo, ExecutionMetadata,
     InstanceFilter, InstanceInfo, OrchestrationItem, Provider, ProviderAdmin, ProviderError,
     PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier, SessionFetchConfig,
-    SystemMetrics, WorkItem,
+    SystemMetrics, TagFilter, WorkItem,
 };
 use duroxide::{Event, EventKind};
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
@@ -750,6 +750,7 @@ impl Provider for PostgresProvider {
         lock_timeout: Duration,
         _poll_timeout: Duration,
         session: Option<&SessionFetchConfig>,
+        _tag_filter: &TagFilter,
     ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
         let start = std::time::Instant::now();
 
