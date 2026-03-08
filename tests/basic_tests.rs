@@ -1,4 +1,4 @@
-use duroxide::providers::{ExecutionMetadata, Provider, WorkItem};
+use duroxide::providers::{ExecutionMetadata, Provider, TagFilter, WorkItem};
 use duroxide::{Event, EventKind, INITIAL_EVENT_ID, INITIAL_EXECUTION_ID};
 use duroxide_pg::PostgresProvider;
 use tracing_subscriber::EnvFilter;
@@ -310,6 +310,7 @@ async fn test_enqueue_and_dequeue_worker() {
         name: "TestActivity".to_string(),
         input: "activity_input".to_string(),
         session_id: None,
+        tag: None,
     };
 
     // Enqueue worker work
@@ -324,6 +325,7 @@ async fn test_enqueue_and_dequeue_worker() {
             std::time::Duration::from_secs(30),
             std::time::Duration::ZERO,
             None,
+            &TagFilter::default(),
         ) // 30 second lock timeout
         .await
         .expect("Should dequeue worker work")

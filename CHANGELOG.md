@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.24] - 2026-03-07
+
+- Updated duroxide dependency from 0.1.21 to 0.1.22
+- **Activity tag routing:** Workers can filter activities by tag for heterogeneous worker pools
+  - New `tag TEXT` column on `worker_queue` table with index
+  - `enqueue_worker_work` stored proc now accepts 7th parameter `p_tag TEXT`
+  - `fetch_work_item` stored proc now accepts `p_tag_filter TEXT[]` and `p_tag_mode TEXT` parameters
+  - Tag modes: `default_only` (untagged only), `tags` (matching only), `default_and` (both),
+    `any` (all), `none` (nothing)
+  - `TagFilter::None` short-circuits in Rust (returns `Ok(None)` before DB call)
+- Migration 0016: `add_activity_tags` (additive schema change + stored procedure updates)
+- Added 9 tag filtering validation tests
+- Added 3 tag e2e tests (`sample_heterogeneous_workers_with_tags_fs`,
+  `sample_starvation_safe_tagged_activity_fs`, `sample_dual_runtime_tag_cooperation_fs`)
+- Total validation tests: 175 (up from 166)
+
 ## [0.1.23] - 2026-03-06
 
 - Updated duroxide dependency from 0.1.20 to 0.1.21

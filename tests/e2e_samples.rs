@@ -2083,10 +2083,10 @@ async fn sample_config_hot_reload_persistent_events_fs() {
         let mut log: Vec<String> = Vec::new();
 
         for cycle in 0..3 {
-            // ── Drain pending config updates (non-blocking) ──
+            // Drain pending config updates (non-blocking)
             loop {
                 let config_wait = ctx.dequeue_event("ConfigUpdate");
-                let drain_timeout = ctx.schedule_timer(Duration::from_millis(50));
+                let drain_timeout = ctx.schedule_timer(Duration::from_millis(100));
                 match ctx.select2(config_wait, drain_timeout).await {
                     duroxide::Either2::First(config_json) => {
                         let result = ctx.schedule_activity("ApplyConfig", &config_json).await?;
@@ -2096,18 +2096,19 @@ async fn sample_config_hot_reload_persistent_events_fs() {
                 }
             }
 
-            // ── Mark cycle boundary, then simulate work ──
-            ctx.schedule_timer(Duration::from_millis(100)).await;
+            // Mark cycle boundary, then simulate work.
+            // Use a longer timer (1s) so there is a wide window for v3 to arrive mid-flight.
+            ctx.schedule_timer(Duration::from_millis(1000)).await;
             let _ = ctx
                 .schedule_activity("ApplyConfig", format!("cycle_{cycle}"))
                 .await?;
             log.push(format!("cycle:{cycle}"));
         }
 
-        // ── Final drain: pick up any events that arrived during the last cycle ──
+        // Final drain: pick up any events that arrived during the last cycle
         loop {
             let config_wait = ctx.dequeue_event("ConfigUpdate");
-            let drain_timeout = ctx.schedule_timer(Duration::from_millis(50));
+            let drain_timeout = ctx.schedule_timer(Duration::from_millis(100));
             match ctx.select2(config_wait, drain_timeout).await {
                 duroxide::Either2::First(config_json) => {
                     let result = ctx.schedule_activity("ApplyConfig", &config_json).await?;
@@ -2155,15 +2156,35 @@ async fn sample_config_hot_reload_persistent_events_fs() {
         .await
         .unwrap();
 
-    // Push a third update while the orchestration is running (arrives mid-flight)
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Wait for the orchestration to progress past cycle:0's drain phase before
+    // sending v3. A fixed delay is unreliable because dispatch latency is
+    // variable under load. Instead, observe history for the cycle_0
+    // activity being scheduled, which proves the drain loop has completed,
+    // the 1s cycle timer has fired, and the cycle boundary activity is in flight.
+    assert!(
+        common::wait_for_history(
+            store.clone(),
+            "inst-hot-reload",
+            |hist| {
+                hist.iter().any(|e| {
+                    matches!(
+                        &e.kind,
+                        duroxide::EventKind::ActivityScheduled { input, .. } if input == "cycle_0"
+                    )
+                })
+            },
+            15_000,
+        )
+        .await,
+        "Timed out waiting for cycle:0 to progress past its drain phase"
+    );
     client
         .enqueue_event("inst-hot-reload", "ConfigUpdate", "v3")
         .await
         .unwrap();
 
     let status = client
-        .wait_for_orchestration("inst-hot-reload", Duration::from_secs(10))
+        .wait_for_orchestration("inst-hot-reload", Duration::from_secs(20))
         .await
         .unwrap();
     match status {
@@ -2210,5 +2231,312 @@ async fn sample_config_hot_reload_persistent_events_fs() {
     }
 
     rt.shutdown(None).await;
+    common::cleanup_schema(&schema_name).await;
+}
+
+/// Heterogeneous workers with tags: GPU render → CPU encode → untagged upload.
+///
+/// Highlights:
+/// - `.with_tag("gpu")` and `.with_tag("cpu")` route to specialized workers
+/// - A single runtime with `DefaultAnd(["gpu","cpu"])` handles everything
+/// - History preserves per-activity tags
+#[tokio::test]
+async fn sample_heterogeneous_workers_with_tags_fs() {
+    use duroxide::runtime::RuntimeOptions;
+    use duroxide::TagFilter;
+    use duroxide::EventKind;
+
+    init_test_logging();
+    let (store, schema_name) = common::create_postgres_store().await;
+
+    let activity_registry = ActivityRegistry::builder()
+        .register("Render", |_ctx: ActivityContext, input: String| async move {
+            Ok(format!("rendered:{input}"))
+        })
+        .register("Encode", |_ctx: ActivityContext, input: String| async move {
+            Ok(format!("encoded:{input}"))
+        })
+        .register("Upload", |_ctx: ActivityContext, input: String| async move {
+            Ok(format!("uploaded:{input}"))
+        })
+        .build();
+
+    let orchestration = |ctx: OrchestrationContext, _input: String| async move {
+        let rendered = ctx
+            .schedule_activity("Render", "frame42")
+            .with_tag("gpu")
+            .await?;
+        let encoded = ctx
+            .schedule_activity("Encode", rendered)
+            .with_tag("cpu")
+            .await?;
+        let uploaded = ctx.schedule_activity("Upload", encoded).await?;
+        Ok(uploaded)
+    };
+
+    let orchestration_registry = OrchestrationRegistry::builder()
+        .register("VideoPipeline", orchestration)
+        .build();
+
+    let opts = RuntimeOptions {
+        worker_tag_filter: TagFilter::default_and(["gpu", "cpu"]),
+        ..Default::default()
+    };
+
+    let rt = runtime::Runtime::start_with_options(
+        store.clone(),
+        activity_registry,
+        orchestration_registry,
+        opts,
+    )
+    .await;
+
+    let client = Client::new(store.clone());
+    client
+        .start_orchestration("video-1", "VideoPipeline", "")
+        .await
+        .unwrap();
+
+    match client
+        .wait_for_orchestration("video-1", Duration::from_secs(10))
+        .await
+        .unwrap()
+    {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
+            assert_eq!(output, "uploaded:encoded:rendered:frame42");
+
+            let history = store.read("video-1").await.unwrap();
+            let tags: Vec<Option<String>> = history
+                .iter()
+                .filter_map(|e| match &e.kind {
+                    EventKind::ActivityScheduled { tag, .. } => Some(tag.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                tags,
+                vec![Some("gpu".to_string()), Some("cpu".to_string()), None],
+                "History should preserve per-activity tags"
+            );
+        }
+        runtime::OrchestrationStatus::Failed { details, .. } => {
+            panic!("orchestration failed: {}", details.display_message())
+        }
+        other => panic!("unexpected status: {:?}", other),
+    }
+
+    rt.shutdown(None).await;
+    common::cleanup_schema(&schema_name).await;
+}
+
+/// Starvation-safe tagged activity: protect against missing workers with a timeout.
+///
+/// Highlights:
+/// - `select2(tagged_activity, timer)` — first-to-complete wins
+/// - Timer fires because no GPU worker exists, CPU fallback executes
+#[tokio::test]
+async fn sample_starvation_safe_tagged_activity_fs() {
+    use duroxide::runtime::RuntimeOptions;
+    use duroxide::TagFilter;
+
+    init_test_logging();
+    let (store, schema_name) = common::create_postgres_store().await;
+
+    let activity_registry = ActivityRegistry::builder()
+        .register(
+            "GpuInference",
+            |_ctx: ActivityContext, input: String| async move {
+                Ok(format!("inference:{input}"))
+            },
+        )
+        .register(
+            "CpuFallback",
+            |_ctx: ActivityContext, input: String| async move {
+                Ok(format!("cpu_fallback:{input}"))
+            },
+        )
+        .build();
+
+    let orchestration = |ctx: OrchestrationContext, input: String| async move {
+        let gpu_activity = ctx
+            .schedule_activity("GpuInference", input.clone())
+            .with_tag("gpu");
+        let timeout = ctx.schedule_timer(Duration::from_millis(500));
+
+        match ctx.select2(gpu_activity, timeout).await {
+            duroxide::Either2::First(Ok(result)) => Ok(result),
+            duroxide::Either2::First(Err(e)) => Err(e),
+            duroxide::Either2::Second(()) => {
+                let result = ctx.schedule_activity("CpuFallback", input).await?;
+                Ok(result)
+            }
+        }
+    };
+
+    let orchestration_registry = OrchestrationRegistry::builder()
+        .register("InferenceWithFallback", orchestration)
+        .build();
+
+    // Only a DefaultOnly worker — no GPU workers exist
+    let opts = RuntimeOptions {
+        worker_tag_filter: TagFilter::default(),
+        ..Default::default()
+    };
+
+    let rt = runtime::Runtime::start_with_options(
+        store.clone(),
+        activity_registry,
+        orchestration_registry,
+        opts,
+    )
+    .await;
+
+    let client = Client::new(store.clone());
+    client
+        .start_orchestration("infer-1", "InferenceWithFallback", "model-v3")
+        .await
+        .unwrap();
+
+    match client
+        .wait_for_orchestration("infer-1", Duration::from_secs(15))
+        .await
+        .unwrap()
+    {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
+            assert_eq!(output, "cpu_fallback:model-v3");
+        }
+        runtime::OrchestrationStatus::Failed { details, .. } => {
+            panic!("orchestration failed: {}", details.display_message())
+        }
+        other => panic!("unexpected status: {:?}", other),
+    }
+
+    rt.shutdown(None).await;
+    common::cleanup_schema(&schema_name).await;
+}
+
+/// Dual runtimes: orchestrator + specialist GPU worker on the same store.
+///
+/// Highlights:
+/// - Two `Runtime::start_with_options` on the same store (shared queue)
+/// - Runtime A: orchestration dispatcher + `DefaultOnly` worker
+/// - Runtime B: worker-only node with `Tags(["gpu"])` — no orchestration dispatcher
+/// - The orchestration completes only if **both** runtimes participate
+#[tokio::test]
+async fn sample_dual_runtime_tag_cooperation_fs() {
+    use duroxide::runtime::RuntimeOptions;
+    use duroxide::EventKind;
+    use duroxide::TagFilter;
+
+    init_test_logging();
+    let (store, schema_name) = common::create_postgres_store().await;
+
+    let make_activities = || {
+        ActivityRegistry::builder()
+            .register(
+                "PreProcess",
+                |_ctx: ActivityContext, input: String| async move {
+                    Ok(format!("preprocessed:{input}"))
+                },
+            )
+            .register(
+                "GpuTrain",
+                |_ctx: ActivityContext, input: String| async move {
+                    Ok(format!("trained:{input}"))
+                },
+            )
+            .register(
+                "SaveModel",
+                |_ctx: ActivityContext, input: String| async move {
+                    Ok(format!("saved:{input}"))
+                },
+            )
+            .build()
+    };
+
+    let make_orchestrations = || {
+        OrchestrationRegistry::builder()
+            .register(
+                "MLPipeline",
+                |ctx: OrchestrationContext, input: String| async move {
+                    let preprocessed = ctx.schedule_activity("PreProcess", input).await?;
+                    let model = ctx
+                        .schedule_activity("GpuTrain", preprocessed)
+                        .with_tag("gpu")
+                        .await?;
+                    let saved = ctx.schedule_activity("SaveModel", model).await?;
+                    Ok(saved)
+                },
+            )
+            .build()
+    };
+
+    // Runtime A: orchestrator + default worker (CPU work)
+    let rt_a = runtime::Runtime::start_with_options(
+        store.clone(),
+        make_activities(),
+        make_orchestrations(),
+        RuntimeOptions {
+            worker_tag_filter: TagFilter::default(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Runtime B: GPU worker only (no orchestration dispatcher)
+    let rt_b = runtime::Runtime::start_with_options(
+        store.clone(),
+        make_activities(),
+        make_orchestrations(),
+        RuntimeOptions {
+            orchestration_concurrency: 0,
+            worker_tag_filter: TagFilter::tags(["gpu"]),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let client = Client::new(store.clone());
+    client
+        .start_orchestration("ml-1", "MLPipeline", "dataset-v5")
+        .await
+        .unwrap();
+
+    match client
+        .wait_for_orchestration("ml-1", Duration::from_secs(15))
+        .await
+        .unwrap()
+    {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
+            assert_eq!(output, "saved:trained:preprocessed:dataset-v5");
+
+            let history = store.read("ml-1").await.unwrap();
+            let scheduled: Vec<(&str, Option<&str>)> = history
+                .iter()
+                .filter_map(|e| match &e.kind {
+                    EventKind::ActivityScheduled { name, tag, .. } => {
+                        Some((name.as_str(), tag.as_deref()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                scheduled,
+                vec![
+                    ("PreProcess", None),
+                    ("GpuTrain", Some("gpu")),
+                    ("SaveModel", None),
+                ],
+                "History should show correct tag routing"
+            );
+        }
+        runtime::OrchestrationStatus::Failed { details, .. } => {
+            panic!("orchestration failed: {}", details.display_message())
+        }
+        other => panic!("unexpected status: {:?}", other),
+    }
+
+    rt_a.shutdown(None).await;
+    rt_b.shutdown(None).await;
     common::cleanup_schema(&schema_name).await;
 }

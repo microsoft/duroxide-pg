@@ -3,7 +3,7 @@ use std::sync::{Arc, Once};
 use duroxide::provider_validation::{
     atomicity, bulk_deletion, cancellation, capability_filtering, custom_status, deletion,
     error_handling, instance_creation, instance_locking, lock_expiration, management,
-    multi_execution, prune, queue_semantics, sessions,
+    multi_execution, prune, queue_semantics, sessions, tag_filtering,
 };
 use duroxide::provider_validations::ProviderFactory;
 use duroxide::providers::Provider;
@@ -496,4 +496,19 @@ mod custom_status_tests {
     provider_validation_test!(custom_status::test_custom_status_polling_no_change);
     provider_validation_test!(custom_status::test_custom_status_nonexistent_instance);
     provider_validation_test!(custom_status::test_custom_status_default_on_new_instance);
+}
+
+mod tag_filtering_tests {
+    use super::*;
+
+    provider_validation_test!(tag_filtering::test_default_only_fetches_untagged);
+    provider_validation_test!(tag_filtering::test_tags_fetches_only_matching);
+    provider_validation_test!(tag_filtering::test_default_and_fetches_untagged_and_matching);
+    provider_validation_test!(tag_filtering::test_none_filter_returns_nothing);
+    provider_validation_test!(tag_filtering::test_multi_tag_filter);
+    provider_validation_test!(tag_filtering::test_tag_round_trip_preservation);
+    provider_validation_test!(tag_filtering::test_any_filter_fetches_everything);
+    provider_validation_test!(tag_filtering::test_tag_survives_abandon_and_refetch);
+    provider_validation_test!(tag_filtering::test_multi_runtime_tag_isolation);
+    provider_validation_test!(tag_filtering::test_tag_preserved_through_ack_orchestration_item);
 }

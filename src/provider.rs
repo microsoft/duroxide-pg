@@ -138,28 +138,76 @@ impl PostgresProvider {
         }
     }
 
+    /// Convert TagFilter to SQL parameters (mode string + tag array)
+    fn tag_filter_to_sql(filter: &TagFilter) -> (&'static str, Vec<String>) {
+        match filter {
+            TagFilter::DefaultOnly => ("default_only", vec![]),
+            TagFilter::Tags(set) => {
+                let mut tags: Vec<String> = set.iter().cloned().collect();
+                tags.sort();
+                ("tags", tags)
+            }
+            TagFilter::DefaultAnd(set) => {
+                let mut tags: Vec<String> = set.iter().cloned().collect();
+                tags.sort();
+                ("default_and", tags)
+            }
+            TagFilter::Any => ("any", vec![]),
+            TagFilter::None => ("none", vec![]),
+        }
+    }
+
     /// Clean up schema after tests (drops all tables and optionally the schema)
     ///
     /// **SAFETY**: Never drops the "public" schema itself, only tables within it.
     /// Only drops the schema if it's a custom schema (not "public").
     pub async fn cleanup_schema(&self) -> Result<()> {
-        // Call the stored procedure to drop all tables
-        sqlx::query(&format!("SELECT {}.cleanup_schema()", self.schema_name))
-            .execute(&*self.pool)
-            .await?;
+        const MAX_RETRIES: u32 = 5;
+        const BASE_RETRY_DELAY_MS: u64 = 50;
 
-        // SAFETY: Never drop the "public" schema - it's a PostgreSQL system schema
-        // Only drop custom schemas created for testing
-        if self.schema_name != "public" {
-            sqlx::query(&format!(
-                "DROP SCHEMA IF EXISTS {} CASCADE",
-                self.schema_name
-            ))
-            .execute(&*self.pool)
-            .await?;
-        } else {
-            // Explicit safeguard: we only drop tables from public schema, never the schema itself
-            // This ensures we don't accidentally drop the default PostgreSQL schema
+        for attempt in 0..=MAX_RETRIES {
+            let cleanup_result = async {
+                // Call the stored procedure to drop all tables
+                sqlx::query(&format!("SELECT {}.cleanup_schema()", self.schema_name))
+                    .execute(&*self.pool)
+                    .await?;
+
+                // SAFETY: Never drop the "public" schema - it's a PostgreSQL system schema
+                // Only drop custom schemas created for testing
+                if self.schema_name != "public" {
+                    sqlx::query(&format!(
+                        "DROP SCHEMA IF EXISTS {} CASCADE",
+                        self.schema_name
+                    ))
+                    .execute(&*self.pool)
+                    .await?;
+                } else {
+                    // Explicit safeguard: we only drop tables from public schema, never the schema itself
+                    // This ensures we don't accidentally drop the default PostgreSQL schema
+                }
+
+                Ok::<(), SqlxError>(())
+            }
+            .await;
+
+            match cleanup_result {
+                Ok(()) => return Ok(()),
+                Err(SqlxError::Database(db_err)) if db_err.code().as_deref() == Some("40P01") => {
+                    if attempt < MAX_RETRIES {
+                        warn!(
+                            target = "duroxide::providers::postgres",
+                            schema = %self.schema_name,
+                            attempt = attempt + 1,
+                            "Deadlock during cleanup_schema, retrying"
+                        );
+                        sleep(Duration::from_millis(BASE_RETRY_DELAY_MS * (attempt as u64 + 1)))
+                            .await;
+                        continue;
+                    }
+                    return Err(anyhow::anyhow!(db_err.to_string()));
+                }
+                Err(e) => return Err(anyhow::anyhow!(e.to_string())),
+            }
         }
 
         Ok(())
@@ -701,25 +749,27 @@ impl Provider for PostgresProvider {
 
         let now_ms = Self::now_millis();
 
-        // Extract activity identification and session_id for ActivityExecute items
-        let (instance_id, execution_id, activity_id, session_id) = match &item {
+        // Extract activity identification, session_id, and tag for ActivityExecute items
+        let (instance_id, execution_id, activity_id, session_id, tag) = match &item {
             WorkItem::ActivityExecute {
                 instance,
                 execution_id,
                 id,
                 session_id,
+                tag,
                 ..
             } => (
                 Some(instance.clone()),
                 Some(*execution_id as i64),
                 Some(*id as i64),
                 session_id.clone(),
+                tag.clone(),
             ),
-            _ => (None, None, None, None),
+            _ => (None, None, None, None, None),
         };
 
         sqlx::query(&format!(
-            "SELECT {}.enqueue_worker_work($1, $2, $3, $4, $5, $6)",
+            "SELECT {}.enqueue_worker_work($1, $2, $3, $4, $5, $6, $7)",
             self.schema_name
         ))
         .bind(work_item)
@@ -728,6 +778,7 @@ impl Provider for PostgresProvider {
         .bind(execution_id)
         .bind(activity_id)
         .bind(&session_id)
+        .bind(&tag)
         .execute(&*self.pool)
         .await
         .map_err(|e| {
@@ -750,8 +801,13 @@ impl Provider for PostgresProvider {
         lock_timeout: Duration,
         _poll_timeout: Duration,
         session: Option<&SessionFetchConfig>,
-        _tag_filter: &TagFilter,
+        tag_filter: &TagFilter,
     ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
+        // None filter means don't process any activities
+        if matches!(tag_filter, TagFilter::None) {
+            return Ok(None);
+        }
+
         let start = std::time::Instant::now();
 
         // Convert Duration to milliseconds
@@ -766,14 +822,19 @@ impl Provider for PostgresProvider {
             None => (None, None),
         };
 
+        // Convert TagFilter to SQL parameters
+        let (tag_mode, tag_names) = Self::tag_filter_to_sql(tag_filter);
+
         let row = match sqlx::query_as::<_, (String, String, i32)>(&format!(
-            "SELECT * FROM {}.fetch_work_item($1, $2, $3, $4)",
+            "SELECT * FROM {}.fetch_work_item($1, $2, $3, $4, $5, $6)",
             self.schema_name
         ))
         .bind(Self::now_millis())
         .bind(lock_timeout_ms)
         .bind(owner_id)
         .bind(session_lock_timeout_ms)
+        .bind(&tag_names)
+        .bind(tag_mode)
         .fetch_optional(&*self.pool)
         .await
         {

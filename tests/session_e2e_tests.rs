@@ -1546,6 +1546,10 @@ async fn test_same_session_shares_one_slot() {
 
 /// Verify that a session-bound activity is blocked when at capacity, then
 /// unblocked once the blocking session completes.
+///
+/// Both activities block until explicitly released so the test is
+/// order-independent — whichever the provider dispatches first will hold
+/// the single session slot while we verify the other is blocked.
 #[tokio::test]
 async fn test_session_cap_blocks_then_unblocks() {
     init_test_logging();
@@ -1556,19 +1560,25 @@ async fn test_session_cap_blocks_then_unblocks() {
 
     let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let release_a: Arc<Notify> = Arc::new(Notify::new());
+    let release_b: Arc<Notify> = Arc::new(Notify::new());
 
     let log_c = log.clone();
-    let release_a_c = release_a.clone();
+    let ra_c = release_a.clone();
+    let rb_c = release_b.clone();
 
     let activities = ActivityRegistry::builder()
         .register("Tracked", move |_ctx: ActivityContext, input: String| {
             let lg = log_c.clone();
-            let release = release_a_c.clone();
+            let ra = ra_c.clone();
+            let rb = rb_c.clone();
             async move {
                 lg.lock().unwrap().push(format!("{input}-started"));
 
-                if input == "A" {
-                    release.notified().await;
+                // Both activities hold their session slot until released
+                match input.as_str() {
+                    "A" => ra.notified().await,
+                    "B" => rb.notified().await,
+                    _ => {}
                 }
 
                 lg.lock().unwrap().push(format!("{input}-finished"));
@@ -1608,34 +1618,67 @@ async fn test_session_cap_blocks_then_unblocks() {
         .await
         .unwrap();
 
-    // Wait for activity-A to start
-    let a_started = {
-        let mut found = false;
+    // Wait for either activity to start (whichever the provider dispatches first)
+    let first = {
+        let mut found: Option<&str> = None;
         for _ in 0..100 {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let events = log.lock().unwrap().clone();
             if events.contains(&"A-started".to_string()) {
-                found = true;
+                found = Some("A");
+                break;
+            }
+            if events.contains(&"B-started".to_string()) {
+                found = Some("B");
                 break;
             }
         }
         found
     };
-    assert!(a_started, "Timed out waiting for activity A to start");
+    let first = first.expect("Timed out waiting for any activity to start");
+    let second = if first == "A" { "B" } else { "A" };
 
-    // Give B a chance to start if it were going to (it shouldn't with cap=1)
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Give the other activity a chance to start (it shouldn't with cap=1)
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     {
         let events = log.lock().unwrap().clone();
         assert!(
-            !events.contains(&"B-started".to_string()),
-            "B should NOT have started while A holds the session cap, got: {events:?}"
+            !events.contains(&format!("{second}-started")),
+            "{second} should NOT have started while {first} holds the session cap, got: {events:?}"
         );
     }
 
-    // Release A
-    release_a.notify_one();
+    // Release the first activity — this frees the session slot
+    match first {
+        "A" => release_a.notify_one(),
+        "B" => release_b.notify_one(),
+        _ => unreachable!(),
+    }
+
+    // Wait for the second activity to start
+    {
+        let mut found = false;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let events = log.lock().unwrap().clone();
+            if events.contains(&format!("{second}-started")) {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "Timed out waiting for {second} to start after {first} finished"
+        );
+    }
+
+    // Release the second activity
+    match second {
+        "A" => release_a.notify_one(),
+        "B" => release_b.notify_one(),
+        _ => unreachable!(),
+    }
 
     match client
         .wait_for_orchestration("test-block-unblock", Duration::from_secs(30))
@@ -1648,19 +1691,19 @@ async fn test_session_cap_blocks_then_unblocks() {
         other => panic!("Expected completed, got {:?}", other),
     }
 
-    // Verify ordering: A must have finished before B started
+    // Verify ordering: first must have finished before second started
     let events = log.lock().unwrap().clone();
-    let a_finished = events
+    let first_finished = events
         .iter()
-        .position(|e| e == "A-finished")
-        .expect("A-finished missing");
-    let b_started = events
+        .position(|e| *e == format!("{first}-finished"))
+        .expect(&format!("{first}-finished missing"));
+    let second_started_pos = events
         .iter()
-        .position(|e| e == "B-started")
-        .expect("B-started missing");
+        .position(|e| *e == format!("{second}-started"))
+        .expect(&format!("{second}-started missing"));
     assert!(
-        a_finished < b_started,
-        "B should start only after A finishes. Event log: {events:?}"
+        first_finished < second_started_pos,
+        "{second} should start only after {first} finishes. Event log: {events:?}"
     );
 
     rt.shutdown(None).await;

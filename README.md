@@ -58,12 +58,11 @@ let provider = PostgresProvider::new_with_schema(
 - Poison message detection with attempt count tracking
 - Lock renewal for long-running orchestrations and activities
 
-## Latest Release (0.1.23)
+## Latest Release (0.1.24)
 
-- Updated to duroxide 0.1.21 — orphan queue message handling
-- Drop QueueMessage items enqueued before orchestration starts
-- New validation test: `test_orphan_queue_messages_dropped`
-- New e2e test: `sample_config_hot_reload_persistent_events_fs`
+- Updated to duroxide 0.1.22 — activity tag routing for heterogeneous worker pools
+- New migration 0016: `tag` column, tag-aware `fetch_work_item` and `enqueue_worker_work`
+- 9 new tag filtering validation tests, 3 new tag e2e tests
 - See [CHANGELOG.md](CHANGELOG.md) for full version history
 
 ## License
