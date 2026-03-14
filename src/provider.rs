@@ -200,8 +200,10 @@ impl PostgresProvider {
                             attempt = attempt + 1,
                             "Deadlock during cleanup_schema, retrying"
                         );
-                        sleep(Duration::from_millis(BASE_RETRY_DELAY_MS * (attempt as u64 + 1)))
-                            .await;
+                        sleep(Duration::from_millis(
+                            BASE_RETRY_DELAY_MS * (attempt as u64 + 1),
+                        ))
+                        .await;
                         continue;
                     }
                     return Err(anyhow::anyhow!(db_err.to_string()));
@@ -271,6 +273,7 @@ impl Provider for PostgresProvider {
                     serde_json::Value,
                     String,
                     i32,
+                    serde_json::Value,
                 )>,
                 SqlxError,
             > = sqlx::query_as(&format!(
@@ -316,6 +319,7 @@ impl Provider for PostgresProvider {
                 messages_json,
                 lock_token,
                 attempt_count,
+                kv_snapshot_json,
             )) = row
             {
                 let (history, history_error) =
@@ -340,6 +344,8 @@ impl Provider for PostgresProvider {
                             format!("Failed to deserialize messages: {e}"),
                         )
                     })?;
+                let kv_snapshot: std::collections::HashMap<String, String> =
+                    serde_json::from_value(kv_snapshot_json).unwrap_or_default();
 
                 let duration_ms = start.elapsed().as_millis() as u64;
                 debug!(
@@ -395,6 +401,7 @@ impl Provider for PostgresProvider {
                         history,
                         messages,
                         history_error,
+                        kv_snapshot,
                     },
                     lock_token,
                     attempt_count as u32,
@@ -485,6 +492,25 @@ impl Provider for PostgresProvider {
             }
         };
 
+        let kv_mutations: Vec<serde_json::Value> = history_delta
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::KeyValueSet { key, value } => Some(serde_json::json!({
+                    "action": "set",
+                    "key": key,
+                    "value": value,
+                })),
+                EventKind::KeyValueCleared { key } => Some(serde_json::json!({
+                    "action": "clear_key",
+                    "key": key,
+                })),
+                EventKind::KeyValuesCleared => Some(serde_json::json!({
+                    "action": "clear_all",
+                })),
+                _ => None,
+            })
+            .collect();
+
         let metadata_json = serde_json::json!({
             "orchestration_name": metadata.orchestration_name,
             "orchestration_version": metadata.orchestration_version,
@@ -500,6 +526,7 @@ impl Provider for PostgresProvider {
             }),
             "custom_status_action": custom_status_action,
             "custom_status_value": custom_status_value,
+            "kv_mutations": kv_mutations,
         });
 
         // Serialize cancelled activities for lock stealing
@@ -1398,6 +1425,24 @@ impl Provider for PostgresProvider {
             Some((custom_status, version)) => Ok(Some((custom_status, version as u64))),
             None => Ok(None),
         }
+    }
+
+    async fn get_kv_value(
+        &self,
+        instance_id: &str,
+        key: &str,
+    ) -> Result<Option<String>, ProviderError> {
+        let query = format!(
+            "SELECT value FROM {}.kv_store WHERE instance_id = $1 AND key = $2",
+            self.schema_name
+        );
+        let result: Option<(String,)> = sqlx::query_as(&query)
+            .bind(instance_id)
+            .bind(key)
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(|e| ProviderError::retryable("get_kv_value", format!("get_kv_value: {e}")))?;
+        Ok(result.map(|(v,)| v))
     }
 }
 

@@ -57,12 +57,13 @@ let provider = PostgresProvider::new_with_schema(
 - Full implementation of the Duroxide `Provider` and `ProviderAdmin` traits
 - Poison message detection with attempt count tracking
 - Lock renewal for long-running orchestrations and activities
+- KV store — durable per-instance key-value state for orchestration coordination
 
-## Latest Release (0.1.24)
+## Latest Release (0.1.25)
 
-- Updated to duroxide 0.1.22 — activity tag routing for heterogeneous worker pools
-- New migration 0016: `tag` column, tag-aware `fetch_work_item` and `enqueue_worker_work`
-- 9 new tag filtering validation tests, 3 new tag e2e tests
+- Updated to duroxide 0.1.24 — KV store for durable per-instance key-value state
+- New migration 0018: `kv_store` table, KV mutations in fetch/ack/delete/prune/cleanup stored procedures
+- 26 new KV store provider validation tests, 2 new KV e2e sample tests
 - See [CHANGELOG.md](CHANGELOG.md) for full version history
 
 ## License

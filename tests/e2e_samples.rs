@@ -2243,22 +2243,25 @@ async fn sample_config_hot_reload_persistent_events_fs() {
 #[tokio::test]
 async fn sample_heterogeneous_workers_with_tags_fs() {
     use duroxide::runtime::RuntimeOptions;
-    use duroxide::TagFilter;
     use duroxide::EventKind;
+    use duroxide::TagFilter;
 
     init_test_logging();
     let (store, schema_name) = common::create_postgres_store().await;
 
     let activity_registry = ActivityRegistry::builder()
-        .register("Render", |_ctx: ActivityContext, input: String| async move {
-            Ok(format!("rendered:{input}"))
-        })
-        .register("Encode", |_ctx: ActivityContext, input: String| async move {
-            Ok(format!("encoded:{input}"))
-        })
-        .register("Upload", |_ctx: ActivityContext, input: String| async move {
-            Ok(format!("uploaded:{input}"))
-        })
+        .register(
+            "Render",
+            |_ctx: ActivityContext, input: String| async move { Ok(format!("rendered:{input}")) },
+        )
+        .register(
+            "Encode",
+            |_ctx: ActivityContext, input: String| async move { Ok(format!("encoded:{input}")) },
+        )
+        .register(
+            "Upload",
+            |_ctx: ActivityContext, input: String| async move { Ok(format!("uploaded:{input}")) },
+        )
         .build();
 
     let orchestration = |ctx: OrchestrationContext, _input: String| async move {
@@ -2538,5 +2541,243 @@ async fn sample_dual_runtime_tag_cooperation_fs() {
 
     rt_a.shutdown(None).await;
     rt_b.shutdown(None).await;
+    common::cleanup_schema(&schema_name).await;
+}
+
+#[tokio::test]
+async fn sample_kv_request_response() {
+    init_test_logging();
+    let (store, schema_name) = common::create_postgres_store().await;
+
+    let activities = ActivityRegistry::builder()
+        .register(
+            "ProcessCommand",
+            |_ctx: ActivityContext, input: String| async move {
+                Ok(input.chars().rev().collect::<String>())
+            },
+        )
+        .build();
+
+    let orchestrations = OrchestrationRegistry::builder()
+        .register(
+            "RequestServer",
+            |ctx: OrchestrationContext, _input: String| async move {
+                ctx.set_value("status", "ready");
+                for _ in 0..3 {
+                    let request_json = ctx.schedule_wait("request").await;
+                    let request: serde_json::Value = serde_json::from_str(&request_json).unwrap();
+                    let op_id = request["op_id"].as_str().unwrap().to_string();
+                    let command = request["command"].as_str().unwrap().to_string();
+                    ctx.set_value("status", "processing");
+                    let result = ctx
+                        .schedule_activity("ProcessCommand", command)
+                        .await
+                        .unwrap_or_else(|e| format!("error: {e}"));
+                    ctx.set_value(format!("response:{op_id}"), &result);
+                    ctx.set_value("status", "ready");
+                }
+                ctx.set_value("status", "shutdown");
+                Ok("served 3 requests".to_string())
+            },
+        )
+        .build();
+
+    let rt = runtime::Runtime::start_with_options(
+        store.clone(),
+        activities,
+        orchestrations,
+        Default::default(),
+    )
+    .await;
+    let client = Client::new(store.clone());
+
+    client
+        .start_orchestration("req-resp-server", "RequestServer", "")
+        .await
+        .unwrap();
+
+    let status = client
+        .wait_for_value("req-resp-server", "status", Duration::from_secs(10))
+        .await
+        .expect("Server never became ready");
+    assert_eq!(status, "ready");
+
+    let requests = vec![("op-1", "hello"), ("op-2", "world"), ("op-3", "rust")];
+    for (op_id, command) in &requests {
+        let event_data = serde_json::json!({ "op_id": op_id, "command": command }).to_string();
+        client
+            .raise_event("req-resp-server", "request", &event_data)
+            .await
+            .unwrap();
+        let response_key = format!("response:{op_id}");
+        let response = client
+            .wait_for_value("req-resp-server", &response_key, Duration::from_secs(10))
+            .await
+            .unwrap_or_else(|_| panic!("Timed out waiting for response to {op_id}"));
+        let expected: String = command.chars().rev().collect();
+        assert_eq!(
+            response, expected,
+            "Response for {op_id} should be the reversed command"
+        );
+    }
+
+    match client
+        .wait_for_orchestration("req-resp-server", Duration::from_secs(10))
+        .await
+        .unwrap()
+    {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
+            assert_eq!(output, "served 3 requests");
+        }
+        other => panic!("Expected Completed, got: {other:?}"),
+    }
+
+    assert_eq!(
+        client.get_value("req-resp-server", "status").await.unwrap(),
+        Some("shutdown".to_string())
+    );
+    assert_eq!(
+        client
+            .get_value("req-resp-server", "response:op-1")
+            .await
+            .unwrap(),
+        Some("olleh".to_string())
+    );
+    assert_eq!(
+        client
+            .get_value("req-resp-server", "response:op-2")
+            .await
+            .unwrap(),
+        Some("dlrow".to_string())
+    );
+    assert_eq!(
+        client
+            .get_value("req-resp-server", "response:op-3")
+            .await
+            .unwrap(),
+        Some("tsur".to_string())
+    );
+
+    rt.shutdown(None).await;
+    common::cleanup_schema(&schema_name).await;
+}
+
+#[tokio::test]
+async fn sample_kv_cross_orchestration_read() {
+    init_test_logging();
+    let (store, schema_name) = common::create_postgres_store().await;
+
+    let activities = ActivityRegistry::builder()
+        .register(
+            "ComputeResult",
+            |_ctx: ActivityContext, input: String| async move {
+                let n: i64 = input.parse().map_err(|e| format!("parse: {e}"))?;
+                Ok((n * n).to_string())
+            },
+        )
+        .build();
+
+    let orchestrations = OrchestrationRegistry::builder()
+        .register(
+            "Producer",
+            |ctx: OrchestrationContext, input: String| async move {
+                let n: i64 = input.parse().unwrap();
+                ctx.set_value("status", "computing");
+                let squared = ctx
+                    .schedule_activity("ComputeResult", n.to_string())
+                    .await?;
+                ctx.set_value("result", &squared);
+                ctx.set_value("status", "done");
+                ctx.schedule_wait("ack").await;
+                Ok(format!("produced:{squared}"))
+            },
+        )
+        .register(
+            "Consumer",
+            |ctx: OrchestrationContext, producer_id: String| async move {
+                let mut attempts = 0;
+                loop {
+                    let status = ctx
+                        .get_value_from_instance(&producer_id, "status")
+                        .await
+                        .map_err(|e| format!("read status: {e}"))?;
+                    if status.as_deref() == Some("done") {
+                        break;
+                    }
+                    attempts += 1;
+                    if attempts > 20 {
+                        return Err("producer never finished".to_string());
+                    }
+                    ctx.schedule_timer(Duration::from_millis(100)).await;
+                }
+                let result = ctx
+                    .get_value_from_instance(&producer_id, "result")
+                    .await
+                    .map_err(|e| format!("read result: {e}"))?;
+                let result = result.ok_or_else(|| "result key missing".to_string())?;
+                Ok(format!("consumed:{result}"))
+            },
+        )
+        .build();
+
+    let rt = runtime::Runtime::start_with_options(
+        store.clone(),
+        activities,
+        orchestrations,
+        Default::default(),
+    )
+    .await;
+    let client = Client::new(store.clone());
+
+    client
+        .start_orchestration("producer-1", "Producer", "7")
+        .await
+        .unwrap();
+
+    let result = client
+        .wait_for_value("producer-1", "result", Duration::from_secs(10))
+        .await
+        .expect("Producer never set result");
+    assert_eq!(result, "49");
+
+    client
+        .start_orchestration("consumer-1", "Consumer", "producer-1")
+        .await
+        .unwrap();
+
+    match client
+        .wait_for_orchestration("consumer-1", Duration::from_secs(15))
+        .await
+        .unwrap()
+    {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
+            assert_eq!(output, "consumed:49");
+        }
+        other => panic!("Expected consumer Completed, got: {other:?}"),
+    }
+
+    client.raise_event("producer-1", "ack", "").await.unwrap();
+
+    match client
+        .wait_for_orchestration("producer-1", Duration::from_secs(10))
+        .await
+        .unwrap()
+    {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
+            assert_eq!(output, "produced:49");
+        }
+        other => panic!("Expected producer Completed, got: {other:?}"),
+    }
+
+    assert_eq!(
+        client.get_value("producer-1", "result").await.unwrap(),
+        Some("49".to_string())
+    );
+    assert_eq!(
+        client.get_value("producer-1", "status").await.unwrap(),
+        Some("done".to_string())
+    );
+
+    rt.shutdown(None).await;
     common::cleanup_schema(&schema_name).await;
 }

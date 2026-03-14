@@ -113,29 +113,35 @@ fn next_schema_name() -> String {
 ### Migration Diff Files (Required)
 Every migration that modifies schema or stored procedures **must** have a companion `NNNN_diff.md` file. This is required because git diffs for SQL migrations only show the new code, not the delta from the previous version.
 
+#### Option A: Auto-generate with PostgreSQL (preferred)
 ```bash
-# Auto-generate diff by comparing schema before/after migration
 ./scripts/generate_migration_diff.sh <migration_number>
-
-# Example:
-./scripts/generate_migration_diff.sh 9
+# Example: ./scripts/generate_migration_diff.sh 9
 # Creates: migrations/0009_diff.md
 ```
 
-The script:
-1. Creates two temp schemas (before/after the target migration)
-2. Extracts DDL for tables, indexes, and functions
-3. Diffs them and generates `migrations/NNNN_diff.md`
-4. Cleans up temp schemas
+The script creates temp schemas, applies migrations before/after, extracts DDL, and diffs them.
 
-**Diff format requirements:** Each changed function must be shown **in full** with `+`/`-` diff markers on changed lines. This ensures the reader always knows which function a change belongs to (the `CREATE OR REPLACE FUNCTION` line is always visible at the top of each block). Do NOT use standard unified diff with small context windows — those lose function boundaries in large stored procedures.
+#### Option B: Manual extraction (when no PostgreSQL available)
+When a live database isn't available, generate diffs by extracting stored procedure bodies from the SQL migration files:
 
-The diff file should contain:
-1. **Table Changes** — New tables (full column list), modified tables (mark new columns with `+`)
-2. **New Indexes** — Any indexes added by the migration
-3. **Function Changes** — For each changed function: full function body in a `diff` code block with `+`/`-` markers. New functions shown in full in a `sql` code block. Signature changes called out separately.
+1. **Identify baselines**: For each SP modified in migration N, find the most recent migration before N that contains `CREATE OR REPLACE FUNCTION ... <sp_name>`. Use `grep -n "CREATE OR REPLACE FUNCTION.*<sp_name>" migrations/*.sql` to find them.
+2. **Extract SP bodies**: Extract the `CREATE OR REPLACE FUNCTION ... LANGUAGE plpgsql;` block from both the baseline and new migration files.
+3. **Normalize before diffing**: Migration files use different SQL quoting mechanisms across versions:
+   - Replace schema placeholders (`%I.` or `@SCHEMA@.`) with `SCHEMA.`
+   - Replace escaped single quotes (`''`) with `'` (old migrations inside `format('...')` need `''`; newer ones inside `format($fmt$...$fmt$)` don't)
+   - Replace escaped percent signs (`%%`) with `%` (same reason: `format()` uses `%` for placeholders)
+   - Expand tabs to spaces and strip trailing whitespace
+4. **Diff**: Run `diff -u <baseline_normalized> <new_normalized>` to get unified diff output.
+5. **Assemble**: Strip the `---`/`+++` header lines and include the hunks in ` ```diff ` code blocks.
 
-Example output: See [migrations/0014_diff.md](../migrations/0014_diff.md)
+#### Diff format requirements
+Each changed function must be shown with `+`/`-` diff markers on changed lines inside a ` ```diff ` code block. The diff file should contain:
+1. **Table Changes** — New tables (full DDL in ` ```sql ` block), modified tables (mark new columns with `+`)
+2. **New Indexes** — Any indexes added by the migration (full DDL in ` ```sql ` block)
+3. **Function Changes** — For each changed function: unified diff in a ` ```diff ` block with the baseline migration number noted in the heading (e.g., `### \`func_name\` — body modified (baseline: 0016)`)
+
+Example output: See [migrations/0017_diff.md](../migrations/0017_diff.md)
 
 ### Updating duroxide Dependency
 Follow the detailed guide in [prompts/update-duroxide-dependency.md](../prompts/update-duroxide-dependency.md). Key steps:

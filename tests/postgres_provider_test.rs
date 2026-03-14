@@ -2,7 +2,7 @@ use std::sync::{Arc, Once};
 
 use duroxide::provider_validation::{
     atomicity, bulk_deletion, cancellation, capability_filtering, custom_status, deletion,
-    error_handling, instance_creation, instance_locking, lock_expiration, management,
+    error_handling, instance_creation, instance_locking, kv_store, lock_expiration, management,
     multi_execution, prune, queue_semantics, sessions, tag_filtering,
 };
 use duroxide::provider_validations::ProviderFactory;
@@ -511,4 +511,35 @@ mod tag_filtering_tests {
     provider_validation_test!(tag_filtering::test_tag_survives_abandon_and_refetch);
     provider_validation_test!(tag_filtering::test_multi_runtime_tag_isolation);
     provider_validation_test!(tag_filtering::test_tag_preserved_through_ack_orchestration_item);
+}
+
+mod kv_store_tests {
+    use super::*;
+
+    provider_validation_test!(kv_store::test_kv_set_and_get);
+    provider_validation_test!(kv_store::test_kv_overwrite);
+    provider_validation_test!(kv_store::test_kv_clear_single);
+    provider_validation_test!(kv_store::test_kv_clear_all);
+    provider_validation_test!(kv_store::test_kv_get_nonexistent);
+    provider_validation_test!(kv_store::test_kv_snapshot_in_fetch);
+    provider_validation_test!(kv_store::test_kv_snapshot_after_clear_single);
+    provider_validation_test!(kv_store::test_kv_snapshot_after_clear_all);
+    provider_validation_test!(kv_store::test_kv_execution_id_tracking);
+    provider_validation_test!(kv_store::test_kv_cross_execution_overwrite);
+    provider_validation_test!(kv_store::test_kv_cross_execution_remove_readd);
+    provider_validation_test!(kv_store::test_kv_prune_preserves_overwritten);
+    provider_validation_test!(kv_store::test_kv_prune_removes_orphan_keys);
+    provider_validation_test!(kv_store::test_kv_instance_isolation);
+    provider_validation_test!(kv_store::test_kv_delete_instance_cascades);
+    provider_validation_test!(kv_store::test_kv_clear_nonexistent_key);
+    provider_validation_test!(kv_store::test_kv_get_unknown_instance);
+    provider_validation_test!(kv_store::test_kv_set_after_clear);
+    provider_validation_test!(kv_store::test_kv_empty_value);
+    provider_validation_test!(kv_store::test_kv_large_value);
+    provider_validation_test!(kv_store::test_kv_special_chars_in_key);
+    provider_validation_test!(kv_store::test_kv_snapshot_empty);
+    provider_validation_test!(kv_store::test_kv_snapshot_cross_execution);
+    provider_validation_test!(kv_store::test_kv_prune_current_execution_protected);
+    provider_validation_test!(kv_store::test_kv_delete_instance_with_children);
+    provider_validation_test!(kv_store::test_kv_clear_isolation);
 }

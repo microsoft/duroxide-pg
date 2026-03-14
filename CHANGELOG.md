@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.25] - 2026-03-13
+
+- **KV store support:** Durable key-value store for per-instance state. Orchestrations can store and retrieve key-value pairs via `ctx.set_value()` / `ctx.get_value()`. Client can read values via `client.get_value()` and poll with `client.wait_for_value()`. Cross-instance reads supported via `ctx.get_value_from_instance()`.
+- Migration 0018: `add_kv_store` — creates `kv_store` table, updates `fetch_orchestration_item` to load KV snapshot, updates `ack_orchestration_item` for KV materialization, updates deletion/pruning for KV cleanup.
+- Added 2 KV e2e sample tests (`sample_kv_request_response`, `sample_kv_cross_orchestration_read`)
+- Bumped duroxide dependency to 0.1.24
+
 ## [0.1.24] - 2026-03-07
 
 - Updated duroxide dependency from 0.1.21 to 0.1.22
