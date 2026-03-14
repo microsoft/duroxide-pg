@@ -344,8 +344,24 @@ impl Provider for PostgresProvider {
                             format!("Failed to deserialize messages: {e}"),
                         )
                     })?;
-                let kv_snapshot: std::collections::HashMap<String, String> =
-                    serde_json::from_value(kv_snapshot_json).unwrap_or_default();
+                let kv_snapshot: std::collections::HashMap<String, duroxide::providers::KvEntry> = {
+                    let raw: std::collections::HashMap<String, serde_json::Value> =
+                        serde_json::from_value(kv_snapshot_json).unwrap_or_default();
+                    raw.into_iter()
+                        .filter_map(|(k, v)| {
+                            let value = v.get("value")?.as_str()?.to_string();
+                            let last_updated_at_ms =
+                                v.get("last_updated_at_ms")?.as_u64().unwrap_or(0);
+                            Some((
+                                k,
+                                duroxide::providers::KvEntry {
+                                    value,
+                                    last_updated_at_ms,
+                                },
+                            ))
+                        })
+                        .collect()
+                };
 
                 let duration_ms = start.elapsed().as_millis() as u64;
                 debug!(
@@ -495,10 +511,15 @@ impl Provider for PostgresProvider {
         let kv_mutations: Vec<serde_json::Value> = history_delta
             .iter()
             .filter_map(|event| match &event.kind {
-                EventKind::KeyValueSet { key, value } => Some(serde_json::json!({
+                EventKind::KeyValueSet {
+                    key,
+                    value,
+                    last_updated_at_ms,
+                } => Some(serde_json::json!({
                     "action": "set",
                     "key": key,
                     "value": value,
+                    "last_updated_at_ms": last_updated_at_ms,
                 })),
                 EventKind::KeyValueCleared { key } => Some(serde_json::json!({
                     "action": "clear_key",
@@ -1443,6 +1464,22 @@ impl Provider for PostgresProvider {
             .await
             .map_err(|e| ProviderError::retryable("get_kv_value", format!("get_kv_value: {e}")))?;
         Ok(result.map(|(v,)| v))
+    }
+
+    async fn get_kv_all_values(
+        &self,
+        instance_id: &str,
+    ) -> Result<std::collections::HashMap<String, String>, ProviderError> {
+        let query = format!(
+            "SELECT key, value FROM {}.kv_store WHERE instance_id = $1",
+            self.schema_name
+        );
+        let rows: Vec<(String, String)> = sqlx::query_as(&query)
+            .bind(instance_id)
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| Self::sqlx_to_provider_error("get_kv_all_values", e))?;
+        Ok(rows.into_iter().collect())
     }
 }
 

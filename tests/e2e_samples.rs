@@ -2562,21 +2562,21 @@ async fn sample_kv_request_response() {
         .register(
             "RequestServer",
             |ctx: OrchestrationContext, _input: String| async move {
-                ctx.set_value("status", "ready");
+                ctx.set_kv_value("status", "ready");
                 for _ in 0..3 {
                     let request_json = ctx.schedule_wait("request").await;
                     let request: serde_json::Value = serde_json::from_str(&request_json).unwrap();
                     let op_id = request["op_id"].as_str().unwrap().to_string();
                     let command = request["command"].as_str().unwrap().to_string();
-                    ctx.set_value("status", "processing");
+                    ctx.set_kv_value("status", "processing");
                     let result = ctx
                         .schedule_activity("ProcessCommand", command)
                         .await
                         .unwrap_or_else(|e| format!("error: {e}"));
-                    ctx.set_value(format!("response:{op_id}"), &result);
-                    ctx.set_value("status", "ready");
+                    ctx.set_kv_value(format!("response:{op_id}"), &result);
+                    ctx.set_kv_value("status", "ready");
                 }
-                ctx.set_value("status", "shutdown");
+                ctx.set_kv_value("status", "shutdown");
                 Ok("served 3 requests".to_string())
             },
         )
@@ -2597,7 +2597,7 @@ async fn sample_kv_request_response() {
         .unwrap();
 
     let status = client
-        .wait_for_value("req-resp-server", "status", Duration::from_secs(10))
+        .wait_for_kv_value("req-resp-server", "status", Duration::from_secs(10))
         .await
         .expect("Server never became ready");
     assert_eq!(status, "ready");
@@ -2611,7 +2611,7 @@ async fn sample_kv_request_response() {
             .unwrap();
         let response_key = format!("response:{op_id}");
         let response = client
-            .wait_for_value("req-resp-server", &response_key, Duration::from_secs(10))
+            .wait_for_kv_value("req-resp-server", &response_key, Duration::from_secs(10))
             .await
             .unwrap_or_else(|_| panic!("Timed out waiting for response to {op_id}"));
         let expected: String = command.chars().rev().collect();
@@ -2633,26 +2633,29 @@ async fn sample_kv_request_response() {
     }
 
     assert_eq!(
-        client.get_value("req-resp-server", "status").await.unwrap(),
+        client
+            .get_kv_value("req-resp-server", "status")
+            .await
+            .unwrap(),
         Some("shutdown".to_string())
     );
     assert_eq!(
         client
-            .get_value("req-resp-server", "response:op-1")
+            .get_kv_value("req-resp-server", "response:op-1")
             .await
             .unwrap(),
         Some("olleh".to_string())
     );
     assert_eq!(
         client
-            .get_value("req-resp-server", "response:op-2")
+            .get_kv_value("req-resp-server", "response:op-2")
             .await
             .unwrap(),
         Some("dlrow".to_string())
     );
     assert_eq!(
         client
-            .get_value("req-resp-server", "response:op-3")
+            .get_kv_value("req-resp-server", "response:op-3")
             .await
             .unwrap(),
         Some("tsur".to_string())
@@ -2682,12 +2685,12 @@ async fn sample_kv_cross_orchestration_read() {
             "Producer",
             |ctx: OrchestrationContext, input: String| async move {
                 let n: i64 = input.parse().unwrap();
-                ctx.set_value("status", "computing");
+                ctx.set_kv_value("status", "computing");
                 let squared = ctx
                     .schedule_activity("ComputeResult", n.to_string())
                     .await?;
-                ctx.set_value("result", &squared);
-                ctx.set_value("status", "done");
+                ctx.set_kv_value("result", &squared);
+                ctx.set_kv_value("status", "done");
                 ctx.schedule_wait("ack").await;
                 Ok(format!("produced:{squared}"))
             },
@@ -2698,7 +2701,7 @@ async fn sample_kv_cross_orchestration_read() {
                 let mut attempts = 0;
                 loop {
                     let status = ctx
-                        .get_value_from_instance(&producer_id, "status")
+                        .get_kv_value_from_instance(&producer_id, "status")
                         .await
                         .map_err(|e| format!("read status: {e}"))?;
                     if status.as_deref() == Some("done") {
@@ -2711,7 +2714,7 @@ async fn sample_kv_cross_orchestration_read() {
                     ctx.schedule_timer(Duration::from_millis(100)).await;
                 }
                 let result = ctx
-                    .get_value_from_instance(&producer_id, "result")
+                    .get_kv_value_from_instance(&producer_id, "result")
                     .await
                     .map_err(|e| format!("read result: {e}"))?;
                 let result = result.ok_or_else(|| "result key missing".to_string())?;
@@ -2735,7 +2738,7 @@ async fn sample_kv_cross_orchestration_read() {
         .unwrap();
 
     let result = client
-        .wait_for_value("producer-1", "result", Duration::from_secs(10))
+        .wait_for_kv_value("producer-1", "result", Duration::from_secs(10))
         .await
         .expect("Producer never set result");
     assert_eq!(result, "49");
@@ -2770,11 +2773,11 @@ async fn sample_kv_cross_orchestration_read() {
     }
 
     assert_eq!(
-        client.get_value("producer-1", "result").await.unwrap(),
+        client.get_kv_value("producer-1", "result").await.unwrap(),
         Some("49".to_string())
     );
     assert_eq!(
-        client.get_value("producer-1", "status").await.unwrap(),
+        client.get_kv_value("producer-1", "status").await.unwrap(),
         Some("done".to_string())
     );
 

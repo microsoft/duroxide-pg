@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.26] - 2026-03-14
+
+### Breaking Changes
+- **duroxide 0.1.25**: Updated duroxide dependency with KV timestamp support
+
+### Added
+- **KV timestamps**: Added `last_updated_at_ms` column to `kv_store` table (migration 0019)
+- **Bulk KV reads**: Implemented `get_kv_all_values()` provider method
+- **KV snapshot timestamps**: `fetch_orchestration_item` now returns `KvEntry` with value + timestamp
+- **Instance-scoped KV**: Execution pruning no longer deletes KV entries
+
+### Changed
+- KV materialization now persists `last_updated_at_ms` from `KeyValueSet` events
+- Provider validation test renamed: `test_kv_prune_removes_orphan_keys` → `test_kv_prune_preserves_all_keys`
+
 ## [0.1.25] - 2026-03-13
 
 - **KV store support:** Durable key-value store for per-instance state. Orchestrations can store and retrieve key-value pairs via `ctx.set_value()` / `ctx.get_value()`. Client can read values via `client.get_value()` and poll with `client.wait_for_value()`. Cross-instance reads supported via `ctx.get_value_from_instance()`.

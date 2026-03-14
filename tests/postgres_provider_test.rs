@@ -528,7 +528,7 @@ mod kv_store_tests {
     provider_validation_test!(kv_store::test_kv_cross_execution_overwrite);
     provider_validation_test!(kv_store::test_kv_cross_execution_remove_readd);
     provider_validation_test!(kv_store::test_kv_prune_preserves_overwritten);
-    provider_validation_test!(kv_store::test_kv_prune_removes_orphan_keys);
+    provider_validation_test!(kv_store::test_kv_prune_preserves_all_keys);
     provider_validation_test!(kv_store::test_kv_instance_isolation);
     provider_validation_test!(kv_store::test_kv_delete_instance_cascades);
     provider_validation_test!(kv_store::test_kv_clear_nonexistent_key);
