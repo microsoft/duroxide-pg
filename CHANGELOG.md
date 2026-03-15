@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.27] - 2026-03-15
+
+### Breaking Changes
+- **duroxide 0.1.26**: KV delta table — fixes read-modify-write replay poisoning
+
+### Added
+- **KV delta table**: New `kv_delta` table captures current-execution KV mutations (migration 0020)
+- **Two-table KV model**: `kv_store` only written at execution completion (Completed/CAN/Failed),
+  `kv_delta` written every turn. Fixes snapshot poisoning for RMW patterns.
+- **KV read stored procedures**: `get_kv_value` and `get_kv_all_values` now implemented as SPs
+  that merge `kv_store + kv_delta` with tombstone handling
+- **9 new provider validation tests** for KV delta behavior
+
+### Changed
+- `ack_orchestration_item` SP writes KV mutations to `kv_delta` instead of `kv_store`
+- Terminal execution (Completed/CAN/Failed) triggers delta→store merge then delta clear
+- `delete_instances_atomic` SP cascades to `kv_delta` table
+
 ## [0.1.26] - 2026-03-14
 
 ### Breaking Changes
