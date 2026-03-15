@@ -168,7 +168,7 @@ $fmt$, v_schema_name);
                     v_kv_action := v_kv_item->>'action';
                     IF v_kv_action = 'set' THEN
                         INSERT INTO %1$I.kv_delta (instance_id, key, value, last_updated_at_ms)
-                        VALUES (v_instance_id, v_kv_item->>'key', v_kv_item->>'value', (v_kv_item->>'last_updated_at_ms')::BIGINT)
+                        VALUES (v_instance_id, v_kv_item->>'key', v_kv_item->>'value', COALESCE((v_kv_item->>'last_updated_at_ms')::BIGINT, p_now_ms))
                         ON CONFLICT (instance_id, key)
                         DO UPDATE SET value = EXCLUDED.value, last_updated_at_ms = EXCLUDED.last_updated_at_ms;
                     ELSIF v_kv_action = 'clear_key' THEN
