@@ -450,8 +450,79 @@ $fmt$, v_schema_name);
             DROP FUNCTION IF EXISTS %1$I.renew_session_lock(TEXT[], BIGINT, BIGINT, BIGINT);
             DROP FUNCTION IF EXISTS %1$I.cleanup_orphaned_sessions(BIGINT);
             DROP FUNCTION IF EXISTS %1$I.get_custom_status(TEXT, BIGINT);
+            DROP FUNCTION IF EXISTS %1$I.get_kv_value(TEXT, TEXT);
+            DROP FUNCTION IF EXISTS %1$I.get_kv_all_values(TEXT);
         END;
         $cleanup$ LANGUAGE plpgsql;
+$fmt$, v_schema_name);
+
+    -- ============================================================================
+    -- Part 5: Add get_kv_value stored procedure for delta-first lookup
+    -- ============================================================================
+
+    EXECUTE format($fmt$DROP FUNCTION IF EXISTS %1$I.get_kv_value(TEXT, TEXT);$fmt$, v_schema_name);
+    EXECUTE format($fmt$
+        CREATE OR REPLACE FUNCTION %1$I.get_kv_value(
+            p_instance TEXT,
+            p_key TEXT
+        )
+        RETURNS TABLE(out_value TEXT, out_found BOOLEAN) AS $get_kv_value$
+        DECLARE
+            v_delta_value TEXT;
+            v_store_value TEXT;
+        BEGIN
+            SELECT value
+            INTO v_delta_value
+            FROM %1$I.kv_delta
+            WHERE instance_id = p_instance AND key = p_key;
+
+            IF FOUND THEN
+                out_value := v_delta_value;
+                out_found := v_delta_value IS NOT NULL;
+                RETURN NEXT;
+                RETURN;
+            END IF;
+
+            SELECT value
+            INTO v_store_value
+            FROM %1$I.kv_store
+            WHERE instance_id = p_instance AND key = p_key;
+
+            IF FOUND THEN
+                out_value := v_store_value;
+                out_found := TRUE;
+                RETURN NEXT;
+                RETURN;
+            END IF;
+
+            out_value := NULL;
+            out_found := FALSE;
+            RETURN NEXT;
+        END;
+        $get_kv_value$ LANGUAGE plpgsql;
+$fmt$, v_schema_name);
+
+    -- ============================================================================
+    -- Part 6: Add get_kv_all_values stored procedure for merged KV reads
+    -- ============================================================================
+
+    EXECUTE format($fmt$DROP FUNCTION IF EXISTS %1$I.get_kv_all_values(TEXT);$fmt$, v_schema_name);
+    EXECUTE format($fmt$
+        CREATE OR REPLACE FUNCTION %1$I.get_kv_all_values(
+            p_instance TEXT
+        )
+        RETURNS TABLE(out_key TEXT, out_value TEXT) AS $get_kv_all_values$
+        BEGIN
+            RETURN QUERY
+            SELECT COALESCE(d.key, s.key) AS out_key,
+                   CASE WHEN d.key IS NOT NULL THEN d.value ELSE s.value END AS out_value
+            FROM %1$I.kv_store s
+            FULL OUTER JOIN %1$I.kv_delta d
+                ON s.instance_id = d.instance_id AND s.key = d.key
+            WHERE (s.instance_id = p_instance OR d.instance_id = p_instance)
+              AND CASE WHEN d.key IS NOT NULL THEN d.value IS NOT NULL ELSE TRUE END;
+        END;
+        $get_kv_all_values$ LANGUAGE plpgsql;
 $fmt$, v_schema_name);
 
     RAISE NOTICE 'Migration 0020: Added kv_delta table and two-table KV semantics';

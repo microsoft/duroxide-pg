@@ -1453,70 +1453,33 @@ impl Provider for PostgresProvider {
         instance_id: &str,
         key: &str,
     ) -> Result<Option<String>, ProviderError> {
-        let delta_query = format!(
-            "SELECT value FROM {}.kv_delta WHERE instance_id = $1 AND key = $2",
+        let row: Option<(Option<String>, bool)> = sqlx::query_as(&format!(
+            "SELECT * FROM {}.get_kv_value($1, $2)",
             self.schema_name
-        );
-        let delta_result: Option<(Option<String>,)> = sqlx::query_as(&delta_query)
-            .bind(instance_id)
-            .bind(key)
-            .fetch_optional(&*self.pool)
-            .await
-            .map_err(|e| ProviderError::retryable("get_kv_value", format!("get_kv_value: {e}")))?;
-        if let Some((value,)) = delta_result {
-            return Ok(value);
-        }
+        ))
+        .bind(instance_id)
+        .bind(key)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| Self::sqlx_to_provider_error("get_kv_value", e))?;
 
-        let store_query = format!(
-            "SELECT value FROM {}.kv_store WHERE instance_id = $1 AND key = $2",
-            self.schema_name
-        );
-        let store_result: Option<(String,)> = sqlx::query_as(&store_query)
-            .bind(instance_id)
-            .bind(key)
-            .fetch_optional(&*self.pool)
-            .await
-            .map_err(|e| ProviderError::retryable("get_kv_value", format!("get_kv_value: {e}")))?;
-        Ok(store_result.map(|(value,)| value))
+        Ok(row.and_then(|(value, found)| if found { value } else { None }))
     }
 
     async fn get_kv_all_values(
         &self,
         instance_id: &str,
     ) -> Result<std::collections::HashMap<String, String>, ProviderError> {
-        let store_query = format!(
-            "SELECT key, value FROM {}.kv_store WHERE instance_id = $1",
+        let rows: Vec<(String, String)> = sqlx::query_as(&format!(
+            "SELECT * FROM {}.get_kv_all_values($1)",
             self.schema_name
-        );
-        let store_rows: Vec<(String, String)> = sqlx::query_as(&store_query)
-            .bind(instance_id)
-            .fetch_all(&*self.pool)
-            .await
-            .map_err(|e| Self::sqlx_to_provider_error("get_kv_all_values", e))?;
+        ))
+        .bind(instance_id)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| Self::sqlx_to_provider_error("get_kv_all_values", e))?;
 
-        let delta_query = format!(
-            "SELECT key, value FROM {}.kv_delta WHERE instance_id = $1",
-            self.schema_name
-        );
-        let delta_rows: Vec<(String, Option<String>)> = sqlx::query_as(&delta_query)
-            .bind(instance_id)
-            .fetch_all(&*self.pool)
-            .await
-            .map_err(|e| Self::sqlx_to_provider_error("get_kv_all_values", e))?;
-
-        let mut values: std::collections::HashMap<String, String> = store_rows.into_iter().collect();
-        for (key, value) in delta_rows {
-            match value {
-                Some(value) => {
-                    values.insert(key, value);
-                }
-                None => {
-                    values.remove(&key);
-                }
-            }
-        }
-
-        Ok(values)
+        Ok(rows.into_iter().collect())
     }
 }
 
