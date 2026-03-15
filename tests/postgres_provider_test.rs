@@ -542,4 +542,13 @@ mod kv_store_tests {
     provider_validation_test!(kv_store::test_kv_prune_current_execution_protected);
     provider_validation_test!(kv_store::test_kv_delete_instance_with_children);
     provider_validation_test!(kv_store::test_kv_clear_isolation);
+    provider_validation_test!(kv_store::test_kv_delta_snapshot_excludes_current_execution);
+    provider_validation_test!(kv_store::test_kv_delta_snapshot_includes_completed_execution);
+    provider_validation_test!(kv_store::test_kv_delta_client_reads_merged);
+    provider_validation_test!(kv_store::test_kv_delta_tombstone_overrides_store);
+    provider_validation_test!(kv_store::test_kv_delta_clear_all_tombstones_store);
+    provider_validation_test!(kv_store::test_kv_delta_merged_on_completion);
+    provider_validation_test!(kv_store::test_kv_delta_merged_on_can);
+    provider_validation_test!(kv_store::test_kv_delta_delete_instance_cascades);
+    provider_validation_test!(kv_store::test_kv_delta_prune_untouched_key_survives);
 }
