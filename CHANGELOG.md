@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.28] - 2026-04-04
+
+### Added
+- **Orchestration stats provider surface**: implemented `Provider::get_instance_stats()` for
+  per-instance history and KV introspection through `Client::get_orchestration_stats()`
+- **Management validation coverage**: wired the 3 new core `get_instance_stats` validation tests
+  into `tests/postgres_provider_test.rs`
+- **E2E parity coverage**: added `sample_orchestration_stats` and
+  `sample_kv_read_modify_write_counter`
+- **Provider validation tests**: `test_read_corrupted_history_returns_error`,
+  `test_read_with_execution_corrupted_history_returns_error`, plus 6 stats tests
+  (`carry_forward`, `kv_delta_only`, `kv_merged`, `history`, `kv`, `nonexistent`)
+
+### Fixed
+- **Deserialization error propagation**: `read()`, `read_with_execution()`, and
+  `read_history_with_execution_id()` now return `ProviderError::permanent` instead of
+  silently dropping malformed events via `.filter_map(.ok())`
+- **get_instance_stats carry_forward fix**: corrected JSONB path from
+  `-> 'kind' -> 'carry_forward_events'` to `-> 'carry_forward_events'` in stored procedure
+- **get_instance_stats error handling**: removed `EXCEPTION WHEN OTHERS` block that swallowed
+  errors in the stats stored procedure
+
+### Changed
+- Bumped `duroxide` dependency from `0.1.26` to `0.1.27`
+- Bumped provider crate version to `0.1.28`
+
 ## [0.1.27] - 2026-03-15
 
 ### Breaking Changes
@@ -480,4 +506,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Worker queue with lock renewal support
 - Multi-execution support for continue-as-new
 - Comprehensive test suite with 50+ validation tests
-

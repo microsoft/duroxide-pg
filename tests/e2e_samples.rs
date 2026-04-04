@@ -2784,3 +2784,129 @@ async fn sample_kv_cross_orchestration_read() {
     rt.shutdown(None).await;
     common::cleanup_schema(&schema_name).await;
 }
+
+#[tokio::test]
+async fn sample_kv_read_modify_write_counter() {
+    init_test_logging();
+    let (store, schema_name) = common::create_postgres_store().await;
+
+    let activities = ActivityRegistry::builder()
+        .register("ProcessBatch", |_ctx: ActivityContext, batch: String| async move {
+            Ok(format!("processed:{batch}"))
+        })
+        .build();
+    let orchestrations = OrchestrationRegistry::builder()
+        .register(
+            "BatchProcessor",
+            |ctx: OrchestrationContext, _input: String| async move {
+                let batches = vec!["alpha", "beta", "gamma"];
+
+                for batch_name in &batches {
+                    let processed = ctx
+                        .get_kv_value("batches_processed")
+                        .unwrap_or("0".to_string());
+                    let count: u32 = processed.parse().unwrap();
+
+                    let result = ctx
+                        .schedule_activity("ProcessBatch", batch_name.to_string())
+                        .await?;
+
+                    ctx.set_kv_value("batches_processed", (count + 1).to_string());
+                    ctx.set_kv_value("last_result", &result);
+                }
+
+                Ok(ctx.get_kv_value("batches_processed").unwrap_or("0".to_string()))
+            },
+        )
+        .build();
+
+    let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
+    let client = Client::new(store.clone());
+    client
+        .start_orchestration("batch-proc", "BatchProcessor", "")
+        .await
+        .unwrap();
+
+    let status = client
+        .wait_for_orchestration("batch-proc", Duration::from_secs(10))
+        .await
+        .unwrap();
+    match status {
+        runtime::OrchestrationStatus::Completed { output, .. } => {
+            assert_eq!(output, "3", "Should have processed 3 batches");
+        }
+        runtime::OrchestrationStatus::Failed { details, .. } => {
+            panic!(
+                "Batch processor failed (possible RMW nondeterminism): {}",
+                details.display_message()
+            );
+        }
+        other => panic!("Expected Completed, got: {other:?}"),
+    }
+
+    assert_eq!(
+        client
+            .get_kv_value("batch-proc", "batches_processed")
+            .await
+            .unwrap(),
+        Some("3".to_string()),
+    );
+    assert_eq!(
+        client.get_kv_value("batch-proc", "last_result").await.unwrap(),
+        Some("processed:gamma".to_string()),
+    );
+
+    rt.shutdown(None).await;
+    common::cleanup_schema(&schema_name).await;
+}
+
+#[tokio::test]
+async fn sample_orchestration_stats() {
+    init_test_logging();
+    let (store, schema_name) = common::create_postgres_store().await;
+
+    let activities = ActivityRegistry::builder()
+        .register("FetchData", |_ctx: ActivityContext, url: String| async move {
+            Ok(format!("data from {url}"))
+        })
+        .build();
+    let orchestrations = OrchestrationRegistry::builder()
+        .register("DataPipeline", |ctx: OrchestrationContext, _: String| async move {
+            let result = ctx
+                .schedule_activity("FetchData", "https://api.example.com".to_string())
+                .await?;
+            ctx.set_kv_value("last_fetch", &result);
+            ctx.set_kv_value("status", "complete");
+            Ok(result)
+        })
+        .build();
+
+    let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
+    let client = Client::new(store.clone());
+
+    assert!(client.get_orchestration_stats("missing").await.unwrap().is_none());
+
+    client
+        .start_orchestration("pipeline-1", "DataPipeline", "")
+        .await
+        .unwrap();
+    client
+        .wait_for_orchestration("pipeline-1", Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    let stats = client
+        .get_orchestration_stats("pipeline-1")
+        .await
+        .unwrap()
+        .expect("stats should exist after completion");
+
+    assert!(stats.history_event_count >= 4);
+    assert!(stats.history_size_bytes > 0);
+    assert_eq!(stats.kv_user_key_count, 2);
+    assert!(stats.kv_total_value_bytes > 0);
+    assert_eq!(stats.queue_pending_count, 0);
+
+    rt.shutdown(None).await;
+    common::cleanup_schema(&schema_name).await;
+}

@@ -58,12 +58,15 @@ let provider = PostgresProvider::new_with_schema(
 - Poison message detection with attempt count tracking
 - Lock renewal for long-running orchestrations and activities
 - KV store — durable per-instance key-value state for orchestration coordination
+- Orchestration stats introspection via `Client::get_orchestration_stats()`
 
-## Latest Release (0.1.25)
+## Latest Release (0.1.28)
 
-- Updated to duroxide 0.1.24 — KV store for durable per-instance key-value state
-- New migration 0018: `kv_store` table, KV mutations in fetch/ack/delete/prune/cleanup stored procedures
-- 26 new KV store provider validation tests, 2 new KV e2e sample tests
+- Updated to duroxide 0.1.27 with provider-side `get_instance_stats()` support
+- Fixed deserialization error propagation: `read()`, `read_with_execution()`, and `read_history_with_execution_id()` now surface malformed events as `ProviderError::permanent`
+- Fixed `get_instance_stats` carry_forward JSONB path and removed error-swallowing `EXCEPTION` block
+- Added 8 new validation tests (2 corrupted history + 6 stats)
+- Added `sample_orchestration_stats` and `sample_kv_read_modify_write_counter` e2e coverage
 - See [CHANGELOG.md](CHANGELOG.md) for full version history
 
 ## License

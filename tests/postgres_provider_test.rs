@@ -193,11 +193,14 @@ mod error_handling_tests {
     provider_validation_test!(error_handling::test_missing_instance_metadata);
     provider_validation_test!(error_handling::test_corrupted_serialization_data);
     provider_validation_test!(error_handling::test_lock_expiration_during_ack);
+    provider_validation_test!(error_handling::test_read_corrupted_history_returns_error);
+    provider_validation_test!(
+        error_handling::test_read_with_execution_corrupted_history_returns_error
+    );
 }
 
 mod instance_creation_tests {
     use super::*;
-
     provider_validation_test!(instance_creation::test_instance_creation_via_metadata);
     provider_validation_test!(instance_creation::test_no_instance_creation_on_enqueue);
     provider_validation_test!(instance_creation::test_null_version_handling);
@@ -269,6 +272,12 @@ mod management_tests {
     provider_validation_test!(management::test_list_executions);
     provider_validation_test!(management::test_get_instance_info);
     provider_validation_test!(management::test_get_execution_info);
+    provider_validation_test!(management::test_get_instance_stats_nonexistent);
+    provider_validation_test!(management::test_get_instance_stats_history);
+    provider_validation_test!(management::test_get_instance_stats_kv);
+    provider_validation_test!(management::test_get_instance_stats_carry_forward);
+    provider_validation_test!(management::test_get_instance_stats_kv_delta_only);
+    provider_validation_test!(management::test_get_instance_stats_kv_merged);
     provider_validation_test!(management::test_get_system_metrics);
     provider_validation_test!(management::test_get_queue_depths);
 }

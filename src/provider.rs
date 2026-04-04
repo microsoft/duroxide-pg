@@ -6,7 +6,7 @@ use duroxide::providers::{
     PruneOptions, PruneResult, QueueDepths, ScheduledActivityIdentifier, SessionFetchConfig,
     SystemMetrics, TagFilter, WorkItem,
 };
-use duroxide::{Event, EventKind};
+use duroxide::{Event, EventKind, SystemStats};
 use sqlx::{postgres::PgPoolOptions, Error as SqlxError, PgPool};
 use std::sync::Arc;
 use std::time::Duration;
@@ -706,10 +706,14 @@ impl Provider for PostgresProvider {
         .await
         .map_err(|e| Self::sqlx_to_provider_error("read", e))?;
 
-        Ok(event_data_rows
+        event_data_rows
             .into_iter()
-            .filter_map(|event_data| serde_json::from_str::<Event>(&event_data).ok())
-            .collect())
+            .map(|event_data| {
+                serde_json::from_str::<Event>(&event_data).map_err(|e| {
+                    ProviderError::permanent("read", format!("Failed to deserialize event: {e}"))
+                })
+            })
+            .collect()
     }
 
     #[instrument(skip(self), fields(instance = %instance, execution_id = execution_id), target = "duroxide::providers::postgres")]
@@ -1348,13 +1352,19 @@ impl Provider for PostgresProvider {
         .bind(execution_id as i64)
         .fetch_all(&*self.pool)
         .await
-        .ok()
-        .unwrap_or_default();
+        .map_err(|e| Self::sqlx_to_provider_error("read_with_execution", e))?;
 
-        Ok(event_data_rows
+        event_data_rows
             .into_iter()
-            .filter_map(|event_data| serde_json::from_str::<Event>(&event_data).ok())
-            .collect())
+            .map(|event_data| {
+                serde_json::from_str::<Event>(&event_data).map_err(|e| {
+                    ProviderError::permanent(
+                        "read_with_execution",
+                        format!("Failed to deserialize event: {e}"),
+                    )
+                })
+            })
+            .collect()
     }
 
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
@@ -1481,6 +1491,31 @@ impl Provider for PostgresProvider {
 
         Ok(rows.into_iter().collect())
     }
+
+    #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
+    async fn get_instance_stats(&self, instance: &str) -> Result<Option<SystemStats>, ProviderError> {
+        let row: Option<(bool, i64, i64, i64, i64, i64)> = sqlx::query_as(&format!(
+            "SELECT * FROM {}.get_instance_stats($1)",
+            self.schema_name
+        ))
+        .bind(instance)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| Self::sqlx_to_provider_error("get_instance_stats", e))?;
+
+        match row {
+            Some((true, history_event_count, history_size_bytes, queue_pending_count, kv_user_key_count, kv_total_value_bytes)) => {
+                Ok(Some(SystemStats {
+                    history_event_count: history_event_count as u64,
+                    history_size_bytes: history_size_bytes as u64,
+                    queue_pending_count: queue_pending_count as u64,
+                    kv_user_key_count: kv_user_key_count as u64,
+                    kv_total_value_bytes: kv_total_value_bytes as u64,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -1540,10 +1575,14 @@ impl ProviderAdmin for PostgresProvider {
 
         event_data_rows
             .into_iter()
-            .filter_map(|event_data| serde_json::from_str::<Event>(&event_data).ok())
-            .collect::<Vec<Event>>()
-            .into_iter()
-            .map(Ok)
+            .map(|event_data| {
+                serde_json::from_str::<Event>(&event_data).map_err(|e| {
+                    ProviderError::permanent(
+                        "read_history_with_execution_id",
+                        format!("Failed to deserialize event: {e}"),
+                    )
+                })
+            })
             .collect()
     }
 
