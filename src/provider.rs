@@ -126,6 +126,9 @@ impl PostgresProvider {
                 } else if code == Some("23503") {
                     // Foreign key constraint violation
                     ProviderError::permanent(operation, format!("Foreign key violation: {e}"))
+                } else if code == Some("0A000") {
+                    // Cached plan invalidated by concurrent DDL (e.g., migration replaced a function)
+                    ProviderError::retryable(operation, format!("Cached plan invalidated: {e}"))
                 } else {
                     ProviderError::permanent(operation, format!("Database error: {e}"))
                 }

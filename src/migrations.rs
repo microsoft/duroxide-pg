@@ -1,5 +1,6 @@
 use anyhow::Result;
 use include_dir::{include_dir, Dir};
+use sqlx::Connection;
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -25,12 +26,65 @@ impl MigrationRunner {
         Self { pool, schema_name }
     }
 
+    fn advisory_lock_key(&self) -> i64 {
+        // Stable 64-bit FNV-1a hash over (namespace + schema name).
+        // This avoids using Rust's DefaultHasher (randomized per-process).
+        const OFFSET: u64 = 0xcbf29ce484222325;
+        const PRIME: u64 = 0x100000001b3;
+
+        let mut hash = OFFSET;
+        for b in b"duroxide_pg:migrations:" {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(PRIME);
+        }
+        for b in self.schema_name.as_bytes() {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(PRIME);
+        }
+
+        hash as i64
+    }
+
+    async fn lock_for_migrations(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<()> {
+        let key = self.advisory_lock_key();
+        // Session lock (not xact lock) so it spans multiple transactions.
+        // We explicitly unlock at the end.
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(key)
+            .execute(&mut *conn)
+            .await?;
+        Ok(())
+    }
+
+    async fn unlock_for_migrations(&self, conn: &mut sqlx::postgres::PgConnection) {
+        let key = self.advisory_lock_key();
+        // Best-effort unlock.
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(key)
+            .execute(&mut *conn)
+            .await;
+    }
+
     /// Run all pending migrations
     pub async fn migrate(&self) -> Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        let conn = &mut *conn;
+        self.lock_for_migrations(conn).await?;
+
+        let result = self.migrate_inner(conn).await;
+        self.unlock_for_migrations(conn).await;
+
+        result
+    }
+
+    async fn migrate_inner(
+        &self,
+        conn: &mut sqlx::postgres::PgConnection,
+    ) -> Result<()> {
         // Ensure schema exists
         if self.schema_name != "public" {
             sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", self.schema_name))
-                .execute(&*self.pool)
+                .execute(&mut *conn)
                 .await?;
         }
 
@@ -44,16 +98,16 @@ impl MigrationRunner {
         );
 
         // Ensure migration tracking table exists (in the schema)
-        self.ensure_migration_table().await?;
+        self.ensure_migration_table(conn).await?;
 
         // Get applied migrations
-        let applied_versions = self.get_applied_versions().await?;
+        let applied_versions = self.get_applied_versions(conn).await?;
 
         tracing::debug!("Applied migrations: {:?}", applied_versions);
 
         // Check if key tables exist - if not, we need to re-run migrations even if marked as applied
         // This handles the case where cleanup dropped tables but not the migration tracking table
-        let tables_exist = self.check_tables_exist().await.unwrap_or(false);
+        let tables_exist = self.check_tables_exist(conn).await.unwrap_or(false);
 
         // Apply pending migrations (or re-apply if tables don't exist)
         for migration in migrations {
@@ -71,7 +125,7 @@ impl MigrationRunner {
                     self.schema_name
                 ))
                 .bind(migration.version)
-                .execute(&*self.pool)
+                .execute(&mut *conn)
                 .await?;
                 true
             } else {
@@ -84,7 +138,7 @@ impl MigrationRunner {
                     migration.version,
                     migration.name
                 );
-                self.apply_migration(&migration).await?;
+                self.apply_migration(conn, &migration).await?;
             } else {
                 tracing::debug!(
                     "Skipping migration {}: {} (already applied)",
@@ -144,7 +198,7 @@ impl MigrationRunner {
     }
 
     /// Ensure migration tracking table exists
-    async fn ensure_migration_table(&self) -> Result<()> {
+    async fn ensure_migration_table(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<()> {
         // Create migration table in the target schema
         sqlx::query(&format!(
             r#"
@@ -156,32 +210,32 @@ impl MigrationRunner {
             "#,
             self.schema_name
         ))
-        .execute(&*self.pool)
+        .execute(&mut *conn)
         .await?;
 
         Ok(())
     }
 
     /// Check if key tables exist
-    async fn check_tables_exist(&self) -> Result<bool> {
+    async fn check_tables_exist(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<bool> {
         // Check if instances table exists (as a proxy for all tables)
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'instances')",
         )
         .bind(&self.schema_name)
-        .fetch_one(&*self.pool)
+        .fetch_one(&mut *conn)
         .await?;
 
         Ok(exists)
     }
 
     /// Get list of applied migration versions
-    async fn get_applied_versions(&self) -> Result<Vec<i64>> {
+    async fn get_applied_versions(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<Vec<i64>> {
         let versions: Vec<i64> = sqlx::query_scalar(&format!(
             "SELECT version FROM {}._duroxide_migrations ORDER BY version",
             self.schema_name
         ))
-        .fetch_all(&*self.pool)
+        .fetch_all(&mut *conn)
         .await?;
 
         Ok(versions)
@@ -285,9 +339,9 @@ impl MigrationRunner {
     }
 
     /// Apply a single migration
-    async fn apply_migration(&self, migration: &Migration) -> Result<()> {
+    async fn apply_migration(&self, conn: &mut sqlx::postgres::PgConnection, migration: &Migration) -> Result<()> {
         // Start transaction
-        let mut tx = self.pool.begin().await?;
+        let mut tx = conn.begin().await?;
 
         // Set search_path for this transaction
         sqlx::query(&format!("SET LOCAL search_path TO {}", self.schema_name))

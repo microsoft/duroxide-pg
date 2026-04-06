@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.29] - 2026-04-06
+
+### Fixed
+- **Migration race condition on concurrent startup** (microsoft/duroxide#10): ported advisory lock
+  from duroxide-pg-opt. Multiple workers starting simultaneously against a fresh database no longer
+  crash with `duplicate key value violates unique constraint`. The migration runner now acquires a
+  PostgreSQL advisory lock (`pg_advisory_lock`) on a dedicated connection before executing any
+  migrations, serializing concurrent startup.
+- **Cached plan invalidation now retryable**: `cached plan must not change result type` (SQLSTATE
+  `0A000`) is now classified as a retryable error instead of permanent. This allows transparent
+  recovery when a stored procedure is replaced by a concurrent migration while workers are polling.
+
+### Added
+- `tests/concurrent_migration_tests.rs`: regression tests for concurrent startup with 2 and 6
+  workers, verifying the advisory lock serializes migration execution.
+- `tests/cached_plan_retryable_test.rs`: integration test verifying that `0A000` errors from
+  invalidated prepared statements are retried and recovered transparently.
+
 ## [0.1.28] - 2026-04-04
 
 ### Added
