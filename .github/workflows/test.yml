@@ -1,9 +1,12 @@
 name: Tests
 
-# Runs cargo tests on pull requests
+# Runs cargo tests on pull requests and pushes to main
 
 on:
   pull_request:
+    branches:
+      - main
+  push:
     branches:
       - main
 
