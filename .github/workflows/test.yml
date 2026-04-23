@@ -44,8 +44,8 @@ jobs:
 
       - name: Strip local path overrides (use crates.io duroxide)
         run: |
-          sed -i 's|, path = "../../duroxide"||g' Cargo.toml
-          grep -n '^duroxide' Cargo.toml || true
+          find . -name Cargo.toml -not -path './target/*' -exec sed -i 's|, path = "\(\.\./\)\+duroxide"||g' {} +
+          grep -rn '^duroxide' --include=Cargo.toml . || true
       
       - name: Cache cargo registry
         uses: actions/cache@v4
