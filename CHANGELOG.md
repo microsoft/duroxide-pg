@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.30] - 2026-04-23
+
+### Changed
+
+- **TLS backend** — Switched the SQLx runtime feature from
+  `runtime-tokio-rustls` to `runtime-tokio-native-tls` in both the root crate
+  and the `pg-stress` companion. This eliminates the transitive dependency on
+  the `ring` crate (not FIPS compliant for our policy requirements). The Linux
+  crypto path now goes through OpenSSL via `native-tls`; macOS uses Secure
+  Transport, Windows uses SChannel. (#5)
+- **Build hygiene** — Dropped the `path = "../../duroxide"` and
+  `path = "../../../duroxide"` workspace-relative overrides on the `duroxide`
+  dependency. The crate now resolves `duroxide` purely from crates.io. (#5)
+- **Bumped `duroxide` dependency** — `0.1.27` → `0.1.28` (also drops `ring`
+  from the transitive graph).
+
 ## [0.1.29] - 2026-04-06
 
 ### Fixed

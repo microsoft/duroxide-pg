@@ -60,13 +60,11 @@ let provider = PostgresProvider::new_with_schema(
 - KV store — durable per-instance key-value state for orchestration coordination
 - Orchestration stats introspection via `Client::get_orchestration_stats()`
 
-## Latest Release (0.1.28)
+## Latest Release (0.1.30)
 
-- Updated to duroxide 0.1.27 with provider-side `get_instance_stats()` support
-- Fixed deserialization error propagation: `read()`, `read_with_execution()`, and `read_history_with_execution_id()` now surface malformed events as `ProviderError::permanent`
-- Fixed `get_instance_stats` carry_forward JSONB path and removed error-swallowing `EXCEPTION` block
-- Added 8 new validation tests (2 corrupted history + 6 stats)
-- Added `sample_orchestration_stats` and `sample_kv_read_modify_write_counter` e2e coverage
+- Switched SQLx TLS backend from `runtime-tokio-rustls` to `runtime-tokio-native-tls` (drops transitive `ring` crate dependency for FIPS compliance)
+- Bumped duroxide dependency to `0.1.28` (also drops `ring`)
+- Dropped local `path = "../../duroxide"` overrides; now resolves from crates.io only
 - See [CHANGELOG.md](CHANGELOG.md) for full version history
 
 ## License
