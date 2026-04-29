@@ -415,7 +415,13 @@ const ENTRA_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Safety margin: refresh this much before `expires_at`. Picked to be larger
 /// than realistic clock skew + connection-acquisition latency.
-const ENTRA_REFRESH_SAFETY_MARGIN: Duration = Duration::from_secs(5 * 60);
+pub(crate) const ENTRA_REFRESH_SAFETY_MARGIN: Duration = Duration::from_secs(5 * 60);
+
+/// Defense-in-depth cap on the size of a panic message captured by
+/// `run_with_panic_guard`. A future SDK regression that interpolates a
+/// secret into a panic payload would otherwise surface verbatim in
+/// operator logs (SF-F).
+const ENTRA_PANIC_MSG_TRUNCATION_LIMIT: usize = 256;
 
 /// Spawn the background task that rotates Entra tokens into the pool.
 ///
@@ -438,6 +444,11 @@ const ENTRA_REFRESH_SAFETY_MARGIN: Duration = Duration::from_secs(5 * 60);
 /// panic payload into a printable string. Returns `Ok(output)` if the future
 /// completes normally, or `Err(panic_msg)` if it panicked.
 ///
+/// The captured payload is truncated to
+/// `ENTRA_PANIC_MSG_TRUNCATION_LIMIT` bytes (with a `…[truncated]` suffix
+/// when truncation occurs) — defensive bound against an upstream SDK
+/// regression interpolating secret material into a panic message (SF-F).
+///
 /// Extracted as a small testable seam for the refresh-task panic guard
 /// (otherwise the guard would only be exercisable via a real `PgPool`).
 async fn run_with_panic_guard<Fut, T>(fut: Fut) -> Result<T, String>
@@ -451,14 +462,34 @@ where
         .catch_unwind()
         .await
         .map_err(|panic| {
-            if let Some(s) = panic.downcast_ref::<&'static str>() {
+            let raw = if let Some(s) = panic.downcast_ref::<&'static str>() {
                 (*s).to_string()
             } else if let Some(s) = panic.downcast_ref::<String>() {
                 s.clone()
             } else {
                 "<non-string panic payload>".to_string()
-            }
+            };
+            truncate_panic_message(raw, ENTRA_PANIC_MSG_TRUNCATION_LIMIT)
         })
+}
+
+/// Truncate a panic payload to at most `limit` bytes, preserving valid
+/// UTF-8 boundaries and appending a `…[truncated]` marker if the input
+/// exceeded the limit. Pure helper for `run_with_panic_guard`.
+fn truncate_panic_message(s: String, limit: usize) -> String {
+    if s.len() <= limit {
+        return s;
+    }
+    // Walk back to the nearest char boundary so we never split a UTF-8
+    // codepoint mid-byte (would panic).
+    let mut cut = limit;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = String::with_capacity(cut + 16);
+    out.push_str(&s[..cut]);
+    out.push_str("…[truncated]");
+    out
 }
 
 fn spawn_token_refresh_task(
@@ -2702,5 +2733,47 @@ mod tests {
         }).await;
         let msg = result.expect_err("must catch");
         assert!(msg.contains("non-string panic payload"), "got: {msg}");
+    }
+
+    // SF-F: panic message truncation defends against an upstream SDK
+    // regression that interpolates secret material into a panic payload.
+    #[test]
+    fn truncate_panic_message_passes_through_short_input() {
+        let s = "short message".to_string();
+        assert_eq!(truncate_panic_message(s.clone(), 256), s);
+    }
+
+    #[test]
+    fn truncate_panic_message_truncates_long_input_with_marker() {
+        let raw = "A".repeat(1024);
+        let out = truncate_panic_message(raw, 256);
+        assert!(out.starts_with(&"A".repeat(256)));
+        assert!(out.ends_with("…[truncated]"), "got: {out}");
+        // Total length = 256 bytes of A + the truncation marker.
+        assert_eq!(out.len(), 256 + "…[truncated]".len());
+    }
+
+    #[test]
+    fn truncate_panic_message_respects_utf8_char_boundaries() {
+        // 100 copies of a 3-byte UTF-8 character: 300 bytes total. Cutting
+        // at 256 must walk back to a char boundary so we don't split a
+        // codepoint mid-byte (which would otherwise panic).
+        let raw = "✨".repeat(100);
+        let out = truncate_panic_message(raw, 256);
+        // The leading slice must be valid UTF-8 — String construction
+        // would have panicked if not. Sanity-check the marker is appended.
+        assert!(out.ends_with("…[truncated]"));
+    }
+
+    #[tokio::test]
+    async fn run_with_panic_guard_truncates_oversized_panic_message() {
+        // A long string panic must be truncated by the guard, not surfaced
+        // verbatim — protects against secret leakage via panic payload.
+        let result: Result<(), String> = run_with_panic_guard(async {
+            panic!("{}", "S".repeat(10_000));
+        }).await;
+        let msg = result.expect_err("must catch");
+        assert!(msg.len() < 10_000, "panic message not truncated: len={}", msg.len());
+        assert!(msg.ends_with("…[truncated]"), "missing truncation marker: {msg}");
     }
 }

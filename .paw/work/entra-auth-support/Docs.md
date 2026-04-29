@@ -146,8 +146,32 @@ and converts any panic payload into a printable string. A panic in token
 acquisition or the credential SDK therefore cannot tear down the task.
 On panic we log at ERROR and sleep `ENTRA_REFRESH_MIN_INTERVAL` before the
 next iteration; the outer `loop` keeps the task alive for the full provider
-lifetime. The seam is exercised by three unit tests covering the success
-path, the string-panic path, and the non-string panic-payload fallback path.
+lifetime.
+
+The captured panic payload is **truncated to 256 bytes** (with a
+`…[truncated]` marker) before being attached to the ERROR log — defensive
+bound against an upstream SDK regression that might interpolate secret
+material (a bearer token, a connection string) into a panic message
+(SF-F). The truncation respects UTF-8 char boundaries.
+
+The seam is exercised by seven unit tests covering the success path,
+string-panic path, non-string panic-payload fallback, the truncation
+threshold, the truncation marker, UTF-8 boundary safety, and an
+end-to-end "10 KB panic message gets truncated" check.
+
+### Initial token freshness validation
+
+`validate_token_freshness(now, expires_at, margin)` asserts that every
+token returned by `AzureIdentityTokenSource::fetch_token` (both the
+constructor's first fetch and the background refresh) leaves at least
+`ENTRA_REFRESH_SAFETY_MARGIN` (5 min) of useful lifetime relative to
+wall-clock. An already-expired or near-expired token from upstream
+(SDK bug, clock skew on the credential issuer, or a stale cached
+token) is rejected at the boundary rather than being applied to the
+pool — this prevents a connection-storm of 28xxx errors at the first
+acquire (SF-D). On the constructor path the rejection surfaces as a
+constructor error; on the refresh path it falls through the standard
+`Err(())` arm into the bounded MIN_INTERVAL retry loop.
 
 ### Lifecycle
 
@@ -238,7 +262,10 @@ Override via `EntraAuthOptions::audience(...)`.
 | Unexpected principal class wins on a developer workstation | `AZURE_FEDERATED_TOKEN_FILE` (or related Workload Identity env vars) leaked into the developer shell. The chain tries Workload Identity first, fails, then falls through. | Unset `AZURE_FEDERATED_TOKEN_FILE` / `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_AUTHORITY_HOST` on non-AKS hosts. Confirm via the chain's INFO log: `credential = "ManagedIdentityCredential"` or `credential = "DeveloperToolsCredential"`. |
 
 To verify which credential class won, enable `RUST_LOG=duroxide::providers::postgres=info`
-and look for `Entra credential chain: token acquired credential=...`. AKS pods
+and look for `Entra credential chain: token acquired (first success on this instance) credential=...`.
+The INFO log fires **once per `ChainedCredential` instance** (gated via
+`OnceLock`), so each provider emits exactly one credential-class
+disclosure for its lifetime regardless of refresh count (SF-A). AKS pods
 with Workload Identity correctly configured should show
 `credential="WorkloadIdentityCredential"`.
 

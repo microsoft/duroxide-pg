@@ -103,8 +103,12 @@ impl EntraAuthOptions {
     }
 
     /// Override the pool's maximum connection count.
+    ///
+    /// A value of `0` is silently clamped to `1` because the pool's
+    /// hardcoded `min_connections(1)` would otherwise reject the
+    /// configuration at runtime (SF-G).
     pub fn max_connections(mut self, max: u32) -> Self {
-        self.max_connections = max;
+        self.max_connections = max.max(1);
         self
     }
 
@@ -212,6 +216,11 @@ impl TokenSource for AzureIdentityTokenSource {
             .map_err(|e| anyhow::anyhow!("Entra token acquisition failed: {e}"))?;
 
         let expires_at = offset_datetime_to_system_time(access.expires_on);
+        validate_token_freshness(
+            SystemTime::now(),
+            expires_at,
+            crate::provider::ENTRA_REFRESH_SAFETY_MARGIN,
+        )?;
         Ok(EntraToken::new(access.token.secret().to_string(), expires_at))
     }
 }
@@ -227,6 +236,39 @@ fn offset_datetime_to_system_time(t: azure_core::time::OffsetDateTime) -> System
     UNIX_EPOCH
         .checked_add(Duration::from_secs(seconds as u64))
         .unwrap_or(UNIX_EPOCH)
+}
+
+/// Pure helper: validate that a freshly-issued token's `expires_at` leaves
+/// at least `margin` of useful lifetime relative to `now`. Defends against
+/// upstream returning an already-expired (or near-expired) token, which
+/// would otherwise produce an immediate connection-storm of 28xxx errors
+/// at the pool boundary (SF-D).
+///
+/// Returns `Ok(())` if the token is fresh enough, or an error explaining
+/// the skew/staleness on rejection.
+pub(crate) fn validate_token_freshness(
+    now: SystemTime,
+    expires_at: SystemTime,
+    margin: Duration,
+) -> Result<()> {
+    let cutoff = now
+        .checked_add(margin)
+        .ok_or_else(|| anyhow::anyhow!("clock arithmetic overflow validating token freshness"))?;
+    if expires_at <= cutoff {
+        let secs_remaining = expires_at
+            .duration_since(now)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_else(|e| -(e.duration().as_secs() as i64));
+        anyhow::bail!(
+            "Entra token rejected: expires_at is too close to now \
+             (remaining={}s, required margin={}s). Possible upstream SDK \
+             bug, clock skew on the credential issuer, or stale cached \
+             token.",
+            secs_remaining,
+            margin.as_secs(),
+        );
+    }
+    Ok(())
 }
 
 /// Build the default chained credential used when the caller does not provide
@@ -266,13 +308,21 @@ fn build_default_chained_credential() -> azure_core::Result<Arc<dyn TokenCredent
 /// source can be logged at INFO — useful in production to confirm the
 /// expected principal class is being used (e.g. AKS pods should show
 /// `WorkloadIdentityCredential`, not `DeveloperToolsCredential`).
+///
+/// The INFO log fires **once per `ChainedCredential` instance** (gated via
+/// `OnceLock`) so a long-running process emits exactly one credential-class
+/// disclosure per provider, regardless of how many refreshes occur (SF-A).
 struct ChainedCredential {
     sources: Vec<(&'static str, Arc<dyn TokenCredential>)>,
+    logged_first_success: std::sync::OnceLock<()>,
 }
 
 impl ChainedCredential {
     fn new(sources: Vec<(&'static str, Arc<dyn TokenCredential>)>) -> Self {
-        Self { sources }
+        Self {
+            sources,
+            logged_first_success: std::sync::OnceLock::new(),
+        }
     }
 }
 
@@ -293,11 +343,13 @@ impl TokenCredential for ChainedCredential {
         for (name, source) in &self.sources {
             match source.get_token(scopes, options.clone()).await {
                 Ok(token) => {
-                    tracing::info!(
-                        target: "duroxide::providers::postgres",
-                        credential = %name,
-                        "Entra credential chain: token acquired",
-                    );
+                    if self.logged_first_success.set(()).is_ok() {
+                        tracing::info!(
+                            target: "duroxide::providers::postgres",
+                            credential = %name,
+                            "Entra credential chain: token acquired (first success on this instance)",
+                        );
+                    }
                     return Ok(token);
                 }
                 Err(e) => errors.push(format!("{name}: {e}")),
@@ -516,5 +568,87 @@ mod tests {
         assert!(msg.contains("Workload"), "{msg}");
         assert!(msg.contains("Managed"), "{msg}");
         assert!(msg.contains("Dev"), "{msg}");
+    }
+
+    /// SF-A: INFO log fires only on the first successful chain call per
+    /// instance, not on every refresh. We can't easily intercept `tracing`
+    /// output from a unit test without pulling in a subscriber crate, so
+    /// we instead pin the *gating mechanism* directly: the OnceLock must
+    /// be empty before the first call and populated after, and stay
+    /// populated after subsequent calls.
+    #[tokio::test]
+    async fn chained_credential_logs_first_success_only_once() {
+        let chain = ChainedCredential::new(vec![
+            ("Winner", Arc::new(StubCred { ok: true, label: "Winner" })),
+        ]);
+        assert!(chain.logged_first_success.get().is_none(), "should start unset");
+        let _ = chain.get_token(&["aud"], None).await.unwrap();
+        assert!(
+            chain.logged_first_success.get().is_some(),
+            "OnceLock must be populated after first success",
+        );
+        // Subsequent calls re-succeed but must NOT re-arm or re-log. The
+        // observable signal here is that `set` would have returned `Err`
+        // had we tried again — but get_token already swallows that. We
+        // verify by checking the OnceLock is still populated and the
+        // call still succeeds.
+        let _ = chain.get_token(&["aud"], None).await.unwrap();
+        assert!(chain.logged_first_success.get().is_some());
+    }
+
+    // SF-D: validate_token_freshness rejects stale/expired tokens.
+    #[test]
+    fn validate_token_freshness_rejects_already_expired_token() {
+        let now = SystemTime::now();
+        let expires_at = now - Duration::from_secs(10); // 10s in the past
+        let err = validate_token_freshness(now, expires_at, Duration::from_secs(60))
+            .expect_err("must reject");
+        let msg = format!("{err}");
+        assert!(msg.contains("too close to now"), "{msg}");
+        assert!(msg.contains("clock skew"), "{msg}");
+    }
+
+    #[test]
+    fn validate_token_freshness_rejects_token_within_safety_margin() {
+        let now = SystemTime::now();
+        // Token expires in 60s but margin requires 5min — must reject.
+        let expires_at = now + Duration::from_secs(60);
+        let err = validate_token_freshness(now, expires_at, Duration::from_secs(5 * 60))
+            .expect_err("must reject");
+        assert!(format!("{err}").contains("too close to now"));
+    }
+
+    #[test]
+    fn validate_token_freshness_accepts_fresh_token() {
+        let now = SystemTime::now();
+        let expires_at = now + Duration::from_secs(3600);
+        validate_token_freshness(now, expires_at, Duration::from_secs(5 * 60))
+            .expect("must accept fresh token");
+    }
+
+    #[test]
+    fn validate_token_freshness_rejects_at_exact_cutoff() {
+        // Boundary: token expiring exactly at now+margin should be rejected
+        // (we use strict `>`, not `>=`, because a token whose lifetime is
+        // exactly the margin has no useful working window).
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let margin = Duration::from_secs(60);
+        let expires_at = now + margin;
+        validate_token_freshness(now, expires_at, margin)
+            .expect_err("must reject at exact cutoff");
+    }
+
+    // SF-G: max_connections(0) clamps to 1 to satisfy the
+    // hardcoded min_connections(1) invariant on the pool builder.
+    #[test]
+    fn max_connections_zero_is_clamped_to_one() {
+        let opts = EntraAuthOptions::new().max_connections(0);
+        assert_eq!(opts.max_connections_value(), 1);
+    }
+
+    #[test]
+    fn max_connections_one_is_preserved() {
+        let opts = EntraAuthOptions::new().max_connections(1);
+        assert_eq!(opts.max_connections_value(), 1);
     }
 }
