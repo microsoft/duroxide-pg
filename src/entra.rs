@@ -244,27 +244,34 @@ fn offset_datetime_to_system_time(t: azure_core::time::OffsetDateTime) -> System
 /// Returns an `azure_core::Error` from any failed inner constructor; the
 /// caller wraps it into an `anyhow::Error`.
 fn build_default_chained_credential() -> azure_core::Result<Arc<dyn TokenCredential>> {
-    let mut sources: Vec<Arc<dyn TokenCredential>> = Vec::new();
+    let mut sources: Vec<(&'static str, Arc<dyn TokenCredential>)> = Vec::new();
     // WorkloadIdentityCredential::new only succeeds when AZURE_FEDERATED_TOKEN_FILE
     // (and friends) are set. Skip silently otherwise so the chain still works
-    // on a developer laptop.
+    // on a developer laptop. Note: leaving these env vars set on a NON-AKS host
+    // can cause the chain to spend per-refresh latency budget here before
+    // falling through; see Docs.md "Troubleshooting" for details.
     if let Ok(workload) = WorkloadIdentityCredential::new(None) {
-        sources.push(workload);
+        sources.push(("WorkloadIdentityCredential", workload));
     }
-    sources.push(ManagedIdentityCredential::new(None)?);
-    sources.push(DeveloperToolsCredential::new(None)?);
+    sources.push(("ManagedIdentityCredential", ManagedIdentityCredential::new(None)?));
+    sources.push(("DeveloperToolsCredential", DeveloperToolsCredential::new(None)?));
     Ok(Arc::new(ChainedCredential::new(sources)))
 }
 
 /// Tiny `TokenCredential` chain — tries each source in order, returns the
 /// first that succeeds, aggregates errors otherwise. Modeled after upstream
 /// [`DeveloperToolsCredential`]'s chaining behavior.
+///
+/// Sources are stored alongside a static class-name so the first successful
+/// source can be logged at INFO — useful in production to confirm the
+/// expected principal class is being used (e.g. AKS pods should show
+/// `WorkloadIdentityCredential`, not `DeveloperToolsCredential`).
 struct ChainedCredential {
-    sources: Vec<Arc<dyn TokenCredential>>,
+    sources: Vec<(&'static str, Arc<dyn TokenCredential>)>,
 }
 
 impl ChainedCredential {
-    fn new(sources: Vec<Arc<dyn TokenCredential>>) -> Self {
+    fn new(sources: Vec<(&'static str, Arc<dyn TokenCredential>)>) -> Self {
         Self { sources }
     }
 }
@@ -283,10 +290,17 @@ impl TokenCredential for ChainedCredential {
         options: Option<azure_core::credentials::TokenRequestOptions<'_>>,
     ) -> azure_core::Result<azure_core::credentials::AccessToken> {
         let mut errors: Vec<String> = Vec::new();
-        for source in &self.sources {
+        for (name, source) in &self.sources {
             match source.get_token(scopes, options.clone()).await {
-                Ok(token) => return Ok(token),
-                Err(e) => errors.push(format!("{e}")),
+                Ok(token) => {
+                    tracing::info!(
+                        target: "duroxide::providers::postgres",
+                        credential = %name,
+                        "Entra credential chain: token acquired",
+                    );
+                    return Ok(token);
+                }
+                Err(e) => errors.push(format!("{name}: {e}")),
             }
         }
         Err(azure_core::Error::with_message_fn(
@@ -448,5 +462,59 @@ mod tests {
             + azure_core::time::Duration::seconds(120);
         let converted = offset_datetime_to_system_time(post_epoch);
         assert_eq!(converted, UNIX_EPOCH + Duration::from_secs(120));
+    }
+
+    /// Minimal `TokenCredential` stub for chain ordering tests.
+    #[derive(Debug)]
+    struct StubCred {
+        ok: bool,
+        label: &'static str,
+    }
+
+    #[async_trait]
+    impl TokenCredential for StubCred {
+        async fn get_token(
+            &self,
+            _scopes: &[&str],
+            _options: Option<azure_core::credentials::TokenRequestOptions<'_>>,
+        ) -> azure_core::Result<azure_core::credentials::AccessToken> {
+            if self.ok {
+                Ok(azure_core::credentials::AccessToken::new(
+                    azure_core::credentials::Secret::new(format!("token-from-{}", self.label)),
+                    azure_core::time::OffsetDateTime::UNIX_EPOCH
+                        + azure_core::time::Duration::seconds(3_700_000_000),
+                ))
+            } else {
+                Err(azure_core::Error::with_message(
+                    azure_core::error::ErrorKind::Credential,
+                    format!("{} failed", self.label),
+                ))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn chained_credential_returns_first_success_in_chain_order() {
+        let chain = ChainedCredential::new(vec![
+            ("Failing", Arc::new(StubCred { ok: false, label: "Failing" })),
+            ("Winner",  Arc::new(StubCred { ok: true,  label: "Winner" })),
+            ("ShouldNotBeCalled", Arc::new(StubCred { ok: true, label: "ShouldNotBeCalled" })),
+        ]);
+        let token = chain.get_token(&["aud"], None).await.unwrap();
+        assert_eq!(token.token.secret(), "token-from-Winner");
+    }
+
+    #[tokio::test]
+    async fn chained_credential_aggregates_class_names_in_failure_message() {
+        let chain = ChainedCredential::new(vec![
+            ("Workload", Arc::new(StubCred { ok: false, label: "WorkloadIdentity" })),
+            ("Managed",  Arc::new(StubCred { ok: false, label: "ManagedIdentity" })),
+            ("Dev",      Arc::new(StubCred { ok: false, label: "DeveloperTools" })),
+        ]);
+        let err = chain.get_token(&["aud"], None).await.expect_err("all fail");
+        let msg = format!("{err}");
+        assert!(msg.contains("Workload"), "{msg}");
+        assert!(msg.contains("Managed"), "{msg}");
+        assert!(msg.contains("Dev"), "{msg}");
     }
 }

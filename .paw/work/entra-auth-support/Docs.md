@@ -115,22 +115,29 @@ typical request handling.
 
 ### Failure handling
 
-On a refresh failure we log at WARN with `target = "duroxide::providers::postgres"`
-and rely on the next iteration's `compute_next_refresh_sleep` to schedule a
-bounded retry — the floor `ENTRA_REFRESH_MIN_INTERVAL` (30 s) guarantees we
-never busy-loop against the IDP, and the standard expiry-driven path applies
-once a fresh token is acquired.
+`refresh_loop_iteration` returns `Result<(), ()>`. On `Ok(())` the outer loop
+schedules the next iteration off the freshly-updated `next_expires_at`. On
+`Err(())` (token-fetch failure) the outer loop sleeps
+`ENTRA_REFRESH_MIN_INTERVAL` (30 s) before retrying, **independently** of the
+expiry-driven schedule. This is critical: without the explicit failure-path
+sleep, a transient IDP blip immediately after a fresh token acquisition would
+not be retried for ~`token_lifetime − SAFETY_MARGIN` (delaying recovery and
+masking telemetry signal).
 
-Persistent token-fetch failure loops at ≥30 s cadence with WARN logs. If it
-persists, operator intervention is required (revoked principal, expired
-secret, etc.).
+Persistent token-fetch failure therefore loops at exactly 30 s cadence with
+WARN logs. If it persists, operator intervention is required (revoked
+principal, expired secret, etc.).
 
 ### Panic isolation
 
-The refresh task body is wrapped in `AssertUnwindSafe(...).catch_unwind()` so a
-panic in token acquisition or the credential SDK cannot tear down the runtime.
-On panic we log at ERROR and sleep `ENTRA_REFRESH_MIN_INTERVAL` before the next
-iteration; the outer `loop` keeps the task alive for the full provider lifetime.
+The refresh task body is wrapped via the small testable seam
+`run_with_panic_guard`, which applies `AssertUnwindSafe(...).catch_unwind()`
+and converts any panic payload into a printable string. A panic in token
+acquisition or the credential SDK therefore cannot tear down the task.
+On panic we log at ERROR and sleep `ENTRA_REFRESH_MIN_INTERVAL` before the
+next iteration; the outer `loop` keeps the task alive for the full provider
+lifetime. The seam is exercised by three unit tests covering the success
+path, the string-panic path, and the non-string panic-payload fallback path.
 
 ### Lifecycle
 
@@ -218,6 +225,12 @@ Override via `EntraAuthOptions::audience(...)`.
 | `permission denied for ...` at startup | Principal authenticated but lacks DB privileges (SQLSTATE `42501`). NOT classified as retryable. | `GRANT ... ON DATABASE ...` etc. |
 | Periodic WARN: `Entra token refresh failed; will retry` | Transient IDP unavailability, or principal revoked. | Check Azure activity log; if persistent, principal needs re-credentialing. |
 | Pointing `new_with_entra` at non-Azure Postgres | Vanilla Postgres doesn't accept Entra tokens as passwords. | Use `new`/`new_with_schema` for non-Azure deployments. |
+| Unexpected principal class wins on a developer workstation | `AZURE_FEDERATED_TOKEN_FILE` (or related Workload Identity env vars) leaked into the developer shell. The chain tries Workload Identity first, fails, then falls through. | Unset `AZURE_FEDERATED_TOKEN_FILE` / `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_AUTHORITY_HOST` on non-AKS hosts. Confirm via the chain's INFO log: `credential = "ManagedIdentityCredential"` or `credential = "DeveloperToolsCredential"`. |
+
+To verify which credential class won, enable `RUST_LOG=duroxide::providers::postgres=info`
+and look for `Entra credential chain: token acquired credential=...`. AKS pods
+with Workload Identity correctly configured should show
+`credential="WorkloadIdentityCredential"`.
 
 ## Manual verification checklist
 

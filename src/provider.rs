@@ -434,6 +434,33 @@ const ENTRA_REFRESH_SAFETY_MARGIN: Duration = Duration::from_secs(5 * 60);
 ///
 /// The task terminates only when its [`tokio::task::JoinHandle`] (wrapped in
 /// [`AbortOnDropHandle`]) is dropped along with the provider.
+/// Wraps a future in `AssertUnwindSafe(...).catch_unwind()` and converts a
+/// panic payload into a printable string. Returns `Ok(output)` if the future
+/// completes normally, or `Err(panic_msg)` if it panicked.
+///
+/// Extracted as a small testable seam for the refresh-task panic guard
+/// (otherwise the guard would only be exercisable via a real `PgPool`).
+async fn run_with_panic_guard<Fut, T>(fut: Fut) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = T>,
+{
+    use std::panic::AssertUnwindSafe;
+    use futures_util::FutureExt;
+
+    AssertUnwindSafe(fut)
+        .catch_unwind()
+        .await
+        .map_err(|panic| {
+            if let Some(s) = panic.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            }
+        })
+}
+
 fn spawn_token_refresh_task(
     pool: Arc<PgPool>,
     token_source: Arc<dyn TokenSource>,
@@ -444,16 +471,13 @@ fn spawn_token_refresh_task(
 ) -> AbortHandle {
     let handle = tokio::spawn(async move {
         // Outer panic-guard loop: if the inner refresh body panics (e.g., a
-        // future Azure SDK regression), AssertUnwindSafe + catch_unwind logs
-        // it and we keep going. Without this, a panic would silently
+        // future Azure SDK regression), `run_with_panic_guard` catches it
+        // and we keep going. Without this, a panic would silently
         // terminate the task and leave the pool with a stale token until
         // sqlx's max-lifetime reaper rotated connections out.
-        use std::panic::AssertUnwindSafe;
-        use futures_util::FutureExt;
-
         let mut next_expires_at = initial_expires_at;
         loop {
-            let result = AssertUnwindSafe(refresh_loop_iteration(
+            let result = run_with_panic_guard(refresh_loop_iteration(
                 &pool,
                 token_source.as_ref(),
                 &base_options,
@@ -461,23 +485,29 @@ fn spawn_token_refresh_task(
                 refresh_interval_ceiling,
                 &mut next_expires_at,
             ))
-            .catch_unwind()
             .await;
 
-            if let Err(panic) = result {
-                let msg = if let Some(s) = panic.downcast_ref::<&'static str>() {
-                    (*s).to_string()
-                } else if let Some(s) = panic.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "<non-string panic payload>".to_string()
-                };
-                error!(
-                    target: "duroxide::providers::postgres",
-                    panic = %msg,
-                    "Entra refresh task body panicked; continuing with bounded backoff",
-                );
-                sleep(ENTRA_REFRESH_MIN_INTERVAL).await;
+            match result {
+                Ok(Ok(())) => {
+                    // Iteration succeeded; loop and schedule the next refresh
+                    // off the (now updated) `next_expires_at`.
+                }
+                Ok(Err(())) => {
+                    // Iteration completed but token fetch failed. Sleep
+                    // MIN_INTERVAL before retrying so we don't ride the
+                    // *previous* token's expiry-driven schedule (which would
+                    // delay a real-world IDP-blip recovery for nearly the
+                    // full token lifetime). Bounded backoff per FR-008.
+                    sleep(ENTRA_REFRESH_MIN_INTERVAL).await;
+                }
+                Err(panic_msg) => {
+                    error!(
+                        target: "duroxide::providers::postgres",
+                        panic = %panic_msg,
+                        "Entra refresh task body panicked; continuing with bounded backoff",
+                    );
+                    sleep(ENTRA_REFRESH_MIN_INTERVAL).await;
+                }
             }
         }
     });
@@ -485,9 +515,11 @@ fn spawn_token_refresh_task(
 }
 
 /// One iteration of the refresh loop: sleep for the next computed interval,
-/// then attempt to fetch and apply a new token. On success, updates
-/// `next_expires_at`. On failure, logs at WARN — the next iteration's sleep
-/// computation provides bounded backoff, so we don't double-sleep here.
+/// then attempt to fetch and apply a new token.
+///
+/// Returns `Ok(())` on success (and updates `next_expires_at` to the new
+/// token's expiry), or `Err(())` on a token-fetch failure (the caller is
+/// responsible for the bounded post-failure sleep).
 async fn refresh_loop_iteration(
     pool: &Arc<PgPool>,
     token_source: &dyn TokenSource,
@@ -495,7 +527,7 @@ async fn refresh_loop_iteration(
     audience: &str,
     refresh_interval_ceiling: Duration,
     next_expires_at: &mut SystemTime,
-) {
+) -> Result<(), ()> {
     let sleep_duration = compute_next_refresh_sleep(
         refresh_interval_ceiling,
         *next_expires_at,
@@ -517,16 +549,15 @@ async fn refresh_loop_iteration(
                 target: "duroxide::providers::postgres",
                 "Entra token refreshed and applied to pool",
             );
+            Ok(())
         }
         Err(e) => {
             warn!(
                 target: "duroxide::providers::postgres",
                 error = %e,
-                "Entra token refresh failed; will retry on next scheduled iteration",
+                "Entra token refresh failed; will retry after bounded backoff",
             );
-            // Do NOT sleep here — the next call to compute_next_refresh_sleep
-            // returns at least MIN_REFRESH (30s), giving us a bounded backoff
-            // without double-sleeping or busy-looping.
+            Err(())
         }
     }
 }
@@ -2590,5 +2621,28 @@ mod tests {
         assert_eq!(classify_pg_sqlstate(Some("23505"), false), SqlStateClass::Permanent);
         assert_eq!(classify_pg_sqlstate(Some("0A000"), true), SqlStateClass::Retryable);
         assert_eq!(classify_pg_sqlstate(None, true), SqlStateClass::Permanent);
+    }
+
+    #[tokio::test]
+    async fn run_with_panic_guard_catches_string_panic_and_continues() {
+        let result: Result<(), String> = run_with_panic_guard(async { panic!("boom") }).await;
+        let msg = result.expect_err("must catch the panic");
+        assert!(msg.contains("boom"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn run_with_panic_guard_returns_ok_when_future_completes() {
+        let result: Result<i32, String> = run_with_panic_guard(async { 42 }).await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn run_with_panic_guard_handles_non_string_panic_payload() {
+        // Boxed integer panic payload — exercises the fallback branch.
+        let result: Result<(), String> = run_with_panic_guard(async {
+            std::panic::panic_any(42_i32)
+        }).await;
+        let msg = result.expect_err("must catch");
+        assert!(msg.contains("non-string panic payload"), "got: {msg}");
     }
 }
