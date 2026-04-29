@@ -18,7 +18,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use azure_core::credentials::TokenCredential;
-use azure_identity::{DeveloperToolsCredential, ManagedIdentityCredential};
+use azure_identity::{
+    DeveloperToolsCredential, ManagedIdentityCredential, WorkloadIdentityCredential,
+};
 
 /// The default audience/scope used when requesting Entra ID access tokens for
 /// Azure Database for PostgreSQL Flexible Server in the Azure public cloud.
@@ -153,10 +155,24 @@ impl EntraAuthOptions {
 }
 
 /// An Entra access token plus the wall-clock time at which it expires.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written to redact the token secret. The struct is
+/// `pub(crate)` so it never leaves the crate, but a panic backtrace or
+/// `?token` formatter inside the crate could otherwise leak the bearer
+/// string into logs.
+#[derive(Clone)]
 pub(crate) struct EntraToken {
     pub(crate) secret: String,
     pub(crate) expires_at: SystemTime,
+}
+
+impl std::fmt::Debug for EntraToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EntraToken")
+            .field("secret", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl EntraToken {
@@ -216,16 +232,27 @@ fn offset_datetime_to_system_time(t: azure_core::time::OffsetDateTime) -> System
 /// Build the default chained credential used when the caller does not provide
 /// an explicit token source. The chain mimics the spirit of upstream
 /// `DefaultAzureCredential` (which is not present in `azure_identity = 0.35`):
-/// try Managed Identity first (covers Azure-hosted services, Workload Identity
-/// pods, App Service, VMs), then fall back to developer CLIs (Azure CLI / azd)
-/// for local development.
+///
+/// 1. `WorkloadIdentityCredential` — federated tokens for AKS Workload
+///    Identity, GitHub OIDC, etc. (only succeeds when the corresponding env
+///    vars are set).
+/// 2. `ManagedIdentityCredential` — IMDS for Azure VMs, App Service,
+///    Container Apps, Container Instances, Functions.
+/// 3. `DeveloperToolsCredential` — Azure CLI (`az login`) and Azure Developer
+///    CLI (`azd auth login`) for local development.
 ///
 /// Returns an `azure_core::Error` from any failed inner constructor; the
 /// caller wraps it into an `anyhow::Error`.
 fn build_default_chained_credential() -> azure_core::Result<Arc<dyn TokenCredential>> {
-    let managed = ManagedIdentityCredential::new(None)?;
-    let developer = DeveloperToolsCredential::new(None)?;
-    let sources: Vec<Arc<dyn TokenCredential>> = vec![managed, developer];
+    let mut sources: Vec<Arc<dyn TokenCredential>> = Vec::new();
+    // WorkloadIdentityCredential::new only succeeds when AZURE_FEDERATED_TOKEN_FILE
+    // (and friends) are set. Skip silently otherwise so the chain still works
+    // on a developer laptop.
+    if let Ok(workload) = WorkloadIdentityCredential::new(None) {
+        sources.push(workload);
+    }
+    sources.push(ManagedIdentityCredential::new(None)?);
+    sources.push(DeveloperToolsCredential::new(None)?);
     Ok(Arc::new(ChainedCredential::new(sources)))
 }
 

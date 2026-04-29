@@ -34,11 +34,14 @@ plain `reqwest` (which uses its own `default-tls` → native-tls on
 Windows / Linux), we keep the `ring`-free invariant.
 
 **Why pin to 0.35 specifically?** The Azure SDK for Rust 0.35 is the first
-version that ships `ManagedIdentityCredential::new(None)?` and
+version that ships `ManagedIdentityCredential::new(None)?`,
+`WorkloadIdentityCredential::new(None)?`, and
 `DeveloperToolsCredential::new(None)?` as standalone, individually
 constructible types. `DefaultAzureCredential` does **not** exist in 0.35
 (scheduled for a later release). The crate's small `ChainedCredential` in
-`src/entra.rs` substitutes for it.
+`src/entra.rs` substitutes for it. The default chain order is
+`[WorkloadIdentity (only when AKS federated env vars are present),
+ManagedIdentity, DeveloperTools]`.
 
 **No new Cargo feature gate.** Per the spec decision, Entra support is
 unconditional. A `azure-entra` feature gate is listed as a Phase Candidate in
@@ -87,8 +90,11 @@ next_sleep = min(refresh_interval_ceiling,
 |---|---|---|
 | `ENTRA_REFRESH_MIN_INTERVAL` | 30 s | Floor — prevents busy-loop if a token is already inside the safety margin. Larger than realistic operator misconfiguration. |
 | `ENTRA_REFRESH_SAFETY_MARGIN` | 5 min | Cushion for clock skew + connection-acquisition latency + a grace window for a slow IDP response. Empirically tracks the budget Azure Postgres allows after token expiry. |
-| `ENTRA_REFRESH_MAX_RETRY` | 30 s | After a failed refresh, retry no later than this. |
 | Default `refresh_interval` | 20 min | Conservative ceiling: shorter than Entra's typical 60-minute access-token lifetime so we always rotate well before expiry, even if `expires_at` lookup is for some reason wrong. Override via `EntraAuthOptions::refresh_interval`. |
+
+The final clamp `.max(MIN_INTERVAL)` is applied **after** the ceiling/expiry-driven
+selection, so a misconfigured tiny `refresh_interval` (e.g. 1 s) cannot collapse
+the schedule below the floor and busy-loop the IDP.
 
 The pure scheduling logic is `compute_next_refresh_sleep`, covered by three
 unit tests in `provider::tests`.
@@ -110,19 +116,21 @@ typical request handling.
 ### Failure handling
 
 On a refresh failure we log at WARN with `target = "duroxide::providers::postgres"`
-and back off:
+and rely on the next iteration's `compute_next_refresh_sleep` to schedule a
+bounded retry — the floor `ENTRA_REFRESH_MIN_INTERVAL` (30 s) guarantees we
+never busy-loop against the IDP, and the standard expiry-driven path applies
+once a fresh token is acquired.
 
-```rust
-let retry_in = ENTRA_REFRESH_MAX_RETRY.min(compute_next_refresh_sleep(...));
-sleep(retry_in.max(ENTRA_REFRESH_MIN_INTERVAL)).await;
-```
+Persistent token-fetch failure loops at ≥30 s cadence with WARN logs. If it
+persists, operator intervention is required (revoked principal, expired
+secret, etc.).
 
-With `MIN==MAX==30s` this currently means a flat 30 s retry. The min/max
-expression is intentional belt-and-suspenders so future tuning doesn't
-accidentally violate either bound.
+### Panic isolation
 
-Persistent token-fetch failure loops every 30 s with WARN logs. If it persists,
-operator intervention is required (revoked principal, expired secret, etc.).
+The refresh task body is wrapped in `AssertUnwindSafe(...).catch_unwind()` so a
+panic in token acquisition or the credential SDK cannot tear down the runtime.
+On panic we log at ERROR and sleep `ENTRA_REFRESH_MIN_INTERVAL` before the next
+iteration; the outer `loop` keeps the task alive for the full provider lifetime.
 
 ### Lifecycle
 

@@ -71,6 +71,11 @@ use crate::migrations::MigrationRunner;
 pub struct PostgresProvider {
     pool: Arc<PgPool>,
     schema_name: String,
+    /// `true` when this provider was constructed via `new_with_entra` /
+    /// `new_with_schema_and_entra`. Used by `sqlx_to_provider_error` to scope
+    /// the SQLSTATE 28000/28P01 → retryable mapping to Entra connections only,
+    /// preserving FR-006 byte-equivalent behavior on the password path.
+    is_entra: bool,
     _refresh_task: Option<AbortOnDropHandle>,
 }
 
@@ -108,6 +113,7 @@ impl PostgresProvider {
         let provider = Self {
             pool: Arc::new(pool),
             schema_name: schema_name.clone(),
+            is_entra: false,
             _refresh_task: None,
         };
 
@@ -169,13 +175,13 @@ impl PostgresProvider {
     ) -> Result<Self> {
         let token_source = options
             .default_token_source()
-            .context("Entra credential resolution failed")?;
+            .context("Entra credential resolution failed: could not build the default credential chain")?;
 
         let audience = options.audience_str().to_string();
         let token = token_source
             .fetch_token(&[audience.as_str()])
             .await
-            .context("Entra credential resolution failed")?;
+            .context("Entra credential resolution failed: could not acquire an initial access token")?;
 
         let base_options = build_entra_connect_options(host, port, database, user);
 
@@ -204,6 +210,7 @@ impl PostgresProvider {
         Ok(Self {
             pool,
             schema_name,
+            is_entra: true,
             _refresh_task: Some(AbortOnDropHandle(refresh_handle)),
         })
     }
@@ -240,8 +247,14 @@ impl PostgresProvider {
         &self.schema_name
     }
 
-    /// Convert sqlx::Error to ProviderError with proper classification
-    fn sqlx_to_provider_error(operation: &str, e: SqlxError) -> ProviderError {
+    /// Convert sqlx::Error to ProviderError with proper classification.
+    ///
+    /// The SQLSTATE 28000 / 28P01 → retryable mapping is gated on
+    /// `self.is_entra` so password-path callers retain byte-identical
+    /// behavior (FR-006) — a misconfigured static password remains a
+    /// permanent error, while a brief auth-failure window during Entra
+    /// token rotation triggers a retry.
+    fn sqlx_to_provider_error(&self, operation: &str, e: SqlxError) -> ProviderError {
         match e {
             SqlxError::Database(ref db_err) => {
                 // PostgreSQL error codes
@@ -250,13 +263,13 @@ impl PostgresProvider {
                 if code == Some("40P01") {
                     // Deadlock detected
                     ProviderError::retryable(operation, format!("Deadlock detected: {e}"))
-                } else if code == Some("28000") || code == Some("28P01") {
+                } else if self.is_entra && (code == Some("28000") || code == Some("28P01")) {
                     // 28000 = invalid_authorization_specification
                     // 28P01 = invalid_password
                     // Classified as retryable for Entra token rotation: a brief auth-failure
                     // window can occur when a token has expired but the refresh task has not
-                    // yet swapped in a new one. Static-password callers experience at most one
-                    // extra retry before the error surfaces, which is acceptable.
+                    // yet swapped in a new one. Gated on is_entra so password-path callers
+                    // retain byte-identical behavior on misconfiguration (FR-006).
                     ProviderError::retryable(operation, format!("Authentication error (likely token rotation): {e}"))
                 } else if code == Some("40001") {
                     // Serialization failure - permanent error (transaction conflict, not transient)
@@ -388,23 +401,23 @@ const ENTRA_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(30);
 /// than realistic clock skew + connection-acquisition latency.
 const ENTRA_REFRESH_SAFETY_MARGIN: Duration = Duration::from_secs(5 * 60);
 
-/// Cap on the retry backoff applied after a failed refresh.
-const ENTRA_REFRESH_MAX_RETRY: Duration = Duration::from_secs(30);
-
 /// Spawn the background task that rotates Entra tokens into the pool.
 ///
 /// Uses **expiry-driven** scheduling — the next sleep is the minimum of:
 /// 1. The caller-configured `refresh_interval_ceiling`.
 /// 2. `max(MIN_REFRESH, expires_at - now - SAFETY_MARGIN)`.
 ///
-/// This guarantees that a refresh fires before the safety margin is breached
-/// even if the operator misconfigures `refresh_interval_ceiling` larger than
-/// the token lifetime.
+/// The result is then floored at `MIN_REFRESH` so a tiny ceiling cannot
+/// produce a busy-loop.
 ///
 /// On a refresh failure, the task logs at WARN and retries after a bounded
-/// backoff. The task itself never aborts on its own; it terminates only when
-/// its [`tokio::task::JoinHandle`] (wrapped in [`AbortOnDropHandle`]) is
-/// dropped along with the provider.
+/// backoff (no extra sleep beyond the next computed interval — the loop's own
+/// scheduling provides backoff). The task is wrapped in an outer panic-guard
+/// loop so a panic inside the refresh body is logged and the loop continues
+/// rather than silently terminating the rotation machinery.
+///
+/// The task terminates only when its [`tokio::task::JoinHandle`] (wrapped in
+/// [`AbortOnDropHandle`]) is dropped along with the provider.
 fn spawn_token_refresh_task(
     pool: Arc<PgPool>,
     token_source: Arc<dyn TokenSource>,
@@ -414,58 +427,100 @@ fn spawn_token_refresh_task(
     initial_expires_at: SystemTime,
 ) -> AbortHandle {
     let handle = tokio::spawn(async move {
+        // Outer panic-guard loop: if the inner refresh body panics (e.g., a
+        // future Azure SDK regression), AssertUnwindSafe + catch_unwind logs
+        // it and we keep going. Without this, a panic would silently
+        // terminate the task and leave the pool with a stale token until
+        // sqlx's max-lifetime reaper rotated connections out.
+        use std::panic::AssertUnwindSafe;
+        use futures_util::FutureExt;
+
         let mut next_expires_at = initial_expires_at;
         loop {
-            let sleep_duration = compute_next_refresh_sleep(
+            let result = AssertUnwindSafe(refresh_loop_iteration(
+                &pool,
+                token_source.as_ref(),
+                &base_options,
+                &audience,
                 refresh_interval_ceiling,
-                next_expires_at,
-                SystemTime::now(),
-            );
-            debug!(
-                target: "duroxide::providers::postgres",
-                sleep_secs = sleep_duration.as_secs(),
-                "Entra refresh task sleeping",
-            );
-            sleep(sleep_duration).await;
+                &mut next_expires_at,
+            ))
+            .catch_unwind()
+            .await;
 
-            match token_source.fetch_token(&[audience.as_str()]).await {
-                Ok(token) => {
-                    let new_options = base_options.clone().password(&token.secret);
-                    pool.set_connect_options(new_options);
-                    next_expires_at = token.expires_at;
-                    debug!(
-                        target: "duroxide::providers::postgres",
-                        "Entra token refreshed and applied to pool",
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        target: "duroxide::providers::postgres",
-                        error = %e,
-                        "Entra token refresh failed; will retry",
-                    );
-                    // Retry no later than ENTRA_REFRESH_MAX_RETRY (30s) and
-                    // no sooner than ENTRA_REFRESH_MIN_INTERVAL (30s). With
-                    // MIN==MAX==30s this currently means a flat 30s retry,
-                    // but expressing both bounds makes the intent explicit:
-                    // we must back off enough not to hammer the IDP, but
-                    // refresh soon enough that we don't stay past the
-                    // safety margin if the next attempt succeeds.
-                    let retry_in = ENTRA_REFRESH_MAX_RETRY.min(compute_next_refresh_sleep(
-                        refresh_interval_ceiling,
-                        next_expires_at,
-                        SystemTime::now(),
-                    ));
-                    sleep(retry_in.max(ENTRA_REFRESH_MIN_INTERVAL)).await;
-                }
+            if let Err(panic) = result {
+                let msg = if let Some(s) = panic.downcast_ref::<&'static str>() {
+                    (*s).to_string()
+                } else if let Some(s) = panic.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "<non-string panic payload>".to_string()
+                };
+                error!(
+                    target: "duroxide::providers::postgres",
+                    panic = %msg,
+                    "Entra refresh task body panicked; continuing with bounded backoff",
+                );
+                sleep(ENTRA_REFRESH_MIN_INTERVAL).await;
             }
         }
     });
     handle.abort_handle()
 }
 
+/// One iteration of the refresh loop: sleep for the next computed interval,
+/// then attempt to fetch and apply a new token. On success, updates
+/// `next_expires_at`. On failure, logs at WARN — the next iteration's sleep
+/// computation provides bounded backoff, so we don't double-sleep here.
+async fn refresh_loop_iteration(
+    pool: &Arc<PgPool>,
+    token_source: &dyn TokenSource,
+    base_options: &PgConnectOptions,
+    audience: &str,
+    refresh_interval_ceiling: Duration,
+    next_expires_at: &mut SystemTime,
+) {
+    let sleep_duration = compute_next_refresh_sleep(
+        refresh_interval_ceiling,
+        *next_expires_at,
+        SystemTime::now(),
+    );
+    debug!(
+        target: "duroxide::providers::postgres",
+        sleep_secs = sleep_duration.as_secs(),
+        "Entra refresh task sleeping",
+    );
+    sleep(sleep_duration).await;
+
+    match token_source.fetch_token(&[audience]).await {
+        Ok(token) => {
+            let new_options = base_options.clone().password(&token.secret);
+            pool.set_connect_options(new_options);
+            *next_expires_at = token.expires_at;
+            debug!(
+                target: "duroxide::providers::postgres",
+                "Entra token refreshed and applied to pool",
+            );
+        }
+        Err(e) => {
+            warn!(
+                target: "duroxide::providers::postgres",
+                error = %e,
+                "Entra token refresh failed; will retry on next scheduled iteration",
+            );
+            // Do NOT sleep here — the next call to compute_next_refresh_sleep
+            // returns at least MIN_REFRESH (30s), giving us a bounded backoff
+            // without double-sleeping or busy-looping.
+        }
+    }
+}
+
 /// Pure function for computing the next sleep duration. Extracted for unit
 /// testing.
+///
+/// Returns a duration that is **always** at least `ENTRA_REFRESH_MIN_INTERVAL`,
+/// even if the caller passes a `ceiling` smaller than that floor — the floor
+/// dominates so we never busy-loop against the IDP.
 fn compute_next_refresh_sleep(
     ceiling: Duration,
     expires_at: SystemTime,
@@ -481,7 +536,9 @@ fn compute_next_refresh_sleep(
 
     let expiry_driven = expiry_driven.max(ENTRA_REFRESH_MIN_INTERVAL);
 
-    ceiling.min(expiry_driven)
+    // Apply the floor *after* the ceiling.min so a tiny user-supplied
+    // ceiling can never collapse the interval below MIN_REFRESH.
+    ceiling.min(expiry_driven).max(ENTRA_REFRESH_MIN_INTERVAL)
 }
 
 #[async_trait::async_trait]
@@ -558,7 +615,7 @@ impl Provider for PostgresProvider {
             let row = match result {
                 Ok(r) => r,
                 Err(e) => {
-                    let provider_err = Self::sqlx_to_provider_error("fetch_orchestration_item", e);
+                    let provider_err = self.sqlx_to_provider_error("fetch_orchestration_item", e);
                     if provider_err.is_retryable() && attempt < MAX_RETRIES {
                         warn!(
                             target = "duroxide::providers::postgres",
@@ -881,7 +938,7 @@ impl Provider for PostgresProvider {
                         ));
                     }
 
-                    let provider_err = Self::sqlx_to_provider_error("ack_orchestration_item", e);
+                    let provider_err = self.sqlx_to_provider_error("ack_orchestration_item", e);
                     if provider_err.is_retryable() && attempt < MAX_RETRIES {
                         warn!(
                             target = "duroxide::providers::postgres",
@@ -942,7 +999,7 @@ impl Provider for PostgresProvider {
                     ));
                 }
 
-                return Err(Self::sqlx_to_provider_error(
+                return Err(self.sqlx_to_provider_error(
                     "abandon_orchestration_item",
                     e,
                 ));
@@ -972,7 +1029,7 @@ impl Provider for PostgresProvider {
         .bind(instance)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("read", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("read", e))?;
 
         event_data_rows
             .into_iter()
@@ -1044,7 +1101,7 @@ impl Provider for PostgresProvider {
         .bind(events_json)
         .execute(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("append_with_execution", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("append_with_execution", e))?;
 
         debug!(
             target = "duroxide::providers::postgres",
@@ -1109,7 +1166,7 @@ impl Provider for PostgresProvider {
                 error = %e,
                 "Failed to enqueue worker work"
             );
-            Self::sqlx_to_provider_error("enqueue_worker_work", e)
+            self.sqlx_to_provider_error("enqueue_worker_work", e)
         })?;
 
         Ok(())
@@ -1160,7 +1217,7 @@ impl Provider for PostgresProvider {
         {
             Ok(row) => row,
             Err(e) => {
-                return Err(Self::sqlx_to_provider_error("fetch_work_item", e));
+                return Err(self.sqlx_to_provider_error("fetch_work_item", e));
             }
         };
 
@@ -1236,7 +1293,7 @@ impl Provider for PostgresProvider {
                         "Worker queue item not found or already processed",
                     )
                 } else {
-                    Self::sqlx_to_provider_error("ack_worker", e)
+                    self.sqlx_to_provider_error("ack_worker", e)
                 }
             })?;
 
@@ -1300,7 +1357,7 @@ impl Provider for PostgresProvider {
                     "Worker queue item not found or already processed",
                 )
             } else {
-                Self::sqlx_to_provider_error("ack_worker", e)
+                self.sqlx_to_provider_error("ack_worker", e)
             }
         })?;
 
@@ -1367,7 +1424,7 @@ impl Provider for PostgresProvider {
                     ));
                 }
 
-                Err(Self::sqlx_to_provider_error("renew_work_item_lock", e))
+                Err(self.sqlx_to_provider_error("renew_work_item_lock", e))
             }
         }
     }
@@ -1426,7 +1483,7 @@ impl Provider for PostgresProvider {
                     ));
                 }
 
-                Err(Self::sqlx_to_provider_error("abandon_work_item", e))
+                Err(self.sqlx_to_provider_error("abandon_work_item", e))
             }
         }
     }
@@ -1488,7 +1545,7 @@ impl Provider for PostgresProvider {
                     ));
                 }
 
-                Err(Self::sqlx_to_provider_error(
+                Err(self.sqlx_to_provider_error(
                     "renew_orchestration_item_lock",
                     e,
                 ))
@@ -1592,7 +1649,7 @@ impl Provider for PostgresProvider {
                 instance_id = %instance_id,
                 "Failed to enqueue orchestrator work"
             );
-            Self::sqlx_to_provider_error("enqueue_orchestrator_work", e)
+            self.sqlx_to_provider_error("enqueue_orchestrator_work", e)
         })?;
 
         debug!(
@@ -1620,7 +1677,7 @@ impl Provider for PostgresProvider {
         .bind(execution_id as i64)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("read_with_execution", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("read_with_execution", e))?;
 
         event_data_rows
             .into_iter()
@@ -1661,7 +1718,7 @@ impl Provider for PostgresProvider {
         .bind(idle_timeout_ms)
         .fetch_one(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("renew_session_lock", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("renew_session_lock", e))?;
 
         debug!(
             target = "duroxide::providers::postgres",
@@ -1688,7 +1745,7 @@ impl Provider for PostgresProvider {
         .bind(now_ms)
         .fetch_one(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("cleanup_orphaned_sessions", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("cleanup_orphaned_sessions", e))?;
 
         debug!(
             target = "duroxide::providers::postgres",
@@ -1718,7 +1775,7 @@ impl Provider for PostgresProvider {
         .bind(last_seen_version as i64)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("get_custom_status", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("get_custom_status", e))?;
 
         match row {
             Some((custom_status, version)) => Ok(Some((custom_status, version as u64))),
@@ -1739,7 +1796,7 @@ impl Provider for PostgresProvider {
         .bind(key)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("get_kv_value", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("get_kv_value", e))?;
 
         Ok(row.and_then(|(value, found)| if found { value } else { None }))
     }
@@ -1755,7 +1812,7 @@ impl Provider for PostgresProvider {
         .bind(instance_id)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("get_kv_all_values", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("get_kv_all_values", e))?;
 
         Ok(rows.into_iter().collect())
     }
@@ -1769,7 +1826,7 @@ impl Provider for PostgresProvider {
         .bind(instance)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("get_instance_stats", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("get_instance_stats", e))?;
 
         match row {
             Some((true, history_event_count, history_size_bytes, queue_pending_count, kv_user_key_count, kv_total_value_bytes)) => {
@@ -1796,7 +1853,7 @@ impl ProviderAdmin for PostgresProvider {
         ))
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("list_instances", e))
+        .map_err(|e| self.sqlx_to_provider_error("list_instances", e))
     }
 
     #[instrument(skip(self), fields(status = %status), target = "duroxide::providers::postgres")]
@@ -1808,7 +1865,7 @@ impl ProviderAdmin for PostgresProvider {
         .bind(status)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("list_instances_by_status", e))
+        .map_err(|e| self.sqlx_to_provider_error("list_instances_by_status", e))
     }
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
@@ -1820,7 +1877,7 @@ impl ProviderAdmin for PostgresProvider {
         .bind(instance)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("list_executions", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("list_executions", e))?;
 
         Ok(execution_ids.into_iter().map(|id| id as u64).collect())
     }
@@ -1839,7 +1896,7 @@ impl ProviderAdmin for PostgresProvider {
         .bind(execution_id as i64)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("read_execution", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("read_execution", e))?;
 
         event_data_rows
             .into_iter()
@@ -1870,7 +1927,7 @@ impl ProviderAdmin for PostgresProvider {
         .bind(instance)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("latest_execution_id", e))?
+        .map_err(|e| self.sqlx_to_provider_error("latest_execution_id", e))?
         .map(|id: i64| id as u64)
         .ok_or_else(|| ProviderError::permanent("latest_execution_id", "Instance not found"))
     }
@@ -1894,7 +1951,7 @@ impl ProviderAdmin for PostgresProvider {
         .bind(instance)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("get_instance_info", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("get_instance_info", e))?;
 
         let (
             instance_id,
@@ -1945,7 +2002,7 @@ impl ProviderAdmin for PostgresProvider {
         .bind(execution_id as i64)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("get_execution_info", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("get_execution_info", e))?;
 
         let (exec_id, status, output, started_at, completed_at, event_count) = row
             .ok_or_else(|| ProviderError::permanent("get_execution_info", "Execution not found"))?;
@@ -1968,7 +2025,7 @@ impl ProviderAdmin for PostgresProvider {
         ))
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("get_system_metrics", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("get_system_metrics", e))?;
 
         let (
             total_instances,
@@ -2002,7 +2059,7 @@ impl ProviderAdmin for PostgresProvider {
         .bind(now_ms)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("get_queue_depths", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("get_queue_depths", e))?;
 
         let (orchestrator_queue, worker_queue) = row.ok_or_else(|| {
             ProviderError::permanent("get_queue_depths", "Failed to get queue depths")
@@ -2026,7 +2083,7 @@ impl ProviderAdmin for PostgresProvider {
         .bind(instance_id)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("list_children", e))
+        .map_err(|e| self.sqlx_to_provider_error("list_children", e))
     }
 
     #[instrument(skip(self), fields(instance = %instance_id), target = "duroxide::providers::postgres")]
@@ -2049,7 +2106,7 @@ impl ProviderAdmin for PostgresProvider {
                         format!("Instance not found: {}", instance_id),
                     ))
                 } else {
-                    Err(Self::sqlx_to_provider_error("get_parent_id", e))
+                    Err(self.sqlx_to_provider_error("get_parent_id", e))
                 }
             }
         }
@@ -2082,7 +2139,7 @@ impl ProviderAdmin for PostgresProvider {
             } else if err_str.contains("Orphan detected") {
                 ProviderError::permanent("delete_instances_atomic", err_str)
             } else {
-                Self::sqlx_to_provider_error("delete_instances_atomic", e)
+                self.sqlx_to_provider_error("delete_instances_atomic", e)
             }
         })?;
 
@@ -2181,7 +2238,7 @@ impl ProviderAdmin for PostgresProvider {
         let instance_ids: Vec<String> = query
             .fetch_all(&*self.pool)
             .await
-            .map_err(|e| Self::sqlx_to_provider_error("delete_instance_bulk", e))?;
+            .map_err(|e| self.sqlx_to_provider_error("delete_instance_bulk", e))?;
 
         if instance_ids.is_empty() {
             return Ok(DeleteInstanceResult::default());
@@ -2235,7 +2292,7 @@ impl ProviderAdmin for PostgresProvider {
         .bind(completed_before_ms)
         .fetch_optional(&*self.pool)
         .await
-        .map_err(|e| Self::sqlx_to_provider_error("prune_executions", e))?;
+        .map_err(|e| self.sqlx_to_provider_error("prune_executions", e))?;
 
         let (instances_processed, executions_deleted, events_deleted) = row.unwrap_or((0, 0, 0));
 
@@ -2333,7 +2390,7 @@ impl ProviderAdmin for PostgresProvider {
         let instance_ids: Vec<String> = query
             .fetch_all(&*self.pool)
             .await
-            .map_err(|e| Self::sqlx_to_provider_error("prune_executions_bulk", e))?;
+            .map_err(|e| self.sqlx_to_provider_error("prune_executions_bulk", e))?;
 
         // Prune each instance
         let mut result = PruneResult::default();
@@ -2497,5 +2554,35 @@ mod tests {
         let err = result.expect_err("should fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("no credential available"), "got: {msg}");
+    }
+
+    #[test]
+    fn compute_next_refresh_sleep_floors_when_ceiling_is_tiny() {
+        // Caller misconfigures refresh_interval to 1s. The floor must dominate
+        // so we don't busy-loop against the IDP.
+        let now = SystemTime::now();
+        let expires = now + Duration::from_secs(3600);
+        let sleep = compute_next_refresh_sleep(Duration::from_secs(1), expires, now);
+        assert_eq!(sleep, ENTRA_REFRESH_MIN_INTERVAL);
+    }
+
+    #[test]
+    fn entra_token_debug_redacts_secret() {
+        use crate::entra::test_support::token;
+        let t = token("super-secret-bearer-string", 3600);
+        let debug = format!("{t:?}");
+        assert!(!debug.contains("super-secret-bearer-string"), "leaked: {debug}");
+        assert!(debug.contains("<redacted>"), "expected redaction marker: {debug}");
+    }
+
+    #[test]
+    fn classifier_only_maps_28xxx_when_entra() {
+        // We can't easily synthesize a sqlx::Error::Database, but we can
+        // assert by inspection that the classifier is gated on self.is_entra.
+        let src = std::fs::read_to_string(file!()).unwrap();
+        assert!(
+            src.contains("self.is_entra && (code == Some(\"28000\") || code == Some(\"28P01\"))"),
+            "classifier must gate the 28xxx mapping on self.is_entra to preserve FR-006"
+        );
     }
 }

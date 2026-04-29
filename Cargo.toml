@@ -48,6 +48,8 @@ include_dir = "0.7"
 # crate's native-tls posture (see `runtime-tokio-native-tls` on sqlx above).
 azure_core = { version = "0.35", default-features = false, features = ["reqwest", "reqwest_deflate", "reqwest_gzip", "tokio"] }
 azure_identity = { version = "0.35", default-features = false, features = ["tokio"] }
+# Used for FutureExt::catch_unwind in the Entra refresh task panic guard.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 duroxide-pg-stress = { path = "pg-stress" }

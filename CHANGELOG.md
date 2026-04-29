@@ -17,13 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a static password. A background task refreshes the token before
   expiry and swaps it into the connection pool via
   `sqlx::Pool::set_connect_options`. The default credential chain is
-  `[ManagedIdentityCredential, DeveloperToolsCredential]`, covering managed
-  identities, Workload Identity, and `az login` developer flows. All Entra
+  `[WorkloadIdentityCredential (when AKS federated env vars are present),
+  ManagedIdentityCredential, DeveloperToolsCredential]`, covering managed
+  identities, AKS Workload Identity, and `az login` developer flows. All Entra
   connections are pinned to `PgSslMode::VerifyFull`. Brief auth-failure
-  windows during token rotation (SQLSTATE `28000` / `28P01`) are now
-  classified as retryable so the runtime retries transparently.
-- New dependencies: `azure_core` 0.35 and `azure_identity` 0.35, both
-  configured with `default-features = false` and the `reqwest` (native-tls)
+  windows during token rotation (SQLSTATE `28000` / `28P01`) are classified as
+  retryable on Entra-configured providers only — password-based providers keep
+  byte-identical classification. The refresh task is wrapped in a panic guard
+  so a credential SDK panic cannot tear down the runtime, and the cached
+  `EntraToken`'s `Debug` impl redacts the bearer secret.
+- New dependencies: `azure_core` 0.35, `azure_identity` 0.35, and a thin
+  `futures-util` (std-only) for `catch_unwind`. `azure_core`/`azure_identity`
+  are configured with `default-features = false` and the `reqwest` (native-tls)
   feature stack to preserve the crate's ring-free posture.
 
 ## [0.1.30] - 2026-04-23
