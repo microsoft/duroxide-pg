@@ -115,18 +115,28 @@ typical request handling.
 
 ### Failure handling
 
-`refresh_loop_iteration` returns `Result<(), ()>`. On `Ok(())` the outer loop
-schedules the next iteration off the freshly-updated `next_expires_at`. On
-`Err(())` (token-fetch failure) the outer loop sleeps
-`ENTRA_REFRESH_MIN_INTERVAL` (30 s) before retrying, **independently** of the
-expiry-driven schedule. This is critical: without the explicit failure-path
-sleep, a transient IDP blip immediately after a fresh token acquisition would
-not be retried for ~`token_lifetime − SAFETY_MARGIN` (delaying recovery and
-masking telemetry signal).
+The outer loop owns *all* sleeping. `refresh_loop_iteration` performs only
+the fetch + apply and returns `Result<(), ()>`; the outer loop consults
+`next_sleep_after_iteration` (a pure function) to decide how long to wait
+before the next attempt:
 
-Persistent token-fetch failure therefore loops at exactly 30 s cadence with
-WARN logs. If it persists, operator intervention is required (revoked
-principal, expired secret, etc.).
+- On `Ok(Ok(()))` — token applied, `next_expires_at` updated — the next
+  sleep is computed by `compute_next_refresh_sleep` from the *fresh*
+  `next_expires_at`.
+- On `Ok(Err(()))` (token-fetch failure) **or** `Err(panic)` — the next
+  sleep is exactly `ENTRA_REFRESH_MIN_INTERVAL` (30 s).
+
+This split is critical. If the iteration's pre-fetch sleep were derived
+from `next_expires_at`, persistent failures would leave that field
+pointing at the previous (still-future) token's expiry, so the next
+sleep would clamp to ~`refresh_interval_ceiling` (typically 20 minutes)
+instead of the intended 30 s — multiplying recovery latency by ~40× and
+silently masking IDP outages. `next_sleep_after_iteration` deliberately
+*does not* call `compute_next_refresh_sleep` on the failure arm.
+
+Persistent token-fetch failure therefore loops at exactly 30 s cadence
+with WARN logs. If it persists, operator intervention is required
+(revoked principal, expired secret, etc.).
 
 ### Panic isolation
 

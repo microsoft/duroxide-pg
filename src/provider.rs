@@ -475,71 +475,94 @@ fn spawn_token_refresh_task(
         // and we keep going. Without this, a panic would silently
         // terminate the task and leave the pool with a stale token until
         // sqlx's max-lifetime reaper rotated connections out.
+        //
+        // The outer loop owns *all* sleeping. `refresh_loop_iteration` only
+        // performs the fetch+apply. This is essential for FR-008 bounded
+        // failure-path retry: if the iteration sleep were inside the
+        // iteration, a failure result would still leave a stale
+        // `next_expires_at` driving the next iteration's pre-fetch sleep
+        // (computing ~ceiling on a long-lifetime token), so persistent
+        // failures would retry every ~ceiling instead of every MIN_INTERVAL.
         let mut next_expires_at = initial_expires_at;
+        let mut sleep_duration = compute_next_refresh_sleep(
+            refresh_interval_ceiling,
+            next_expires_at,
+            SystemTime::now(),
+        );
         loop {
+            debug!(
+                target: "duroxide::providers::postgres",
+                sleep_secs = sleep_duration.as_secs(),
+                "Entra refresh task sleeping",
+            );
+            sleep(sleep_duration).await;
+
             let result = run_with_panic_guard(refresh_loop_iteration(
                 &pool,
                 token_source.as_ref(),
                 &base_options,
                 &audience,
-                refresh_interval_ceiling,
                 &mut next_expires_at,
             ))
             .await;
 
-            match result {
-                Ok(Ok(())) => {
-                    // Iteration succeeded; loop and schedule the next refresh
-                    // off the (now updated) `next_expires_at`.
-                }
-                Ok(Err(())) => {
-                    // Iteration completed but token fetch failed. Sleep
-                    // MIN_INTERVAL before retrying so we don't ride the
-                    // *previous* token's expiry-driven schedule (which would
-                    // delay a real-world IDP-blip recovery for nearly the
-                    // full token lifetime). Bounded backoff per FR-008.
-                    sleep(ENTRA_REFRESH_MIN_INTERVAL).await;
-                }
-                Err(panic_msg) => {
-                    error!(
-                        target: "duroxide::providers::postgres",
-                        panic = %panic_msg,
-                        "Entra refresh task body panicked; continuing with bounded backoff",
-                    );
-                    sleep(ENTRA_REFRESH_MIN_INTERVAL).await;
-                }
+            if let Err(panic_msg) = &result {
+                error!(
+                    target: "duroxide::providers::postgres",
+                    panic = %panic_msg,
+                    "Entra refresh task body panicked; continuing with bounded backoff",
+                );
             }
+
+            sleep_duration = next_sleep_after_iteration(
+                &result,
+                refresh_interval_ceiling,
+                next_expires_at,
+                SystemTime::now(),
+            );
         }
     });
     handle.abort_handle()
 }
 
-/// One iteration of the refresh loop: sleep for the next computed interval,
-/// then attempt to fetch and apply a new token.
+/// Pure function: given the outcome of a refresh iteration, returns the
+/// sleep duration before the next iteration. Extracted for unit testing.
+///
+/// On `Ok(Ok(()))` we use the standard expiry-driven schedule (with
+/// `next_expires_at` reflecting the freshly-issued token).
+///
+/// On `Ok(Err(()))` (token fetch failed) or `Err(panic)` (iteration
+/// panicked), we return exactly `ENTRA_REFRESH_MIN_INTERVAL` — we
+/// deliberately *do not* call `compute_next_refresh_sleep` here because
+/// `next_expires_at` still reflects the *previous* token's expiry, which
+/// is typically still far in the future, and would yield a stale
+/// ceiling-bound sleep instead of the intended bounded backoff (FR-008).
+fn next_sleep_after_iteration(
+    result: &Result<Result<(), ()>, String>,
+    refresh_interval_ceiling: Duration,
+    next_expires_at: SystemTime,
+    now: SystemTime,
+) -> Duration {
+    match result {
+        Ok(Ok(())) => compute_next_refresh_sleep(refresh_interval_ceiling, next_expires_at, now),
+        Ok(Err(())) | Err(_) => ENTRA_REFRESH_MIN_INTERVAL,
+    }
+}
+
+/// One iteration of the refresh loop: attempt to fetch a new token and
+/// apply it to the pool. Sleeping is owned by the caller (see
+/// `spawn_token_refresh_task`).
 ///
 /// Returns `Ok(())` on success (and updates `next_expires_at` to the new
-/// token's expiry), or `Err(())` on a token-fetch failure (the caller is
-/// responsible for the bounded post-failure sleep).
+/// token's expiry). Returns `Err(())` on a token-fetch failure;
+/// `next_expires_at` is left unchanged.
 async fn refresh_loop_iteration(
     pool: &Arc<PgPool>,
     token_source: &dyn TokenSource,
     base_options: &PgConnectOptions,
     audience: &str,
-    refresh_interval_ceiling: Duration,
     next_expires_at: &mut SystemTime,
 ) -> Result<(), ()> {
-    let sleep_duration = compute_next_refresh_sleep(
-        refresh_interval_ceiling,
-        *next_expires_at,
-        SystemTime::now(),
-    );
-    debug!(
-        target: "duroxide::providers::postgres",
-        sleep_secs = sleep_duration.as_secs(),
-        "Entra refresh task sleeping",
-    );
-    sleep(sleep_duration).await;
-
     match token_source.fetch_token(&[audience]).await {
         Ok(token) => {
             let new_options = base_options.clone().password(&token.secret);
@@ -2581,6 +2604,41 @@ mod tests {
         let err = result.expect_err("should fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("no credential available"), "got: {msg}");
+    }
+
+    #[test]
+    fn next_sleep_after_iteration_uses_expiry_schedule_on_success() {
+        let now = SystemTime::now();
+        let expires = now + Duration::from_secs(3600);
+        let result: Result<Result<(), ()>, String> = Ok(Ok(()));
+        let sleep = next_sleep_after_iteration(&result, Duration::from_secs(20 * 60), expires, now);
+        // Success: should equal compute_next_refresh_sleep with the same args.
+        let expected = compute_next_refresh_sleep(Duration::from_secs(20 * 60), expires, now);
+        assert_eq!(sleep, expected);
+        assert_eq!(sleep, Duration::from_secs(20 * 60));
+    }
+
+    #[test]
+    fn next_sleep_after_iteration_returns_min_interval_on_fetch_failure() {
+        // Critical FR-008 invariant: persistent token-fetch failures must
+        // retry every MIN_INTERVAL, NOT ride the previous token's
+        // expiry-driven schedule (which would delay recovery by ~ceiling).
+        let now = SystemTime::now();
+        // `next_expires_at` deliberately far in the future to prove the
+        // failure arm does not consult it.
+        let expires = now + Duration::from_secs(3600);
+        let result: Result<Result<(), ()>, String> = Ok(Err(()));
+        let sleep = next_sleep_after_iteration(&result, Duration::from_secs(20 * 60), expires, now);
+        assert_eq!(sleep, ENTRA_REFRESH_MIN_INTERVAL);
+    }
+
+    #[test]
+    fn next_sleep_after_iteration_returns_min_interval_on_panic() {
+        let now = SystemTime::now();
+        let expires = now + Duration::from_secs(3600);
+        let result: Result<Result<(), ()>, String> = Err("simulated panic".to_string());
+        let sleep = next_sleep_after_iteration(&result, Duration::from_secs(20 * 60), expires, now);
+        assert_eq!(sleep, ENTRA_REFRESH_MIN_INTERVAL);
     }
 
     #[test]
