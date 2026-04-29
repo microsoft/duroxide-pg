@@ -42,6 +42,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 semver = "1.0"
 include_dir = "0.7"
+# Azure SDK for Microsoft Entra ID authentication. default-features=false avoids
+# `reqwest_rustls` (which pulls `ring`); we enable `reqwest`/`reqwest_deflate`/`reqwest_gzip`
+# so reqwest uses its own `default-tls` feature (native-tls on this platform), keeping the
+# crate's native-tls posture (see `runtime-tokio-native-tls` on sqlx above).
+azure_core = { version = "0.35", default-features = false, features = ["reqwest", "reqwest_deflate", "reqwest_gzip", "tokio"] }
+azure_identity = { version = "0.35", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 duroxide-pg-stress = { path = "pg-stress" }

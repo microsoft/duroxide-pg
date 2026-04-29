@@ -49,7 +49,9 @@
 //! - Custom schema support for multi-tenant isolation
 //! - Full implementation of the Duroxide `Provider` and `ProviderAdmin` traits
 
+pub mod entra;
 pub mod migrations;
 pub mod provider;
 
+pub use entra::EntraAuthOptions;
 pub use provider::PostgresProvider;
