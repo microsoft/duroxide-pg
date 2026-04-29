@@ -43,6 +43,91 @@ let provider = PostgresProvider::new_with_schema(
 ).await?;
 ```
 
+### Microsoft Entra ID Authentication (Azure Database for PostgreSQL)
+
+Connect to **Azure Database for PostgreSQL Flexible Server** using a Microsoft
+Entra ID (Azure AD) access token instead of a static password. The provider
+acquires the initial token at construction time and a background task
+refreshes it before expiry, swapping the new token into the pool via
+`sqlx::Pool::set_connect_options`.
+
+```rust,no_run
+use duroxide_pg::{EntraAuthOptions, PostgresProvider};
+
+# async fn example() -> anyhow::Result<()> {
+let provider = PostgresProvider::new_with_entra(
+    "myserver.postgres.database.azure.com",
+    5432,
+    "mydb",
+    "my-entra-principal@contoso.onmicrosoft.com",
+    EntraAuthOptions::new(),
+)
+.await?;
+# Ok(()) }
+```
+
+For multi-tenant deployments use the schema variant:
+
+```rust,no_run
+use duroxide_pg::{EntraAuthOptions, PostgresProvider};
+
+# async fn example() -> anyhow::Result<()> {
+let provider = PostgresProvider::new_with_schema_and_entra(
+    "myserver.postgres.database.azure.com",
+    5432,
+    "mydb",
+    "my-entra-principal@contoso.onmicrosoft.com",
+    Some("tenant_a"),
+    EntraAuthOptions::new(),
+)
+.await?;
+# Ok(()) }
+```
+
+#### Identity sources
+
+By default the provider chains `[ManagedIdentityCredential,
+DeveloperToolsCredential]` — so the same code works for:
+
+- **Production**: User-assigned or system-assigned managed identity, Workload
+  Identity (AKS pods), App Service / Container Apps managed identity.
+- **Local dev**: `az login` (Azure CLI) or `azd auth login`.
+
+#### Required Azure setup
+
+1. Configure an Entra admin on the Flexible Server (`az postgres flexible-server ad-admin set`).
+2. Create a Postgres role for the principal:
+   ```sql
+   SELECT pgaadauth_create_principal('my-app-managed-identity', false, false);
+   ```
+3. Grant the role the privileges your application needs (`GRANT ... ON DATABASE
+   ...`, `GRANT USAGE ON SCHEMA ...`, etc.).
+
+#### Sovereign clouds
+
+The default audience is the public-cloud value
+`https://ossrdbms-aad.database.windows.net/.default`. Override for sovereign
+clouds:
+
+```rust,no_run
+use std::time::Duration;
+use duroxide_pg::EntraAuthOptions;
+
+let options = EntraAuthOptions::new()
+    .audience("https://ossrdbms-aad.database.usgovcloudapi.net/.default")
+    .refresh_interval(Duration::from_secs(15 * 60));
+```
+
+#### Notes
+
+- All Entra connections are pinned to `PgSslMode::VerifyFull`. There is no
+  fallback to weaker TLS modes.
+- Brief auth-failure windows during token rotation surface as **retryable**
+  `ProviderError`s (SQLSTATE `28000` / `28P01`) so the runtime retries
+  transparently.
+- See [`docs/entra-auth.md`](.paw/work/entra-auth-support/Docs.md) for the
+  technical reference (refresh scheduling, troubleshooting, design rationale).
+
 ## Configuration
 
 | Environment Variable | Description | Default |
@@ -59,6 +144,7 @@ let provider = PostgresProvider::new_with_schema(
 - Lock renewal for long-running orchestrations and activities
 - KV store — durable per-instance key-value state for orchestration coordination
 - Orchestration stats introspection via `Client::get_orchestration_stats()`
+- Microsoft Entra ID authentication for Azure Database for PostgreSQL (managed identity, Workload Identity, az CLI)
 
 ## Latest Release (0.1.30)
 

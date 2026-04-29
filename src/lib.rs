@@ -36,6 +36,33 @@
 //! # }
 //! ```
 //!
+//! ## Microsoft Entra ID Authentication
+//!
+//! Connect to Azure Database for PostgreSQL Flexible Server using an Entra
+//! access token. A background task refreshes the token before expiry. See
+//! [`EntraAuthOptions`] for tunables.
+//!
+//! ```rust,no_run
+//! use duroxide_pg::{EntraAuthOptions, PostgresProvider};
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! let provider = PostgresProvider::new_with_entra(
+//!     "myserver.postgres.database.azure.com",
+//!     5432,
+//!     "mydb",
+//!     "my-entra-principal@contoso.onmicrosoft.com",
+//!     EntraAuthOptions::new(),
+//! )
+//! .await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! All Entra connections use `PgSslMode::VerifyFull`. The default credential
+//! chain is `[ManagedIdentityCredential, DeveloperToolsCredential]`, which
+//! works in Azure-hosted services and from a developer workstation logged in
+//! via `az login`.
+//!
 //! ## Configuration
 //!
 //! | Environment Variable | Description | Default |

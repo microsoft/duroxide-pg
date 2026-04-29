@@ -24,20 +24,47 @@ use crate::migrations::MigrationRunner;
 /// Implements the [`Provider`] and [`ProviderAdmin`] traits from Duroxide,
 /// storing orchestration state, history, and work queues in PostgreSQL.
 ///
-/// # Example
+/// # Examples
+///
+/// ## Standard connection string
 ///
 /// ```rust,no_run
 /// use duroxide_pg::PostgresProvider;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// // Connect using DATABASE_URL or explicit connection string
 /// let provider = PostgresProvider::new("postgres://localhost/mydb").await?;
+/// # Ok(())
+/// # }
+/// ```
 ///
-/// // Or use a custom schema for isolation
+/// ## Custom schema for multi-tenant isolation
+///
+/// ```rust,no_run
+/// use duroxide_pg::PostgresProvider;
+///
+/// # async fn example() -> anyhow::Result<()> {
 /// let provider = PostgresProvider::new_with_schema(
 ///     "postgres://localhost/mydb",
 ///     Some("my_app"),
 /// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Azure Database for PostgreSQL with Microsoft Entra ID
+///
+/// ```rust,no_run
+/// use duroxide_pg::{EntraAuthOptions, PostgresProvider};
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let provider = PostgresProvider::new_with_entra(
+///     "myserver.postgres.database.azure.com",
+///     5432,
+///     "mydb",
+///     "my-entra-principal@contoso.onmicrosoft.com",
+///     EntraAuthOptions::new(),
+/// )
+/// .await?;
 /// # Ok(())
 /// # }
 /// ```
