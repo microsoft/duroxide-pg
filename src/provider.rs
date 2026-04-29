@@ -68,6 +68,34 @@ use crate::migrations::MigrationRunner;
 /// # Ok(())
 /// # }
 /// ```
+/// Classification of a PostgreSQL SQLSTATE code as a retryable or permanent
+/// error. Pure function to enable behavioral testing without synthesizing
+/// `sqlx::Error::Database` (a sealed trait object).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SqlStateClass {
+    Retryable,
+    Permanent,
+}
+
+/// Classifies a SQLSTATE code given the provider's auth mode.
+///
+/// `is_entra` only affects `28000` / `28P01` (auth failures): on the Entra
+/// path these are classified retryable to ride out a brief window where the
+/// token has expired but the refresh task has not yet swapped in a new one.
+/// On the password path the classification falls back to `Permanent`,
+/// preserving byte-identical pre-feature behavior (FR-006).
+pub(crate) fn classify_pg_sqlstate(code: Option<&str>, is_entra: bool) -> SqlStateClass {
+    match code {
+        Some("40P01") => SqlStateClass::Retryable,        // deadlock
+        Some("28000") | Some("28P01") if is_entra => SqlStateClass::Retryable, // entra-only
+        Some("40001") => SqlStateClass::Permanent,        // serialization failure
+        Some("23505") => SqlStateClass::Permanent,        // unique violation
+        Some("23503") => SqlStateClass::Permanent,        // FK violation
+        Some("0A000") => SqlStateClass::Retryable,        // cached plan invalidated
+        _ => SqlStateClass::Permanent,
+    }
+}
+
 pub struct PostgresProvider {
     pool: Arc<PgPool>,
     schema_name: String,
@@ -247,44 +275,32 @@ impl PostgresProvider {
         &self.schema_name
     }
 
-    /// Convert sqlx::Error to ProviderError with proper classification.
+    /// Convert a sqlx error to a `ProviderError` with proper classification.
     ///
-    /// The SQLSTATE 28000 / 28P01 → retryable mapping is gated on
-    /// `self.is_entra` so password-path callers retain byte-identical
-    /// behavior (FR-006) — a misconfigured static password remains a
-    /// permanent error, while a brief auth-failure window during Entra
-    /// token rotation triggers a retry.
+    /// SQLSTATE classification is delegated to the pure helper
+    /// [`classify_pg_sqlstate`]. The only auth-mode-sensitive case is
+    /// `28000` / `28P01`: on the Entra path they are classified
+    /// **retryable** (brief auth-failure window during token rotation); on
+    /// the password path they remain **permanent**, preserving
+    /// byte-identical pre-feature behavior (FR-006).
     fn sqlx_to_provider_error(&self, operation: &str, e: SqlxError) -> ProviderError {
         match e {
             SqlxError::Database(ref db_err) => {
-                // PostgreSQL error codes
                 let code_opt = db_err.code();
                 let code = code_opt.as_deref();
-                if code == Some("40P01") {
-                    // Deadlock detected
-                    ProviderError::retryable(operation, format!("Deadlock detected: {e}"))
-                } else if self.is_entra && (code == Some("28000") || code == Some("28P01")) {
-                    // 28000 = invalid_authorization_specification
-                    // 28P01 = invalid_password
-                    // Classified as retryable for Entra token rotation: a brief auth-failure
-                    // window can occur when a token has expired but the refresh task has not
-                    // yet swapped in a new one. Gated on is_entra so password-path callers
-                    // retain byte-identical behavior on misconfiguration (FR-006).
-                    ProviderError::retryable(operation, format!("Authentication error (likely token rotation): {e}"))
-                } else if code == Some("40001") {
-                    // Serialization failure - permanent error (transaction conflict, not transient)
-                    ProviderError::permanent(operation, format!("Serialization failure: {e}"))
-                } else if code == Some("23505") {
-                    // Unique constraint violation (duplicate event)
-                    ProviderError::permanent(operation, format!("Duplicate detected: {e}"))
-                } else if code == Some("23503") {
-                    // Foreign key constraint violation
-                    ProviderError::permanent(operation, format!("Foreign key violation: {e}"))
-                } else if code == Some("0A000") {
-                    // Cached plan invalidated by concurrent DDL (e.g., migration replaced a function)
-                    ProviderError::retryable(operation, format!("Cached plan invalidated: {e}"))
-                } else {
-                    ProviderError::permanent(operation, format!("Database error: {e}"))
+                match classify_pg_sqlstate(code, self.is_entra) {
+                    SqlStateClass::Retryable => ProviderError::retryable(operation, match code {
+                        Some("40P01") => format!("Deadlock detected: {e}"),
+                        Some("28000") | Some("28P01") => format!("Authentication error (likely token rotation): {e}"),
+                        Some("0A000") => format!("Cached plan invalidated: {e}"),
+                        _ => format!("Retryable database error: {e}"),
+                    }),
+                    SqlStateClass::Permanent => ProviderError::permanent(operation, match code {
+                        Some("40001") => format!("Serialization failure: {e}"),
+                        Some("23505") => format!("Duplicate detected: {e}"),
+                        Some("23503") => format!("Foreign key violation: {e}"),
+                        _ => format!("Database error: {e}"),
+                    }),
                 }
             }
             SqlxError::PoolClosed | SqlxError::PoolTimedOut => {
@@ -2458,26 +2474,6 @@ mod tests {
         assert_eq!(sleep, ENTRA_REFRESH_MIN_INTERVAL);
     }
 
-    #[test]
-    fn classifier_maps_28000_and_28p01_to_retryable() {
-        // We can't easily synthesize a sqlx::Error::Database with a chosen
-        // SQLSTATE, but we can verify the classifier message contract: any
-        // mapped retryable error contains the documented "token rotation"
-        // hint string. Reading sqlx_to_provider_error directly:
-        let src = std::fs::read_to_string(file!()).unwrap();
-        // Sanity-check that the classifier branch and its rationale comment
-        // exist; this guards against accidental regressions where someone
-        // collapses or removes the 28xxx branch.
-        assert!(
-            src.contains("\"28000\"") && src.contains("\"28P01\""),
-            "classifier must handle SQLSTATE 28000 and 28P01"
-        );
-        assert!(
-            src.contains("token rotation"),
-            "classifier message should mention 'token rotation' for searchability"
-        );
-    }
-
     #[tokio::test]
     async fn recording_token_source_returns_distinct_tokens_in_script_order() {
         // Note: this test exercises the TokenSource contract directly rather
@@ -2576,13 +2572,23 @@ mod tests {
     }
 
     #[test]
-    fn classifier_only_maps_28xxx_when_entra() {
-        // We can't easily synthesize a sqlx::Error::Database, but we can
-        // assert by inspection that the classifier is gated on self.is_entra.
-        let src = std::fs::read_to_string(file!()).unwrap();
-        assert!(
-            src.contains("self.is_entra && (code == Some(\"28000\") || code == Some(\"28P01\"))"),
-            "classifier must gate the 28xxx mapping on self.is_entra to preserve FR-006"
-        );
+    fn classify_pg_sqlstate_gates_28xxx_on_is_entra() {
+        use crate::provider::{classify_pg_sqlstate, SqlStateClass};
+
+        // 28000/28P01 are RETRYABLE only on the Entra path.
+        assert_eq!(classify_pg_sqlstate(Some("28000"), true), SqlStateClass::Retryable);
+        assert_eq!(classify_pg_sqlstate(Some("28P01"), true), SqlStateClass::Retryable);
+
+        // On the password path they remain PERMANENT (FR-006 byte-identical).
+        assert_eq!(classify_pg_sqlstate(Some("28000"), false), SqlStateClass::Permanent);
+        assert_eq!(classify_pg_sqlstate(Some("28P01"), false), SqlStateClass::Permanent);
+
+        // Unrelated codes are unaffected by is_entra.
+        assert_eq!(classify_pg_sqlstate(Some("40P01"), true), SqlStateClass::Retryable);
+        assert_eq!(classify_pg_sqlstate(Some("40P01"), false), SqlStateClass::Retryable);
+        assert_eq!(classify_pg_sqlstate(Some("23505"), true), SqlStateClass::Permanent);
+        assert_eq!(classify_pg_sqlstate(Some("23505"), false), SqlStateClass::Permanent);
+        assert_eq!(classify_pg_sqlstate(Some("0A000"), true), SqlStateClass::Retryable);
+        assert_eq!(classify_pg_sqlstate(None, true), SqlStateClass::Permanent);
     }
 }

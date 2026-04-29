@@ -164,23 +164,29 @@ This is the public contract for FR-007 (callers can search on the phrase
 
 ### Runtime
 
-`sqlx_to_provider_error` in `src/provider.rs` is extended with one branch:
+`sqlx_to_provider_error` in `src/provider.rs` delegates to a small pure
+helper, `classify_pg_sqlstate(code, is_entra) -> SqlStateClass`. The helper
+gates the 28xxx mapping on `is_entra`:
 
 ```rust
-} else if code == Some("28000") || code == Some("28P01") {
-    // 28000 = invalid_authorization_specification
-    // 28P01 = invalid_password
-    ProviderError::retryable(operation, format!(
-        "Authentication error (likely token rotation): {e}"
-    ))
+match code {
+    Some("40P01") => SqlStateClass::Retryable,        // deadlock
+    Some("28000") | Some("28P01") if is_entra => SqlStateClass::Retryable,
+    Some("40001") => SqlStateClass::Permanent,        // serialization failure
+    Some("23505") => SqlStateClass::Permanent,        // unique violation
+    Some("23503") => SqlStateClass::Permanent,        // FK violation
+    Some("0A000") => SqlStateClass::Retryable,        // cached plan invalidated
+    _ => SqlStateClass::Permanent,
 }
 ```
 
-The classification is unconditional (applies to both Entra and password paths).
-For the password path this means a misconfigured static password causes one
-extra retry before surfacing as a permanent error, which is acceptable. The
-combination of expiry-driven refresh (primary) + classifier extension
-(backstop) satisfies FR-004 and FR-008 without false-positive misclassification.
+The 28xxx mapping is **gated on `is_entra`** (set true by the Entra
+constructors, false by the password constructors). Password-path callers
+therefore retain byte-identical pre-feature classification, satisfying
+FR-006. On the Entra path the combination of expiry-driven refresh
+(primary) + the gated classifier extension (backstop) satisfies FR-004 and
+FR-008. The classifier is exercised by the behavioral unit test
+`classify_pg_sqlstate_gates_28xxx_on_is_entra` in `provider::tests`.
 
 ## Test seam
 

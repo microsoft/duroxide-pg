@@ -59,9 +59,10 @@
 //! ```
 //!
 //! All Entra connections use `PgSslMode::VerifyFull`. The default credential
-//! chain is `[ManagedIdentityCredential, DeveloperToolsCredential]`, which
-//! works in Azure-hosted services and from a developer workstation logged in
-//! via `az login`.
+//! chain is `[WorkloadIdentityCredential (added only when AKS federated env
+//! vars are present), ManagedIdentityCredential, DeveloperToolsCredential]`,
+//! which works for AKS Workload Identity, other Azure-hosted managed
+//! identities, and developer workstations logged in via `az login`.
 //!
 //! ## Configuration
 //!
