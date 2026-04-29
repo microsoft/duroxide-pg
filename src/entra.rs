@@ -11,13 +11,6 @@
 //! re-exported**. The public surface is just [`EntraAuthOptions`]; everything
 //! else stays internal so we can adapt to upstream churn without a breaking
 //! change.
-//!
-//! Several `pub(crate)` items in this module are wired up in Phase 2 (the
-//! constructors and refresh task in `provider.rs`); they are annotated
-//! `#[allow(dead_code)]` here so Phase 1 compiles clean under
-//! `-D warnings`. The annotations come off as soon as the call sites land.
-
-#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -282,7 +275,8 @@ impl TokenCredential for ChainedCredential {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
+    //! Test fixtures shared across crate unit tests (entra and provider).
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -344,12 +338,18 @@ mod tests {
         }
     }
 
-    fn token(secret: &str, expires_in_secs: u64) -> EntraToken {
+    pub(crate) fn token(secret: &str, expires_in_secs: u64) -> EntraToken {
         EntraToken::new(
             secret.to_string(),
             SystemTime::now() + Duration::from_secs(expires_in_secs),
         )
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
 
     #[test]
     fn defaults_match_password_path() {

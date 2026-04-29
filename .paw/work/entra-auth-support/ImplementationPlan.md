@@ -50,7 +50,7 @@ The integration uses `azure_identity` to obtain Entra access tokens from the amb
 ## Phase Status
 
 - [x] **Phase 1: Dependencies, `EntraAuthOptions`, and `TokenSource` seam** — Add Azure SDK deps with the right TLS feature flags; introduce the configuration type and credential abstraction with unit tests.
-- [ ] **Phase 2: Entra constructors and token-refresh task** — Wire `new_with_entra` / `new_with_schema_and_entra`, build `PgConnectOptions` with `VerifyFull`, run migrations, and spawn the refresh task that calls `Pool::set_connect_options` periodically.
+- [x] **Phase 2: Entra constructors and token-refresh task** — Wire `new_with_entra` / `new_with_schema_and_entra`, build `PgConnectOptions` with `VerifyFull`, run migrations, and spawn the refresh task that calls `Pool::set_connect_options` periodically.
 - [ ] **Phase 3: Documentation** — `Docs.md`, README and rustdoc Entra sections, CHANGELOG entry, optional opt-in integration test scaffold.
 
 ## Phase Candidates
