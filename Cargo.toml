@@ -43,10 +43,20 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 semver = "1.0"
 include_dir = "0.7"
-# Azure SDK for Microsoft Entra ID authentication. default-features=false avoids
-# `reqwest_rustls` (which pulls `ring`); we enable `reqwest`/`reqwest_deflate`/`reqwest_gzip`
-# so reqwest uses its own `default-tls` feature (native-tls on this platform), keeping the
-# crate's native-tls posture (see `runtime-tokio-native-tls` on sqlx above).
+# Azure SDK for Microsoft Entra ID authentication.
+#
+# FIPS-compliance posture: this crate's TLS stack is native-tls/openssl only
+# (sqlx is pinned to `runtime-tokio-native-tls` above; see commit 8406eaec).
+# Both Azure crates are pinned with `default-features = false` to suppress
+# their `reqwest_rustls` default feature, which would otherwise pull a
+# rustls-based TLS stack into the dependency graph. We enable only the
+# minimum needed for HTTP transport (`reqwest` + gzip/deflate) and `tokio`
+# for the async runtime; this routes through reqwest's own `default-tls`
+# feature, keeping the build on native-tls across all platforms.
+#
+# Verified with `cargo tree --target x86_64-unknown-linux-gnu --all-features
+# --all-targets` and a fresh Cargo.lock: no rustls-based TLS crates appear in
+# the resolved dependency graph.
 azure_core = { version = "0.35", default-features = false, features = ["reqwest", "reqwest_deflate", "reqwest_gzip", "tokio"] }
 azure_identity = { version = "0.35", default-features = false, features = ["tokio"] }
 # Used for FutureExt::catch_unwind in the Entra refresh task panic guard.

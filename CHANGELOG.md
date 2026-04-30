@@ -27,9 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a credential SDK panic cannot tear down the runtime, and the cached
   `EntraToken`'s `Debug` impl redacts the bearer secret.
 - New dependencies: `azure_core` 0.35, `azure_identity` 0.35, and a thin
-  `futures-util` (std-only) for `catch_unwind`. `azure_core`/`azure_identity`
-  are configured with `default-features = false` and the `reqwest` (native-tls)
-  feature stack to preserve the crate's ring-free posture.
+  `futures-util` (std-only) for `catch_unwind`. Both Azure crates are pinned
+  with `default-features = false` and only the native-tls-backed feature set
+  (`reqwest`/`reqwest_deflate`/`reqwest_gzip`/`tokio`) is enabled, so the
+  resolved dependency graph contains no rustls-based TLS crates — the
+  FIPS-aligned native-tls posture from 0.1.30 is preserved. Verified with
+  `cargo tree --target x86_64-unknown-linux-gnu --all-features --all-targets`
+  and a fresh `Cargo.lock`.
 
 ## [0.1.30] - 2026-04-23
 
