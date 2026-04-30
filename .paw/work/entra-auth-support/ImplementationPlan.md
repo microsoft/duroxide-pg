@@ -56,9 +56,9 @@ The integration uses `azure_identity` to obtain Entra access tokens from the amb
 ## Phase Candidates
 
 <!-- Items that could be promoted to full phases later if needed -->
-- [ ] Cargo feature gate (`azure-entra`) for opt-in dependency footprint — only if downstream consumers complain.
-- [ ] Caller-supplied static-token / custom-credential factory variant on `EntraAuthOptions`.
-- [ ] Live opt-in CI integration test exercising a real Azure Postgres Flexible Server.
+- [x] [skipped] Cargo feature gate (`azure-entra`) for opt-in dependency footprint — only if downstream consumers complain.
+- [x] [skipped] Caller-supplied static-token / custom-credential factory variant on `EntraAuthOptions`.
+- [x] [skipped] Live opt-in CI integration test exercising a real Azure Postgres Flexible Server.
 
 ---
 
