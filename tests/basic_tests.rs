@@ -1,4 +1,4 @@
-use duroxide::providers::{ExecutionMetadata, Provider, TagFilter, WorkItem};
+use duroxide::providers::{ExecutionMetadata, Provider, SessionFetchConfig, TagFilter, WorkItem};
 use duroxide::{Event, EventKind, INITIAL_EVENT_ID, INITIAL_EXECUTION_ID};
 use duroxide_pg::PostgresProvider;
 use tracing_subscriber::EnvFilter;
@@ -377,6 +377,83 @@ async fn test_fetch_orchestration_item_empty_queue() {
         .await
         .expect("fetch should succeed");
     assert!(item.is_none(), "Empty queue should return None");
+
+    provider.cleanup_schema().await.expect("Failed to cleanup");
+}
+
+#[tokio::test]
+async fn test_batched_worker_fetch_respects_session_claim_quota() {
+    init_test_logging();
+    let database_url = get_database_url();
+    let schema_name = get_test_schema();
+
+    let provider = PostgresProvider::new_with_schema(&database_url, Some(&schema_name))
+        .await
+        .expect("Failed to create provider");
+
+    for (id, session_id) in [(1, "session-a"), (2, "session-a"), (3, "session-b")] {
+        provider
+            .enqueue_for_worker(WorkItem::ActivityExecute {
+                instance: format!("batch-instance-{id}"),
+                execution_id: 1,
+                id,
+                name: "BatchedActivity".to_string(),
+                input: format!("input-{id}"),
+                session_id: Some(session_id.to_string()),
+                tag: None,
+            })
+            .await
+            .expect("Failed to enqueue worker work");
+    }
+
+    let session = SessionFetchConfig {
+        owner_id: "batch-worker".to_string(),
+        lock_timeout: std::time::Duration::from_secs(30),
+    };
+
+    let first_batch = provider
+        .fetch_work_items(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::ZERO,
+            Some(&session),
+            &TagFilter::default(),
+            3,
+            1,
+        )
+        .await
+        .expect("batched fetch should succeed");
+
+    assert_eq!(
+        first_batch.len(),
+        2,
+        "quota=1 should allow multiple rows from the one newly claimed session"
+    );
+    assert!(first_batch.iter().all(|(item, _, attempt_count)| {
+        matches!(
+            item,
+            WorkItem::ActivityExecute {
+                session_id: Some(session_id),
+                ..
+            } if session_id == "session-a"
+        ) && *attempt_count == 1
+    }));
+
+    let second_batch = provider
+        .fetch_work_items(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::ZERO,
+            Some(&session),
+            &TagFilter::default(),
+            3,
+            0,
+        )
+        .await
+        .expect("batched fetch should succeed");
+
+    assert!(
+        second_batch.is_empty(),
+        "quota=0 should not claim a second session"
+    );
 
     provider.cleanup_schema().await.expect("Failed to cleanup");
 }
