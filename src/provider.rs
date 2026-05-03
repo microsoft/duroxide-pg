@@ -229,6 +229,10 @@ impl Provider for PostgresProvider {
         env!("CARGO_PKG_VERSION")
     }
 
+    fn supports_batched_work_item_fetch(&self) -> bool {
+        true
+    }
+
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
     async fn fetch_orchestration_item(
         &self,
@@ -944,6 +948,71 @@ impl Provider for PostgresProvider {
         Ok(Some((work_item, lock_token, attempt_count as u32)))
     }
 
+    #[instrument(skip(self), target = "duroxide::providers::postgres")]
+    async fn fetch_work_items(
+        &self,
+        lock_timeout: Duration,
+        _poll_timeout: Duration,
+        session: Option<&SessionFetchConfig>,
+        tag_filter: &TagFilter,
+        max_items: usize,
+        max_new_sessions: usize,
+    ) -> Result<Vec<(WorkItem, String, u32)>, ProviderError> {
+        if max_items == 0 || matches!(tag_filter, TagFilter::None) {
+            return Ok(Vec::new());
+        }
+
+        let start = std::time::Instant::now();
+        let lock_timeout_ms = lock_timeout.as_millis() as i64;
+        let (owner_id, session_lock_timeout_ms): (Option<&str>, Option<i64>) = match session {
+            Some(config) => (
+                Some(&config.owner_id),
+                Some(config.lock_timeout.as_millis() as i64),
+            ),
+            None => (None, None),
+        };
+        let (tag_mode, tag_names) = Self::tag_filter_to_sql(tag_filter);
+
+        let rows = sqlx::query_as::<_, (String, String, i32)>(&format!(
+            "SELECT * FROM {}.fetch_work_items($1, $2, $3, $4, $5, $6, $7, $8)",
+            self.schema_name
+        ))
+        .bind(Self::now_millis())
+        .bind(lock_timeout_ms)
+        .bind(owner_id)
+        .bind(session_lock_timeout_ms)
+        .bind(&tag_names)
+        .bind(tag_mode)
+        .bind(max_items.min(i32::MAX as usize) as i32)
+        .bind(max_new_sessions.min(i32::MAX as usize) as i32)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| Self::sqlx_to_provider_error("fetch_work_items", e))?;
+
+        let mut items = Vec::with_capacity(rows.len());
+        for (work_item_json, lock_token, attempt_count) in rows {
+            let work_item: WorkItem = serde_json::from_str(&work_item_json).map_err(|e| {
+                ProviderError::permanent(
+                    "fetch_work_items",
+                    format!("Failed to deserialize worker item: {e}"),
+                )
+            })?;
+            items.push((work_item, lock_token, attempt_count as u32));
+        }
+
+        debug!(
+            target = "duroxide::providers::postgres",
+            operation = "fetch_work_items",
+            returned = items.len(),
+            requested = max_items,
+            max_new_sessions = max_new_sessions,
+            duration_ms = start.elapsed().as_millis() as u64,
+            "Fetched activity work-item batch via stored procedure"
+        );
+
+        Ok(items)
+    }
+
     #[instrument(skip(self), fields(token = %token), target = "duroxide::providers::postgres")]
     async fn ack_work_item(
         &self,
@@ -1496,7 +1565,10 @@ impl Provider for PostgresProvider {
     }
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
-    async fn get_instance_stats(&self, instance: &str) -> Result<Option<SystemStats>, ProviderError> {
+    async fn get_instance_stats(
+        &self,
+        instance: &str,
+    ) -> Result<Option<SystemStats>, ProviderError> {
         let row: Option<(bool, i64, i64, i64, i64, i64)> = sqlx::query_as(&format!(
             "SELECT * FROM {}.get_instance_stats($1)",
             self.schema_name
@@ -1507,15 +1579,20 @@ impl Provider for PostgresProvider {
         .map_err(|e| Self::sqlx_to_provider_error("get_instance_stats", e))?;
 
         match row {
-            Some((true, history_event_count, history_size_bytes, queue_pending_count, kv_user_key_count, kv_total_value_bytes)) => {
-                Ok(Some(SystemStats {
-                    history_event_count: history_event_count as u64,
-                    history_size_bytes: history_size_bytes as u64,
-                    queue_pending_count: queue_pending_count as u64,
-                    kv_user_key_count: kv_user_key_count as u64,
-                    kv_total_value_bytes: kv_total_value_bytes as u64,
-                }))
-            }
+            Some((
+                true,
+                history_event_count,
+                history_size_bytes,
+                queue_pending_count,
+                kv_user_key_count,
+                kv_total_value_bytes,
+            )) => Ok(Some(SystemStats {
+                history_event_count: history_event_count as u64,
+                history_size_bytes: history_size_bytes as u64,
+                queue_pending_count: queue_pending_count as u64,
+                kv_user_key_count: kv_user_key_count as u64,
+                kv_total_value_bytes: kv_total_value_bytes as u64,
+            })),
             _ => Ok(None),
         }
     }
