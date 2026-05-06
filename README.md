@@ -148,6 +148,24 @@ Two test layers cover the Entra integration:
    `cargo test --test entra_live_test -- --ignored`. Credentials are picked
    up from the ambient `azure_identity` chain.
 
+   **First-time setup.** A pair of helper scripts provisions an
+   ephemeral Azure Database for PostgreSQL Flexible Server (Burstable
+   B1ms tier, ~$13/month if left running — remember to tear it down):
+
+   ```bash
+   az login
+   ./scripts/provision_entra_test_pg.sh   # creates RG + server + firewall + Entra admin
+   # (script prints the env-var block to copy into your shell)
+   cargo test --test entra_live_test -- --ignored --nocapture
+   ./scripts/teardown_entra_test_pg.sh    # deletes the resource group
+   ```
+
+   The scripts are idempotent and use the currently `az login`'d user as
+   the Entra admin / test principal. Override naming with
+   `DUROXIDE_PG_ENTRA_TEST_PREFIX`, `DUROXIDE_PG_ENTRA_TEST_LOCATION`,
+   `DUROXIDE_PG_ENTRA_TEST_RG`, or `DUROXIDE_PG_ENTRA_TEST_SERVER` env
+   vars (see the script headers for details).
+
 ## Configuration
 
 | Environment Variable | Description | Default |
