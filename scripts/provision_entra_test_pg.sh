@@ -51,9 +51,9 @@ require curl
 
 # ---------- inputs ----------
 
-DEFAULT_SUFFIX=$(whoami | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9' | cut -c1-12)
+DEFAULT_SUFFIX=$(whoami | sed 's#.*[^[:alnum:]]##' | tr '[:upper:]' '[:lower:]' | cut -c1-12)
 SUFFIX="${DUROXIDE_PG_ENTRA_TEST_PREFIX:-$DEFAULT_SUFFIX}"
-LOCATION="${DUROXIDE_PG_ENTRA_TEST_LOCATION:-eastus}"
+LOCATION="${DUROXIDE_PG_ENTRA_TEST_LOCATION:-eastus2}"
 RG="${DUROXIDE_PG_ENTRA_TEST_RG:-rg-duroxide-pg-entra-test-${SUFFIX}}"
 SERVER="${DUROXIDE_PG_ENTRA_TEST_SERVER:-pg-duroxide-entra-${SUFFIX}}"
 DATABASE="postgres"
@@ -110,7 +110,7 @@ else
         --storage-size 32 \
         --admin-user pgadmin \
         --admin-password "$ADMIN_PW" \
-        --microsoft-entra-auth Enabled \
+        --active-directory-auth Enabled \
         --password-auth Enabled \
         --public-access None \
         --yes \

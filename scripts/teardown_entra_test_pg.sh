@@ -24,7 +24,7 @@ if ! az account show >/dev/null 2>&1; then
     exit 1
 fi
 
-DEFAULT_SUFFIX=$(whoami | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9' | cut -c1-12)
+DEFAULT_SUFFIX=$(whoami | sed 's#.*[^[:alnum:]]##' | tr '[:upper:]' '[:lower:]' | cut -c1-12)
 SUFFIX="${DUROXIDE_PG_ENTRA_TEST_PREFIX:-$DEFAULT_SUFFIX}"
 RG="${DUROXIDE_PG_ENTRA_TEST_RG:-rg-duroxide-pg-entra-test-${SUFFIX}}"
 
