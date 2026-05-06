@@ -132,6 +132,22 @@ let options = EntraAuthOptions::new()
   for the design rationale (refresh scheduling, troubleshooting, dependency
   choices).
 
+#### Testing
+
+Two test layers cover the Entra integration:
+
+1. **Local pipeline tests** (`cargo test --lib entra_pipeline`) — exercise the
+   full token → connect-options → pool → migrations flow against a local
+   PostgreSQL by injecting a fake `TokenSource` (no Azure dependency). They
+   automatically skip if `DATABASE_URL` is not set.
+
+2. **Live Entra smoke test** (`tests/entra_live_test.rs`, `#[ignore]`) — opt
+   in by setting `DUROXIDE_PG_ENTRA_LIVE_TEST=1` plus
+   `DUROXIDE_PG_ENTRA_TEST_HOST`, `DUROXIDE_PG_ENTRA_TEST_DB`, and
+   `DUROXIDE_PG_ENTRA_TEST_USER`. Run with
+   `cargo test --test entra_live_test -- --ignored`. Credentials are picked
+   up from the ambient `azure_identity` chain.
+
 ## Configuration
 
 | Environment Variable | Description | Default |

@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   FIPS-aligned native-tls posture from 0.1.30 is preserved. Verified with
   `cargo tree --target x86_64-unknown-linux-gnu --all-features --all-targets`
   and a fresh `Cargo.lock`.
+- **Entra test coverage** — Two new test layers exercise the Entra
+  integration. (1) `mod entra_pipeline_tests` (in `src/provider.rs`) uses a
+  crate-internal `pub(crate) new_with_entra_with_token_source` seam to
+  inject a fake `TokenSource` against a local PostgreSQL, covering the full
+  token → connect-options → pool → migrations pipeline (positive, negative,
+  and schema-isolated cases) without an Azure dependency. (2)
+  `tests/entra_live_test.rs` provides an opt-in (`#[ignore]`) live smoke
+  test against a real Azure Database for PostgreSQL, gated by
+  `DUROXIDE_PG_ENTRA_LIVE_TEST=1`.
 
 ## [0.1.30] - 2026-04-23
 
