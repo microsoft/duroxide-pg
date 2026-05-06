@@ -155,11 +155,13 @@ impl PostgresProvider {
     /// Create a new [`PostgresProvider`] that authenticates to Azure Database
     /// for PostgreSQL using a Microsoft Entra ID access token.
     ///
-    /// The token is acquired at construction time using the chain
-    /// `[ManagedIdentityCredential, DeveloperToolsCredential]` (mirrors the
-    /// spirit of `DefaultAzureCredential`). A background task refreshes the
-    /// token before it expires and swaps it into the connection pool via
-    /// `Pool::set_connect_options`.
+    /// The token is acquired at construction time using the default chain:
+    /// `WorkloadIdentityCredential` (added only when its environment
+    /// variables are present, e.g. on AKS Workload Identity), then
+    /// `ManagedIdentityCredential`, then `DeveloperToolsCredential`
+    /// (mirrors the spirit of `DefaultAzureCredential`). A background task
+    /// refreshes the token before it expires and swaps it into the
+    /// connection pool via `Pool::set_connect_options`.
     ///
     /// All connections use `PgSslMode::VerifyFull`. There is no fallback to
     /// non-TLS or weaker verification modes.
@@ -458,23 +460,6 @@ pub(crate) const ENTRA_REFRESH_SAFETY_MARGIN: Duration = Duration::from_secs(5 *
 /// operator logs (SF-F).
 const ENTRA_PANIC_MSG_TRUNCATION_LIMIT: usize = 256;
 
-/// Spawn the background task that rotates Entra tokens into the pool.
-///
-/// Uses **expiry-driven** scheduling — the next sleep is the minimum of:
-/// 1. The caller-configured `refresh_interval_ceiling`.
-/// 2. `max(MIN_REFRESH, expires_at - now - SAFETY_MARGIN)`.
-///
-/// The result is then floored at `MIN_REFRESH` so a tiny ceiling cannot
-/// produce a busy-loop.
-///
-/// On a refresh failure, the task logs at WARN and retries after a bounded
-/// backoff (no extra sleep beyond the next computed interval — the loop's own
-/// scheduling provides backoff). The task is wrapped in an outer panic-guard
-/// loop so a panic inside the refresh body is logged and the loop continues
-/// rather than silently terminating the rotation machinery.
-///
-/// The task terminates only when its [`tokio::task::JoinHandle`] (wrapped in
-/// [`AbortOnDropHandle`]) is dropped along with the provider.
 /// Wraps a future in `AssertUnwindSafe(...).catch_unwind()` and converts a
 /// panic payload into a printable string. Returns `Ok(output)` if the future
 /// completes normally, or `Err(panic_msg)` if it panicked.
@@ -527,6 +512,24 @@ fn truncate_panic_message(s: String, limit: usize) -> String {
     out
 }
 
+/// Spawn the background task that rotates Entra tokens into the pool.
+///
+/// Uses **expiry-driven** scheduling — the next sleep is the minimum of:
+/// 1. The caller-configured `refresh_interval_ceiling`.
+/// 2. `max(MIN_REFRESH, expires_at - now - SAFETY_MARGIN)`.
+///
+/// The result is then floored at `MIN_REFRESH` so a tiny ceiling cannot
+/// produce a busy-loop.
+///
+/// On a refresh failure, the task logs at WARN and retries after a bounded
+/// backoff (no extra sleep beyond the next computed interval — the loop's own
+/// scheduling provides backoff). The task is wrapped in an outer panic-guard
+/// loop so a panic inside the refresh body is logged and the loop continues
+/// rather than silently terminating the rotation machinery.
+///
+/// Returns the [`AbortHandle`] for the spawned task. The task terminates
+/// when this handle (wrapped in [`AbortOnDropHandle`] on the provider) is
+/// dropped, which calls `abort()` on the underlying tokio task.
 fn spawn_token_refresh_task(
     pool: Arc<PgPool>,
     token_source: Arc<dyn TokenSource>,

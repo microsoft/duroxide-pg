@@ -128,7 +128,7 @@ let options = EntraAuthOptions::new()
 - Brief auth-failure windows during token rotation surface as **retryable**
   `ProviderError`s (SQLSTATE `28000` / `28P01`) so the runtime retries
   transparently.
-- See the [Entra ID technical reference](.paw/work/entra-auth-support/Docs.md)
+- See the [Entra ID technical reference](https://github.com/microsoft/duroxide-pg/blob/main/.paw/work/entra-auth-support/Docs.md)
   for the design rationale (refresh scheduling, troubleshooting, dependency
   choices).
 
