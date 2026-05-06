@@ -1,0 +1,108 @@
+name: Entra Live Test
+
+# Runs the live Entra-auth test against a long-lived Azure Database for
+# PostgreSQL Flexible Server. Authenticates to Azure via OIDC federated
+# workload identity (no client secret stored in GitHub).
+#
+# Required GitHub repository variables (set by scripts/provision_entra_ci_pg.sh):
+#   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+#   ENTRA_TEST_HOST,  ENTRA_TEST_DB,  ENTRA_TEST_USER
+#
+# Behavior on missing variables: the job no-ops with a warning. This is
+# intentional so PRs from external forks (which cannot read repo vars) do
+# not fail — they simply skip the live test.
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  schedule:
+    # Nightly drift check (catches token-refresh / Entra SDK regressions
+    # that the short PR run wouldn't see).
+    - cron: '0 8 * * *'  # 08:00 UTC daily
+  workflow_dispatch:
+
+concurrency:
+  group: entra-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: Check CI variables
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        run: |
+          missing=()
+          for v in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID \
+                   ENTRA_TEST_HOST ENTRA_TEST_DB ENTRA_TEST_USER; do
+            if [ -z "${!v:-}" ]; then missing+=("$v"); fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::warning::Skipping live Entra test — missing repo vars: ${missing[*]}"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          AZURE_CLIENT_ID:       ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID:       ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ENTRA_TEST_HOST:       ${{ vars.ENTRA_TEST_HOST }}
+          ENTRA_TEST_DB:         ${{ vars.ENTRA_TEST_DB }}
+          ENTRA_TEST_USER:       ${{ vars.ENTRA_TEST_USER }}
+
+  entra-live:
+    name: Run Entra Live Test
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for federated OIDC token
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Strip local path overrides (use crates.io duroxide)
+        run: |
+          find . -name Cargo.toml -not -path './target/*' \
+            -exec sed -i 's|, path = "\(\.\./\)\+duroxide"||g' {} +
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-entra-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-entra-
+
+      - name: Azure login (federated OIDC)
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run live Entra test
+        env:
+          # azure/login@v2 sets AZURE_FEDERATED_TOKEN_FILE / AZURE_CLIENT_ID /
+          # AZURE_TENANT_ID, which is exactly what `WorkloadIdentityCredential`
+          # in our default chain looks for.
+          DUROXIDE_PG_ENTRA_LIVE_TEST: "1"
+          DUROXIDE_PG_ENTRA_TEST_HOST: ${{ vars.ENTRA_TEST_HOST }}
+          DUROXIDE_PG_ENTRA_TEST_DB:   ${{ vars.ENTRA_TEST_DB }}
+          DUROXIDE_PG_ENTRA_TEST_USER: ${{ vars.ENTRA_TEST_USER }}
+          RUST_LOG: duroxide_pg=info
+        run: |
+          cargo test --test entra_live_test -- --ignored --nocapture
