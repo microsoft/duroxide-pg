@@ -11,7 +11,7 @@ One-time provisioning (see `scripts/provision_entra_ci_pg.sh`) creates:
 
 | Resource | Name | Notes |
 |---|---|---|
-| Resource group | `rg-duroxide-pg-entra-ci` | In subscription `3a95a41f-f77e-4053-8f64-3c3d25111bdd`, region `eastus2` |
+| Resource group | `rg-duroxide-pg-entra-ci` | In subscription `3a95a41f-f77e-4053-8f64-3c3d25111bdd`, region `westus3` (eastus2 is provisioning-restricted in this subscription) |
 | PG Flex Server | `pg-duroxide-entra-ci` | Burstable B1ms, **Entra-only auth** (password auth disabled), PG 16 |
 | Firewall rule | `allow-public` | `0.0.0.0`–`255.255.255.255`. Safe because Entra is the auth gate and the server has no production data. |
 | AAD application | `duroxide-pg-entra-ci` | Workload-identity-federated; **no client secret** |

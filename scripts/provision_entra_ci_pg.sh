@@ -64,7 +64,7 @@ done
 
 GH_REPO="${GH_REPO:-microsoft/duroxide-pg}"
 AZURE_SUBSCRIPTION="${AZURE_SUBSCRIPTION:-3a95a41f-f77e-4053-8f64-3c3d25111bdd}"
-LOCATION="${LOCATION:-eastus2}"
+LOCATION="${LOCATION:-westus3}"
 RG="${RG:-rg-duroxide-pg-entra-ci}"
 SERVER="${SERVER:-pg-duroxide-entra-ci}"
 APP_NAME="${APP_NAME:-duroxide-pg-entra-ci}"
