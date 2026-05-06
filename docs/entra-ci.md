@@ -66,11 +66,17 @@ az login
 az account set --subscription 3a95a41f-f77e-4053-8f64-3c3d25111bdd
 
 # 2. Run the provisioning script. Idempotent — safe to re-run.
-scripts/provision_entra_ci_pg.sh
+#    SERVICE_MANAGEMENT_REFERENCE is REQUIRED in the Microsoft tenant —
+#    it's the Service Tree GUID for the owning service. Find your team's
+#    GUID at https://servicetree.msftcloudes.com (open the Service node
+#    and copy "Service Id").
+SERVICE_MANAGEMENT_REFERENCE=<your-service-tree-guid> \
+  scripts/provision_entra_ci_pg.sh
 
 #    With --auto-set-vars, the script also sets the GitHub repo variables
 #    via the gh CLI (requires `gh auth login` with admin access to the repo):
-scripts/provision_entra_ci_pg.sh --auto-set-vars
+SERVICE_MANAGEMENT_REFERENCE=<your-service-tree-guid> \
+  scripts/provision_entra_ci_pg.sh --auto-set-vars
 ```
 
 The script prints the exact `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,

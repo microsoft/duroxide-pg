@@ -31,6 +31,12 @@
 #   RG                   Resource group name; default rg-duroxide-pg-entra-ci
 #   SERVER               Server name; default pg-duroxide-entra-ci
 #   APP_NAME             AAD app display name; default duroxide-pg-entra-ci
+#   SERVICE_MANAGEMENT_REFERENCE
+#                        Service Tree GUID for the owning service.
+#                        REQUIRED in the Microsoft tenant (tenant policy
+#                        rejects AAD app creation without it). Find your
+#                        team's GUID at https://servicetree.msftcloudes.com
+#                        — pick the Service node and copy the "Service Id".
 #
 # Flags:
 #   --auto-set-vars      Run `gh variable set` for the required GitHub vars
@@ -62,6 +68,7 @@ LOCATION="${LOCATION:-eastus2}"
 RG="${RG:-rg-duroxide-pg-entra-ci}"
 SERVER="${SERVER:-pg-duroxide-entra-ci}"
 APP_NAME="${APP_NAME:-duroxide-pg-entra-ci}"
+SMR="${SERVICE_MANAGEMENT_REFERENCE:-}"
 DATABASE="postgres"
 
 if ! az account show >/dev/null 2>&1; then
@@ -87,7 +94,15 @@ ok "RG ready."
 APP_ID=$(az ad app list --display-name "$APP_NAME" --query "[0].appId" -o tsv 2>/dev/null || true)
 if [ -z "$APP_ID" ]; then
     info "Creating AAD application '$APP_NAME'..."
-    APP_ID=$(az ad app create --display-name "$APP_NAME" --query appId -o tsv)
+    if [ -z "$SMR" ]; then
+        err "SERVICE_MANAGEMENT_REFERENCE is required to create AAD apps in the Microsoft tenant."
+        err "Find your team's Service Tree GUID at https://servicetree.msftcloudes.com"
+        err "and re-run with: SERVICE_MANAGEMENT_REFERENCE=<guid> $0"
+        exit 1
+    fi
+    APP_ID=$(az ad app create --display-name "$APP_NAME" \
+        --service-management-reference "$SMR" \
+        --query appId -o tsv)
 fi
 ok "AAD app: $APP_ID"
 
