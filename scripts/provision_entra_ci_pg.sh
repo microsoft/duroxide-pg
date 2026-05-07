@@ -47,6 +47,7 @@ set -euo pipefail
 err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 ok()   { printf '\033[32m%s\033[0m\n' "$*" >&2; }
 info() { printf '\033[36m%s\033[0m\n' "$*" >&2; }
+warn() { printf '\033[33m%s\033[0m\n' "$*" >&2; }
 
 require() { command -v "$1" >/dev/null 2>&1 || { err "Missing on PATH: $1"; exit 1; }; }
 require az
@@ -139,6 +140,27 @@ add_federated() {
 
 add_federated "github-pr"   "repo:${GH_REPO}:pull_request"
 add_federated "github-main" "repo:${GH_REPO}:ref:refs/heads/main"
+
+# Some GitHub orgs (including microsoft) customize the OIDC subject claim to
+# include repository_owner_id and repository_id (resists rename attacks).
+# Detect that customization via the GitHub API and register matching FICs.
+if command -v gh >/dev/null 2>&1; then
+    sub_template=$(gh api "repos/${GH_REPO}/actions/oidc/customization/sub" 2>/dev/null || true)
+    if [ -n "$sub_template" ] && echo "$sub_template" | grep -q '"repository_id"'; then
+        owner_id=$(gh api "repos/${GH_REPO}" --jq '.owner.id' 2>/dev/null || true)
+        repo_id=$(gh api "repos/${GH_REPO}" --jq '.id' 2>/dev/null || true)
+        if [ -n "$owner_id" ] && [ -n "$repo_id" ]; then
+            id_prefix="repository_owner_id:${owner_id}:repository_id:${repo_id}"
+            info "Org uses ID-based OIDC subject; registering ID-based FICs."
+            add_federated "github-pr-id"   "${id_prefix}:pull_request"
+            add_federated "github-main-id" "${id_prefix}:ref:refs/heads/main"
+        else
+            warn "Could not look up owner/repo IDs via gh; skipping ID-based FICs."
+        fi
+    fi
+else
+    warn "gh CLI not found; skipping ID-based OIDC subject FICs."
+fi
 
 # ---------- Postgres Flexible Server ----------
 
