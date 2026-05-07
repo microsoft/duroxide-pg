@@ -93,6 +93,10 @@ jobs:
           client-id:       ${{ vars.AZURE_CLIENT_ID }}
           tenant-id:       ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          # The SP has no subscription RBAC (and doesn't need any) — it
+          # only fetches an access token for ossrdbms-aad.database.windows.net
+          # to authenticate to Azure PG. Allow login without a subscription.
+          allow-no-subscriptions: true
 
       - name: Run live Entra test
         env:
