@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.32] - 2026-05-08
+
+**Release:** <https://github.com/microsoft/duroxide-pg/releases/tag/v0.1.32>
+
+### Changed
+
+- **Bumped `duroxide` dependency** — `0.1.28` → `0.1.29`. The core 0.1.29 release
+  replaces `futures::join_all` / `join` / `select_biased!` with new crate-local
+  replay-safe combinators (`PollAllJoin`, `PollAllJoin2`, `PollAllJoin3`, `Select2`,
+  `Select3`) that poll every pending child future on each replay pass. This eliminates
+  a latent large-fan-in (≥ 1024 children) replay hang. The `futures` crate is now
+  optional in the core (retained via the `provider-test` feature used by this provider).
+  No provider-level code or schema changes required.
+
 ## [0.1.31] - 2026-04-29
 
 ### Added

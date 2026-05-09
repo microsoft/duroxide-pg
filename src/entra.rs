@@ -152,8 +152,8 @@ impl EntraAuthOptions {
     /// Surfaces a descriptive error if the underlying Azure SDK fails to build
     /// any credential in the chain.
     pub(crate) fn default_token_source(&self) -> Result<Arc<dyn TokenSource>> {
-        let credential = build_default_chained_credential()
-            .context("Entra credential resolution failed")?;
+        let credential =
+            build_default_chained_credential().context("Entra credential resolution failed")?;
         Ok(Arc::new(AzureIdentityTokenSource::new(credential)))
     }
 }
@@ -221,7 +221,10 @@ impl TokenSource for AzureIdentityTokenSource {
             expires_at,
             crate::provider::ENTRA_REFRESH_SAFETY_MARGIN,
         )?;
-        Ok(EntraToken::new(access.token.secret().to_string(), expires_at))
+        Ok(EntraToken::new(
+            access.token.secret().to_string(),
+            expires_at,
+        ))
     }
 }
 
@@ -295,8 +298,14 @@ fn build_default_chained_credential() -> azure_core::Result<Arc<dyn TokenCredent
     if let Ok(workload) = WorkloadIdentityCredential::new(None) {
         sources.push(("WorkloadIdentityCredential", workload));
     }
-    sources.push(("ManagedIdentityCredential", ManagedIdentityCredential::new(None)?));
-    sources.push(("DeveloperToolsCredential", DeveloperToolsCredential::new(None)?));
+    sources.push((
+        "ManagedIdentityCredential",
+        ManagedIdentityCredential::new(None)?,
+    ));
+    sources.push((
+        "DeveloperToolsCredential",
+        DeveloperToolsCredential::new(None)?,
+    ));
     Ok(Arc::new(ChainedCredential::new(sources)))
 }
 
@@ -425,7 +434,9 @@ pub(crate) mod test_support {
             }
             let mut scripted = self.scripted.lock().unwrap();
             if scripted.is_empty() {
-                return Err(anyhow::anyhow!("RecordingFakeTokenSource: script exhausted"));
+                return Err(anyhow::anyhow!(
+                    "RecordingFakeTokenSource: script exhausted"
+                ));
             }
             Ok(scripted.remove(0))
         }
@@ -487,7 +498,10 @@ mod tests {
         assert_eq!(source.call_count(), 2);
         assert_eq!(
             source.recorded_scopes(),
-            vec![vec![DEFAULT_AUDIENCE.to_string()], vec![DEFAULT_AUDIENCE.to_string()]]
+            vec![
+                vec![DEFAULT_AUDIENCE.to_string()],
+                vec![DEFAULT_AUDIENCE.to_string()]
+            ]
         );
     }
 
@@ -506,12 +520,12 @@ mod tests {
     fn offset_datetime_conversion_handles_negative() {
         // OffsetDateTime::UNIX_EPOCH is the canonical zero; pre-epoch values
         // should clamp to UNIX_EPOCH rather than panic / underflow.
-        let pre_epoch = azure_core::time::OffsetDateTime::UNIX_EPOCH
-            - azure_core::time::Duration::seconds(60);
+        let pre_epoch =
+            azure_core::time::OffsetDateTime::UNIX_EPOCH - azure_core::time::Duration::seconds(60);
         assert_eq!(offset_datetime_to_system_time(pre_epoch), UNIX_EPOCH);
 
-        let post_epoch = azure_core::time::OffsetDateTime::UNIX_EPOCH
-            + azure_core::time::Duration::seconds(120);
+        let post_epoch =
+            azure_core::time::OffsetDateTime::UNIX_EPOCH + azure_core::time::Duration::seconds(120);
         let converted = offset_datetime_to_system_time(post_epoch);
         assert_eq!(converted, UNIX_EPOCH + Duration::from_secs(120));
     }
@@ -548,9 +562,27 @@ mod tests {
     #[tokio::test]
     async fn chained_credential_returns_first_success_in_chain_order() {
         let chain = ChainedCredential::new(vec![
-            ("Failing", Arc::new(StubCred { ok: false, label: "Failing" })),
-            ("Winner",  Arc::new(StubCred { ok: true,  label: "Winner" })),
-            ("ShouldNotBeCalled", Arc::new(StubCred { ok: true, label: "ShouldNotBeCalled" })),
+            (
+                "Failing",
+                Arc::new(StubCred {
+                    ok: false,
+                    label: "Failing",
+                }),
+            ),
+            (
+                "Winner",
+                Arc::new(StubCred {
+                    ok: true,
+                    label: "Winner",
+                }),
+            ),
+            (
+                "ShouldNotBeCalled",
+                Arc::new(StubCred {
+                    ok: true,
+                    label: "ShouldNotBeCalled",
+                }),
+            ),
         ]);
         let token = chain.get_token(&["aud"], None).await.unwrap();
         assert_eq!(token.token.secret(), "token-from-Winner");
@@ -559,9 +591,27 @@ mod tests {
     #[tokio::test]
     async fn chained_credential_aggregates_class_names_in_failure_message() {
         let chain = ChainedCredential::new(vec![
-            ("Workload", Arc::new(StubCred { ok: false, label: "WorkloadIdentity" })),
-            ("Managed",  Arc::new(StubCred { ok: false, label: "ManagedIdentity" })),
-            ("Dev",      Arc::new(StubCred { ok: false, label: "DeveloperTools" })),
+            (
+                "Workload",
+                Arc::new(StubCred {
+                    ok: false,
+                    label: "WorkloadIdentity",
+                }),
+            ),
+            (
+                "Managed",
+                Arc::new(StubCred {
+                    ok: false,
+                    label: "ManagedIdentity",
+                }),
+            ),
+            (
+                "Dev",
+                Arc::new(StubCred {
+                    ok: false,
+                    label: "DeveloperTools",
+                }),
+            ),
         ]);
         let err = chain.get_token(&["aud"], None).await.expect_err("all fail");
         let msg = format!("{err}");
@@ -578,10 +628,17 @@ mod tests {
     /// populated after subsequent calls.
     #[tokio::test]
     async fn chained_credential_logs_first_success_only_once() {
-        let chain = ChainedCredential::new(vec![
-            ("Winner", Arc::new(StubCred { ok: true, label: "Winner" })),
-        ]);
-        assert!(chain.logged_first_success.get().is_none(), "should start unset");
+        let chain = ChainedCredential::new(vec![(
+            "Winner",
+            Arc::new(StubCred {
+                ok: true,
+                label: "Winner",
+            }),
+        )]);
+        assert!(
+            chain.logged_first_success.get().is_none(),
+            "should start unset"
+        );
         let _ = chain.get_token(&["aud"], None).await.unwrap();
         assert!(
             chain.logged_first_success.get().is_some(),
@@ -634,8 +691,7 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         let margin = Duration::from_secs(60);
         let expires_at = now + margin;
-        validate_token_freshness(now, expires_at, margin)
-            .expect_err("must reject at exact cutoff");
+        validate_token_freshness(now, expires_at, margin).expect_err("must reject at exact cutoff");
     }
 
     // SF-G: max_connections(0) clamps to 1 to satisfy the

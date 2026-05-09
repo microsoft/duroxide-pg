@@ -77,10 +77,7 @@ impl MigrationRunner {
         result
     }
 
-    async fn migrate_inner(
-        &self,
-        conn: &mut sqlx::postgres::PgConnection,
-    ) -> Result<()> {
+    async fn migrate_inner(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<()> {
         // Ensure schema exists
         if self.schema_name != "public" {
             sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", self.schema_name))
@@ -230,7 +227,10 @@ impl MigrationRunner {
     }
 
     /// Get list of applied migration versions
-    async fn get_applied_versions(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<Vec<i64>> {
+    async fn get_applied_versions(
+        &self,
+        conn: &mut sqlx::postgres::PgConnection,
+    ) -> Result<Vec<i64>> {
         let versions: Vec<i64> = sqlx::query_scalar(&format!(
             "SELECT version FROM {}._duroxide_migrations ORDER BY version",
             self.schema_name
@@ -339,7 +339,11 @@ impl MigrationRunner {
     }
 
     /// Apply a single migration
-    async fn apply_migration(&self, conn: &mut sqlx::postgres::PgConnection, migration: &Migration) -> Result<()> {
+    async fn apply_migration(
+        &self,
+        conn: &mut sqlx::postgres::PgConnection,
+        migration: &Migration,
+    ) -> Result<()> {
         // Start transaction
         let mut tx = conn.begin().await?;
 

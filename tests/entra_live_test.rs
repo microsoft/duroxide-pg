@@ -48,8 +48,7 @@ fn unique_schema() -> String {
 }
 
 fn require_env(name: &str) -> String {
-    std::env::var(name)
-        .unwrap_or_else(|_| panic!("{ENABLE_VAR}=1 was set, but {name} is missing"))
+    std::env::var(name).unwrap_or_else(|_| panic!("{ENABLE_VAR}=1 was set, but {name} is missing"))
 }
 
 #[tokio::test]
@@ -97,7 +96,10 @@ async fn entra_live_smoke_test() {
         .await
         .expect("query against live Azure PG must succeed");
     let exists: bool = row.get("exists");
-    assert!(exists, "instances table must exist in test schema after migrations");
+    assert!(
+        exists,
+        "instances table must exist in test schema after migrations"
+    );
 
     // Best-effort cleanup. Failure here doesn't fail the test — the schema is
     // unique per run and easily dropped manually.

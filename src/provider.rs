@@ -86,12 +86,12 @@ pub(crate) enum SqlStateClass {
 /// preserving byte-identical pre-feature behavior (FR-006).
 pub(crate) fn classify_pg_sqlstate(code: Option<&str>, is_entra: bool) -> SqlStateClass {
     match code {
-        Some("40P01") => SqlStateClass::Retryable,        // deadlock
+        Some("40P01") => SqlStateClass::Retryable, // deadlock
         Some("28000") | Some("28P01") if is_entra => SqlStateClass::Retryable, // entra-only
-        Some("40001") => SqlStateClass::Permanent,        // serialization failure
-        Some("23505") => SqlStateClass::Permanent,        // unique violation
-        Some("23503") => SqlStateClass::Permanent,        // FK violation
-        Some("0A000") => SqlStateClass::Retryable,        // cached plan invalidated
+        Some("40001") => SqlStateClass::Permanent, // serialization failure
+        Some("23505") => SqlStateClass::Permanent, // unique violation
+        Some("23503") => SqlStateClass::Permanent, // FK violation
+        Some("0A000") => SqlStateClass::Retryable, // cached plan invalidated
         _ => SqlStateClass::Permanent,
     }
 }
@@ -203,9 +203,9 @@ impl PostgresProvider {
         schema_name: Option<&str>,
         options: EntraAuthOptions,
     ) -> Result<Self> {
-        let token_source = options
-            .default_token_source()
-            .context("Entra credential resolution failed: could not build the default credential chain")?;
+        let token_source = options.default_token_source().context(
+            "Entra credential resolution failed: could not build the default credential chain",
+        )?;
 
         Self::new_with_entra_with_token_source(
             host,
@@ -243,7 +243,9 @@ impl PostgresProvider {
         let token = token_source
             .fetch_token(&[audience.as_str()])
             .await
-            .context("Entra credential resolution failed: could not acquire an initial access token")?;
+            .context(
+                "Entra credential resolution failed: could not acquire an initial access token",
+            )?;
 
         let base_options = build_entra_connect_options(host, port, database, user, ssl_mode);
 
@@ -323,18 +325,26 @@ impl PostgresProvider {
                 let code_opt = db_err.code();
                 let code = code_opt.as_deref();
                 match classify_pg_sqlstate(code, self.is_entra) {
-                    SqlStateClass::Retryable => ProviderError::retryable(operation, match code {
-                        Some("40P01") => format!("Deadlock detected: {e}"),
-                        Some("28000") | Some("28P01") => format!("Authentication error (likely token rotation): {e}"),
-                        Some("0A000") => format!("Cached plan invalidated: {e}"),
-                        _ => format!("Retryable database error: {e}"),
-                    }),
-                    SqlStateClass::Permanent => ProviderError::permanent(operation, match code {
-                        Some("40001") => format!("Serialization failure: {e}"),
-                        Some("23505") => format!("Duplicate detected: {e}"),
-                        Some("23503") => format!("Foreign key violation: {e}"),
-                        _ => format!("Database error: {e}"),
-                    }),
+                    SqlStateClass::Retryable => ProviderError::retryable(
+                        operation,
+                        match code {
+                            Some("40P01") => format!("Deadlock detected: {e}"),
+                            Some("28000") | Some("28P01") => {
+                                format!("Authentication error (likely token rotation): {e}")
+                            }
+                            Some("0A000") => format!("Cached plan invalidated: {e}"),
+                            _ => format!("Retryable database error: {e}"),
+                        },
+                    ),
+                    SqlStateClass::Permanent => ProviderError::permanent(
+                        operation,
+                        match code {
+                            Some("40001") => format!("Serialization failure: {e}"),
+                            Some("23505") => format!("Duplicate detected: {e}"),
+                            Some("23503") => format!("Foreign key violation: {e}"),
+                            _ => format!("Database error: {e}"),
+                        },
+                    ),
                 }
             }
             SqlxError::PoolClosed | SqlxError::PoolTimedOut => {
@@ -475,22 +485,19 @@ async fn run_with_panic_guard<Fut, T>(fut: Fut) -> Result<T, String>
 where
     Fut: std::future::Future<Output = T>,
 {
-    use std::panic::AssertUnwindSafe;
     use futures_util::FutureExt;
+    use std::panic::AssertUnwindSafe;
 
-    AssertUnwindSafe(fut)
-        .catch_unwind()
-        .await
-        .map_err(|panic| {
-            let raw = if let Some(s) = panic.downcast_ref::<&'static str>() {
-                (*s).to_string()
-            } else if let Some(s) = panic.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "<non-string panic payload>".to_string()
-            };
-            truncate_panic_message(raw, ENTRA_PANIC_MSG_TRUNCATION_LIMIT)
-        })
+    AssertUnwindSafe(fut).catch_unwind().await.map_err(|panic| {
+        let raw = if let Some(s) = panic.downcast_ref::<&'static str>() {
+            (*s).to_string()
+        } else if let Some(s) = panic.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".to_string()
+        };
+        truncate_panic_message(raw, ENTRA_PANIC_MSG_TRUNCATION_LIMIT)
+    })
 }
 
 /// Truncate a panic payload to at most `limit` bytes, preserving valid
@@ -665,9 +672,7 @@ fn compute_next_refresh_sleep(
     expires_at: SystemTime,
     now: SystemTime,
 ) -> Duration {
-    let until_expiry = expires_at
-        .duration_since(now)
-        .unwrap_or(Duration::ZERO);
+    let until_expiry = expires_at.duration_since(now).unwrap_or(Duration::ZERO);
 
     let expiry_driven = until_expiry
         .checked_sub(ENTRA_REFRESH_SAFETY_MARGIN)
@@ -1138,10 +1143,7 @@ impl Provider for PostgresProvider {
                     ));
                 }
 
-                return Err(self.sqlx_to_provider_error(
-                    "abandon_orchestration_item",
-                    e,
-                ));
+                return Err(self.sqlx_to_provider_error("abandon_orchestration_item", e));
             }
         };
 
@@ -1684,10 +1686,7 @@ impl Provider for PostgresProvider {
                     ));
                 }
 
-                Err(self.sqlx_to_provider_error(
-                    "renew_orchestration_item_lock",
-                    e,
-                ))
+                Err(self.sqlx_to_provider_error("renew_orchestration_item_lock", e))
             }
         }
     }
@@ -1957,7 +1956,10 @@ impl Provider for PostgresProvider {
     }
 
     #[instrument(skip(self), fields(instance = %instance), target = "duroxide::providers::postgres")]
-    async fn get_instance_stats(&self, instance: &str) -> Result<Option<SystemStats>, ProviderError> {
+    async fn get_instance_stats(
+        &self,
+        instance: &str,
+    ) -> Result<Option<SystemStats>, ProviderError> {
         let row: Option<(bool, i64, i64, i64, i64, i64)> = sqlx::query_as(&format!(
             "SELECT * FROM {}.get_instance_stats($1)",
             self.schema_name
@@ -1968,15 +1970,20 @@ impl Provider for PostgresProvider {
         .map_err(|e| self.sqlx_to_provider_error("get_instance_stats", e))?;
 
         match row {
-            Some((true, history_event_count, history_size_bytes, queue_pending_count, kv_user_key_count, kv_total_value_bytes)) => {
-                Ok(Some(SystemStats {
-                    history_event_count: history_event_count as u64,
-                    history_size_bytes: history_size_bytes as u64,
-                    queue_pending_count: queue_pending_count as u64,
-                    kv_user_key_count: kv_user_key_count as u64,
-                    kv_total_value_bytes: kv_total_value_bytes as u64,
-                }))
-            }
+            Some((
+                true,
+                history_event_count,
+                history_size_bytes,
+                queue_pending_count,
+                kv_user_key_count,
+                kv_total_value_bytes,
+            )) => Ok(Some(SystemStats {
+                history_event_count: history_event_count as u64,
+                history_size_bytes: history_size_bytes as u64,
+                queue_pending_count: queue_pending_count as u64,
+                kv_user_key_count: kv_user_key_count as u64,
+                kv_total_value_bytes: kv_total_value_bytes as u64,
+            })),
             _ => Ok(None),
         }
     }
@@ -2561,7 +2568,8 @@ mod tests {
 
     #[test]
     fn build_entra_connect_options_uses_verify_full() {
-        let opts = build_entra_connect_options("h.example.com", 5432, "db", "u", PgSslMode::VerifyFull);
+        let opts =
+            build_entra_connect_options("h.example.com", 5432, "db", "u", PgSslMode::VerifyFull);
         assert!(matches!(opts.get_ssl_mode(), PgSslMode::VerifyFull));
         assert_eq!(opts.get_host(), "h.example.com");
         assert_eq!(opts.get_port(), 5432);
@@ -2618,7 +2626,8 @@ mod tests {
         // Use a lazy pool so we don't actually need a live database; the
         // refresh task only calls Pool::set_connect_options, which doesn't
         // open a connection by itself.
-        let base_options = build_entra_connect_options("127.0.0.1", 5432, "db", "u", PgSslMode::VerifyFull);
+        let base_options =
+            build_entra_connect_options("127.0.0.1", 5432, "db", "u", PgSslMode::VerifyFull);
         let pool: Arc<PgPool> = Arc::new(
             PgPoolOptions::new()
                 .max_connections(1)
@@ -2656,20 +2665,22 @@ mod tests {
     async fn audience_override_is_passed_to_token_source() {
         let fake = RecordingFakeTokenSource::with_tokens(vec![token("t", 3600)]);
         let source: Arc<dyn TokenSource> = fake.clone();
-        let opts = crate::entra::EntraAuthOptions::new()
-            .audience("https://custom.example/.default");
+        let opts =
+            crate::entra::EntraAuthOptions::new().audience("https://custom.example/.default");
         let _t = source.fetch_token(&[opts.audience_str()]).await.unwrap();
         let scopes = fake.recorded_scopes();
         assert_eq!(scopes.len(), 1);
-        assert_eq!(scopes[0], vec!["https://custom.example/.default".to_string()]);
+        assert_eq!(
+            scopes[0],
+            vec!["https://custom.example/.default".to_string()]
+        );
     }
 
     #[tokio::test]
     async fn missing_credential_surfaces_descriptive_error() {
         let fake = RecordingFakeTokenSource::always_failing("no credential available");
         let source: Arc<dyn TokenSource> = fake;
-        let result: anyhow::Result<crate::entra::EntraToken> =
-            source.fetch_token(&["aud"]).await;
+        let result: anyhow::Result<crate::entra::EntraToken> = source.fetch_token(&["aud"]).await;
         let err = result.expect_err("should fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("no credential available"), "got: {msg}");
@@ -2725,8 +2736,14 @@ mod tests {
         use crate::entra::test_support::token;
         let t = token("super-secret-bearer-string", 3600);
         let debug = format!("{t:?}");
-        assert!(!debug.contains("super-secret-bearer-string"), "leaked: {debug}");
-        assert!(debug.contains("<redacted>"), "expected redaction marker: {debug}");
+        assert!(
+            !debug.contains("super-secret-bearer-string"),
+            "leaked: {debug}"
+        );
+        assert!(
+            debug.contains("<redacted>"),
+            "expected redaction marker: {debug}"
+        );
     }
 
     #[test]
@@ -2734,19 +2751,46 @@ mod tests {
         use crate::provider::{classify_pg_sqlstate, SqlStateClass};
 
         // 28000/28P01 are RETRYABLE only on the Entra path.
-        assert_eq!(classify_pg_sqlstate(Some("28000"), true), SqlStateClass::Retryable);
-        assert_eq!(classify_pg_sqlstate(Some("28P01"), true), SqlStateClass::Retryable);
+        assert_eq!(
+            classify_pg_sqlstate(Some("28000"), true),
+            SqlStateClass::Retryable
+        );
+        assert_eq!(
+            classify_pg_sqlstate(Some("28P01"), true),
+            SqlStateClass::Retryable
+        );
 
         // On the password path they remain PERMANENT (FR-006 byte-identical).
-        assert_eq!(classify_pg_sqlstate(Some("28000"), false), SqlStateClass::Permanent);
-        assert_eq!(classify_pg_sqlstate(Some("28P01"), false), SqlStateClass::Permanent);
+        assert_eq!(
+            classify_pg_sqlstate(Some("28000"), false),
+            SqlStateClass::Permanent
+        );
+        assert_eq!(
+            classify_pg_sqlstate(Some("28P01"), false),
+            SqlStateClass::Permanent
+        );
 
         // Unrelated codes are unaffected by is_entra.
-        assert_eq!(classify_pg_sqlstate(Some("40P01"), true), SqlStateClass::Retryable);
-        assert_eq!(classify_pg_sqlstate(Some("40P01"), false), SqlStateClass::Retryable);
-        assert_eq!(classify_pg_sqlstate(Some("23505"), true), SqlStateClass::Permanent);
-        assert_eq!(classify_pg_sqlstate(Some("23505"), false), SqlStateClass::Permanent);
-        assert_eq!(classify_pg_sqlstate(Some("0A000"), true), SqlStateClass::Retryable);
+        assert_eq!(
+            classify_pg_sqlstate(Some("40P01"), true),
+            SqlStateClass::Retryable
+        );
+        assert_eq!(
+            classify_pg_sqlstate(Some("40P01"), false),
+            SqlStateClass::Retryable
+        );
+        assert_eq!(
+            classify_pg_sqlstate(Some("23505"), true),
+            SqlStateClass::Permanent
+        );
+        assert_eq!(
+            classify_pg_sqlstate(Some("23505"), false),
+            SqlStateClass::Permanent
+        );
+        assert_eq!(
+            classify_pg_sqlstate(Some("0A000"), true),
+            SqlStateClass::Retryable
+        );
         assert_eq!(classify_pg_sqlstate(None, true), SqlStateClass::Permanent);
     }
 
@@ -2766,9 +2810,8 @@ mod tests {
     #[tokio::test]
     async fn run_with_panic_guard_handles_non_string_panic_payload() {
         // Boxed integer panic payload — exercises the fallback branch.
-        let result: Result<(), String> = run_with_panic_guard(async {
-            std::panic::panic_any(42_i32)
-        }).await;
+        let result: Result<(), String> =
+            run_with_panic_guard(async { std::panic::panic_any(42_i32) }).await;
         let msg = result.expect_err("must catch");
         assert!(msg.contains("non-string panic payload"), "got: {msg}");
     }
@@ -2809,13 +2852,20 @@ mod tests {
         // verbatim — protects against secret leakage via panic payload.
         let result: Result<(), String> = run_with_panic_guard(async {
             panic!("{}", "S".repeat(10_000));
-        }).await;
+        })
+        .await;
         let msg = result.expect_err("must catch");
-        assert!(msg.len() < 10_000, "panic message not truncated: len={}", msg.len());
-        assert!(msg.ends_with("…[truncated]"), "missing truncation marker: {msg}");
+        assert!(
+            msg.len() < 10_000,
+            "panic message not truncated: len={}",
+            msg.len()
+        );
+        assert!(
+            msg.ends_with("…[truncated]"),
+            "missing truncation marker: {msg}"
+        );
     }
 }
-
 
 /// Integration tests that exercise the full Entra construction pipeline
 /// (token → connect-options → pool → migrations) against a real local
@@ -2910,7 +2960,9 @@ mod entra_pipeline_tests {
 
     #[tokio::test]
     async fn pipeline_with_injected_token_authenticates_and_runs_migrations() {
-        let Some((host, port, db, user, password)) = pg_connection_or_skip() else { return; };
+        let Some((host, port, db, user, password)) = pg_connection_or_skip() else {
+            return;
+        };
 
         let token_source: Arc<dyn TokenSource> =
             RecordingFakeTokenSource::with_tokens(vec![token(&password, 3600)]);
@@ -2949,7 +3001,9 @@ mod entra_pipeline_tests {
 
     #[tokio::test]
     async fn pipeline_with_wrong_token_fails_before_migrations() {
-        let Some((host, port, db, user, _password)) = pg_connection_or_skip() else { return; };
+        let Some((host, port, db, user, _password)) = pg_connection_or_skip() else {
+            return;
+        };
 
         let token_source: Arc<dyn TokenSource> =
             RecordingFakeTokenSource::with_tokens(vec![token("definitely-wrong-password", 3600)]);
@@ -2976,7 +3030,9 @@ mod entra_pipeline_tests {
         // 28000 for invalid_authorization_specification, depending on auth
         // method. Either way the error must mention authentication.
         assert!(
-            msg.to_lowercase().contains("password") || msg.contains("28P01") || msg.contains("28000"),
+            msg.to_lowercase().contains("password")
+                || msg.contains("28P01")
+                || msg.contains("28000"),
             "expected authentication failure, got: {msg}"
         );
     }
@@ -2986,7 +3042,9 @@ mod entra_pipeline_tests {
         // Exercises the no-schema variant (passes `None` for schema_name) so
         // that the public `new_with_entra` code path's "default schema =
         // public" handling is covered through the same internal seam.
-        let Some((host, port, db, user, password)) = pg_connection_or_skip() else { return; };
+        let Some((host, port, db, user, password)) = pg_connection_or_skip() else {
+            return;
+        };
 
         // We don't migrate against `public` (would pollute the dev DB).
         // Instead, prove that the constructor attempts to connect with the

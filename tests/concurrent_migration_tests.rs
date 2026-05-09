@@ -50,12 +50,8 @@ async fn concurrent_startup_migration_race() {
     let s2 = schema.clone();
 
     // Spawn two concurrent provider initializations on the same fresh schema.
-    let h1 = tokio::spawn(async move {
-        PostgresProvider::new_with_schema(&url1, Some(&s1)).await
-    });
-    let h2 = tokio::spawn(async move {
-        PostgresProvider::new_with_schema(&url2, Some(&s2)).await
-    });
+    let h1 = tokio::spawn(async move { PostgresProvider::new_with_schema(&url1, Some(&s1)).await });
+    let h2 = tokio::spawn(async move { PostgresProvider::new_with_schema(&url2, Some(&s2)).await });
 
     let (r1, r2) = tokio::join!(h1, h2);
 

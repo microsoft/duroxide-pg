@@ -2791,9 +2791,10 @@ async fn sample_kv_read_modify_write_counter() {
     let (store, schema_name) = common::create_postgres_store().await;
 
     let activities = ActivityRegistry::builder()
-        .register("ProcessBatch", |_ctx: ActivityContext, batch: String| async move {
-            Ok(format!("processed:{batch}"))
-        })
+        .register(
+            "ProcessBatch",
+            |_ctx: ActivityContext, batch: String| async move { Ok(format!("processed:{batch}")) },
+        )
         .build();
     let orchestrations = OrchestrationRegistry::builder()
         .register(
@@ -2815,7 +2816,9 @@ async fn sample_kv_read_modify_write_counter() {
                     ctx.set_kv_value("last_result", &result);
                 }
 
-                Ok(ctx.get_kv_value("batches_processed").unwrap_or("0".to_string()))
+                Ok(ctx
+                    .get_kv_value("batches_processed")
+                    .unwrap_or("0".to_string()))
             },
         )
         .build();
@@ -2852,7 +2855,10 @@ async fn sample_kv_read_modify_write_counter() {
         Some("3".to_string()),
     );
     assert_eq!(
-        client.get_kv_value("batch-proc", "last_result").await.unwrap(),
+        client
+            .get_kv_value("batch-proc", "last_result")
+            .await
+            .unwrap(),
         Some("processed:gamma".to_string()),
     );
 
@@ -2866,25 +2872,33 @@ async fn sample_orchestration_stats() {
     let (store, schema_name) = common::create_postgres_store().await;
 
     let activities = ActivityRegistry::builder()
-        .register("FetchData", |_ctx: ActivityContext, url: String| async move {
-            Ok(format!("data from {url}"))
-        })
+        .register(
+            "FetchData",
+            |_ctx: ActivityContext, url: String| async move { Ok(format!("data from {url}")) },
+        )
         .build();
     let orchestrations = OrchestrationRegistry::builder()
-        .register("DataPipeline", |ctx: OrchestrationContext, _: String| async move {
-            let result = ctx
-                .schedule_activity("FetchData", "https://api.example.com".to_string())
-                .await?;
-            ctx.set_kv_value("last_fetch", &result);
-            ctx.set_kv_value("status", "complete");
-            Ok(result)
-        })
+        .register(
+            "DataPipeline",
+            |ctx: OrchestrationContext, _: String| async move {
+                let result = ctx
+                    .schedule_activity("FetchData", "https://api.example.com".to_string())
+                    .await?;
+                ctx.set_kv_value("last_fetch", &result);
+                ctx.set_kv_value("status", "complete");
+                Ok(result)
+            },
+        )
         .build();
 
     let rt = runtime::Runtime::start_with_store(store.clone(), activities, orchestrations).await;
     let client = Client::new(store.clone());
 
-    assert!(client.get_orchestration_stats("missing").await.unwrap().is_none());
+    assert!(client
+        .get_orchestration_stats("missing")
+        .await
+        .unwrap()
+        .is_none());
 
     client
         .start_orchestration("pipeline-1", "DataPipeline", "")
