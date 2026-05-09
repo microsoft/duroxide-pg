@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.31] - 2026-04-29
+
+### Added
+
+- **Microsoft Entra ID authentication** for Azure Database for PostgreSQL
+  Flexible Server. Two new constructors,
+  `PostgresProvider::new_with_entra` and
+  `PostgresProvider::new_with_schema_and_entra`, accept an
+  `EntraAuthOptions` configuration and authenticate via Entra access tokens
+  instead of a static password. A background task refreshes the token before
+  expiry and swaps it into the connection pool via
+  `sqlx::Pool::set_connect_options`. The default credential chain is
+  `[WorkloadIdentityCredential (when AKS federated env vars are present),
+  ManagedIdentityCredential, DeveloperToolsCredential]`, covering managed
+  identities, AKS Workload Identity, and `az login` developer flows. All Entra
+  connections are pinned to `PgSslMode::VerifyFull`. Brief auth-failure
+  windows during token rotation (SQLSTATE `28000` / `28P01`) are classified as
+  retryable on Entra-configured providers only — password-based providers keep
+  byte-identical classification. The refresh task is wrapped in a panic guard
+  so a credential SDK panic cannot tear down the runtime, and the cached
+  `EntraToken`'s `Debug` impl redacts the bearer secret.
+- New dependencies: `azure_core` 0.35, `azure_identity` 0.35, and a thin
+  `futures-util` (std-only) for `catch_unwind`. Both Azure crates are pinned
+  with `default-features = false` and only the native-tls-backed feature set
+  (`reqwest`/`reqwest_deflate`/`reqwest_gzip`/`tokio`) is enabled, so the
+  resolved dependency graph contains no rustls-based TLS crates — the
+  FIPS-aligned native-tls posture from 0.1.30 is preserved. Verified with
+  `cargo tree --target x86_64-unknown-linux-gnu --all-features --all-targets`
+  and a fresh `Cargo.lock`.
+- **Entra test coverage** — Two new test layers exercise the Entra
+  integration. (1) `mod entra_pipeline_tests` (in `src/provider.rs`) uses a
+  crate-internal `pub(crate) new_with_entra_with_token_source` seam to
+  inject a fake `TokenSource` against a local PostgreSQL, covering the full
+  token → connect-options → pool → migrations pipeline (positive, negative,
+  and schema-isolated cases) without an Azure dependency. (2)
+  `tests/entra_live_test.rs` provides an opt-in (`#[ignore]`) live smoke
+  test against a real Azure Database for PostgreSQL, gated by
+  `DUROXIDE_PG_ENTRA_LIVE_TEST=1`.
+
 ## [0.1.30] - 2026-04-23
 
 ### Changed
