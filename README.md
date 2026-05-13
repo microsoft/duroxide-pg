@@ -184,15 +184,15 @@ Two test layers cover the Entra integration:
 - Orchestration stats introspection via `Client::get_orchestration_stats()`
 - Microsoft Entra ID authentication for Azure Database for PostgreSQL (managed identity, Workload Identity, az CLI)
 
-## Latest Release (0.1.32)
+## Latest Release (0.1.33)
 
-- Bumped `duroxide` core dependency to `0.1.29`. The core 0.1.29 release replaces `futures::join_all`/`join`/`select_biased!` with replay-safe crate-local combinators that eliminate a latent large-fan-in (≥ 1024 children) replay hang. No provider-level code or schema changes required.
+- Fix: add `native-tls` feature to the `reqwest` dependency so HTTPS calls compiled into the crate (including AAD token acquisition for `connectWithEntra` / `connectWithSchemaAndEntra`) work end-to-end. Prior 0.1.32 binaries failed with `error sending request` / `invalid URL, scheme is not http` whenever Entra auth was used.
+- No API changes; no migrations required.
 - See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
-## Previous Release (0.1.31)
+## Previous Release (0.1.32)
 
-- Added Microsoft Entra ID authentication for Azure Database for PostgreSQL Flexible Server. New constructors `PostgresProvider::new_with_entra` and `PostgresProvider::new_with_schema_and_entra` accept an `EntraAuthOptions` and authenticate via Entra access tokens; a background task refreshes the token before expiry and swaps it into the connection pool.
-- Default credential chain is `[WorkloadIdentityCredential (when AKS federated env vars are set), ManagedIdentityCredential, DeveloperToolsCredential]`, with `PgSslMode::VerifyFull` pinned for all Entra connections.
+- Bumped `duroxide` core dependency to `0.1.29`. The core 0.1.29 release replaces `futures::join_all`/`join`/`select_biased!` with replay-safe crate-local combinators that eliminate a latent large-fan-in (≥ 1024 children) replay hang. No provider-level code or schema changes required.
 
 ## License
 
