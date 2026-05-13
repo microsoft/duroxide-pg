@@ -97,7 +97,7 @@ bug fix.
 
 ## Phase Status
 - [x] **Phase 1: Apply Cargo.toml fix, regression test, version bump, CHANGELOG**
-- [ ] **Phase 2: Documentation** — `Docs.md` operator-facing note
+- [x] **Phase 2: Documentation** — `Docs.md` operator-facing note
 
 ## Phase Candidates
 - [ ] Improve `provider.rs:246` error surfacing so the chained credential
