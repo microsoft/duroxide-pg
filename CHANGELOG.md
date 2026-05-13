@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.33] - 2026-05-13
+
+### Fixed
+
+- **HTTPS connector missing from Entra credential chain.** Every HTTPS
+  request issued by the Microsoft Entra credential chain — including
+  `WorkloadIdentityCredential` (AKS / federated identity),
+  `ManagedIdentityCredential` (when going through AAD over HTTPS), and
+  the `ClientAssertionCredential` token endpoint — failed at hyper's
+  connector layer with `"invalid URL, scheme is not http"` before any
+  network I/O occurred. As a result, `PostgresProvider::new_with_entra`
+  and `new_with_schema_and_entra` were unreachable in production
+  topologies that rely on Workload Identity (the developer-tools
+  branch via `az login` was unaffected, which is why CI did not catch
+  the regression). Root cause: `azure_core`'s `reqwest` feature flows
+  through `typespec_client_core/reqwest`, which declares the optional
+  reqwest dep with `default-features = false`. With no TLS feature
+  enabled on the resolved reqwest build, hyper rejected every HTTPS URL
+  at the connector layer. Fixed by declaring an explicit
+  `reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }`
+  dep in `Cargo.toml`. Cargo feature unification activates the
+  native-tls (openssl-backed) connector on the resolved reqwest build
+  without modifying any source code, preserving the crate's FIPS-
+  compliance posture (no rustls / ring / aws-lc-rs in the resolved
+  graph). Added a regression test
+  (`tests/native_tls_regression.rs`) that constructs the
+  `azure_core::http` client used by `azure_identity` and asserts the
+  TLS connector accepts `https://` URLs.
+
 ## [0.1.32] - 2026-05-08
 
 **Release:** <https://github.com/microsoft/duroxide-pg/releases/tag/v0.1.32>
