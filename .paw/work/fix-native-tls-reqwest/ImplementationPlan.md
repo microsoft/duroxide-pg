@@ -100,13 +100,25 @@ bug fix.
 - [x] **Phase 2: Documentation** — `Docs.md` operator-facing note
 
 ## Phase Candidates
-- [ ] Improve `provider.rs:246` error surfacing so the chained credential
-  aggregate (`src/entra.rs:358-366`) is visible at `Display`, not only at
-  `{:#}` or via `Error::source()` traversal. Today the actual chain
-  failure is invisible to callers.
-- [ ] Add a Workload-Identity smoke test to CI (requires deployed AKS test
-  resource and a federated identity credential). Closes the test-coverage
-  gap that allowed this bug to ship.
+
+Both items below were captured during planning as adjacent improvements
+but are explicitly **deferred** as out of scope for this bug-fix release
+(0.1.33). They are also called out in `What We're NOT Doing`. Resolution
+recorded here; no `- [ ]` items remain.
+
+- [x] **Deferred:** Improve `provider.rs:246` error surfacing so the
+  chained credential aggregate (`src/entra.rs:358-366`) is visible at
+  `Display`, not only at `{:#}` or via `Error::source()` traversal. The
+  bug being fixed in 0.1.33 made this error chain matter operationally,
+  but improving error formatting is a separate (and breaking-shape)
+  change. Recommend filing as a follow-up issue against
+  microsoft/duroxide-pg.
+- [x] **Deferred:** Add a Workload-Identity smoke test to CI. Requires
+  an AKS test resource and a federated identity credential — too much
+  scope for a bug-fix patch release. Recommend filing as a follow-up
+  issue and reusing the
+  `.paw/work/fix-native-tls-reqwest/Docs.md` § "Live verification"
+  procedure when that work is taken up.
 
 ---
 
