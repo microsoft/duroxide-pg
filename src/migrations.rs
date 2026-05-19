@@ -77,6 +77,64 @@ impl MigrationRunner {
         result
     }
 
+    /// Verify that the migration tracking table exists and that every embedded
+    /// migration has already been applied. Does not take the migration
+    /// advisory lock and does not create or modify any database objects.
+    ///
+    /// Returns an error if the `_duroxide_migrations` table is missing in
+    /// `schema_name` or if any bundled migration version is absent from it.
+    ///
+    /// Intended for processes that must not perform DDL (e.g. application
+    /// backends, where a separately privileged worker is responsible for
+    /// applying schema changes).
+    pub async fn verify(&self) -> Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        let conn = &mut *conn;
+
+        // Check that the tracking table exists in the target schema.
+        let table_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_name = '_duroxide_migrations')",
+        )
+        .bind(&self.schema_name)
+        .fetch_one(&mut *conn)
+        .await?;
+
+        if !table_exists {
+            anyhow::bail!(
+                "duroxide migrations not initialized: schema {:?} does not \
+                 contain _duroxide_migrations. Construct a provider with \
+                 MigrationPolicy::ApplyAll (the default) from a process with \
+                 DDL privileges before using MigrationPolicy::VerifyOnly.",
+                self.schema_name
+            );
+        }
+
+        let migrations = self.load_migrations()?;
+        let applied: std::collections::HashSet<i64> =
+            self.get_applied_versions(conn).await?.into_iter().collect();
+
+        let mut missing: Vec<i64> = migrations
+            .iter()
+            .map(|m| m.version)
+            .filter(|v| !applied.contains(v))
+            .collect();
+        missing.sort_unstable();
+
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "duroxide migrations not up to date in schema {:?}: missing \
+                 versions {:?}. Run migrations from a provider configured with \
+                 MigrationPolicy::ApplyAll before constructing VerifyOnly \
+                 providers.",
+                self.schema_name,
+                missing,
+            );
+        }
+
+        Ok(())
+    }
+
     async fn migrate_inner(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<()> {
         // Ensure schema exists
         if self.schema_name != "public" {

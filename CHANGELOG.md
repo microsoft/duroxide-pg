@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Configurable migration policy at provider construction.** New
+  `MigrationPolicy` enum and `ProviderConfig` struct, plus two new
+  constructors `PostgresProvider::new_with_config` and
+  `PostgresProvider::new_with_schema_and_config`. The default policy is
+  `MigrationPolicy::ApplyAll`, which preserves pre-feature behavior — all
+  existing constructors (`new`, `new_with_schema`, `new_with_entra`,
+  `new_with_schema_and_entra`) continue to apply pending migrations on
+  startup. The new `MigrationPolicy::VerifyOnly` policy skips migration
+  application and instead verifies that the `_duroxide_migrations` tracking
+  table exists in the target schema and that every embedded migration has
+  already been applied, returning an error otherwise. Intended for
+  processes that must not run DDL — e.g. application backends, where a
+  separately privileged worker is responsible for applying schema
+  changes. `VerifyOnly` does not take the migration advisory lock and does
+  not create or modify any database objects.
+
 ## [0.1.33] - 2026-05-13
 
 ### Fixed

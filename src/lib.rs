@@ -82,4 +82,4 @@ pub mod migrations;
 pub mod provider;
 
 pub use entra::EntraAuthOptions;
-pub use provider::PostgresProvider;
+pub use provider::{MigrationPolicy, PostgresProvider, ProviderConfig};

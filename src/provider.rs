@@ -107,6 +107,51 @@ pub struct PostgresProvider {
     _refresh_task: Option<AbortOnDropHandle>,
 }
 
+/// Migration policy applied at [`PostgresProvider`] construction.
+///
+/// Defaults to [`MigrationPolicy::ApplyAll`], preserving pre-feature behavior:
+/// all constructors that do not take a [`ProviderConfig`] apply pending
+/// migrations on startup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MigrationPolicy {
+    /// Apply any pending embedded migrations at startup. Default.
+    ///
+    /// Requires the database role to have DDL privileges on `schema_name`
+    /// (or `public` if none was supplied).
+    #[default]
+    ApplyAll,
+    /// Skip migration application. Verify that the `_duroxide_migrations`
+    /// tracking table exists and every embedded migration has already been
+    /// applied; return an error otherwise.
+    ///
+    /// Intended for processes that must not run DDL — e.g. application
+    /// backends, when a separately privileged worker is responsible for
+    /// applying schema changes.
+    VerifyOnly,
+}
+
+/// Optional configuration for [`PostgresProvider`] constructors.
+///
+/// Construct via [`ProviderConfig::default`] and adjust fields as needed:
+///
+/// ```rust,no_run
+/// use duroxide_pg::{MigrationPolicy, PostgresProvider, ProviderConfig};
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let mut config = ProviderConfig::default();
+/// config.migration_policy = MigrationPolicy::VerifyOnly;
+/// let provider =
+///     PostgresProvider::new_with_config("postgres://localhost/mydb", config).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ProviderConfig {
+    /// Policy for handling embedded migrations at startup.
+    pub migration_policy: MigrationPolicy,
+}
+
 /// Newtype around `tokio::task::AbortHandle` that aborts the task on drop.
 /// Used to ensure the Entra token refresh task is cleaned up when the
 /// provider is dropped.
@@ -124,6 +169,24 @@ impl PostgresProvider {
     }
 
     pub async fn new_with_schema(database_url: &str, schema_name: Option<&str>) -> Result<Self> {
+        Self::new_with_schema_and_config(database_url, schema_name, ProviderConfig::default()).await
+    }
+
+    /// Same as [`Self::new`] but accepts a [`ProviderConfig`] to control
+    /// startup behavior (currently: migration application policy).
+    pub async fn new_with_config(database_url: &str, config: ProviderConfig) -> Result<Self> {
+        Self::new_with_schema_and_config(database_url, None, config).await
+    }
+
+    /// Same as [`Self::new_with_schema`] but accepts a [`ProviderConfig`].
+    ///
+    /// Use this constructor to skip migration application in processes that
+    /// must not run DDL — see [`MigrationPolicy::VerifyOnly`].
+    pub async fn new_with_schema_and_config(
+        database_url: &str,
+        schema_name: Option<&str>,
+        config: ProviderConfig,
+    ) -> Result<Self> {
         let max_connections = std::env::var("DUROXIDE_PG_POOL_MAX")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -145,9 +208,12 @@ impl PostgresProvider {
             _refresh_task: None,
         };
 
-        // Run migrations to initialize schema
+        // Apply the configured migration policy.
         let migration_runner = MigrationRunner::new(provider.pool.clone(), schema_name.clone());
-        migration_runner.migrate().await?;
+        match config.migration_policy {
+            MigrationPolicy::ApplyAll => migration_runner.migrate().await?,
+            MigrationPolicy::VerifyOnly => migration_runner.verify().await?,
+        }
 
         Ok(provider)
     }
