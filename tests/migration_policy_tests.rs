@@ -123,3 +123,135 @@ async fn verify_only_errors_against_uninitialized_schema() {
         "VerifyOnly should not create schema {schema}"
     );
 }
+
+#[tokio::test]
+async fn verify_only_rejects_unknown_migrations() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    // Bring the schema up to date via ApplyAll.
+    let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("bootstrap apply");
+
+    // Insert an "unknown" migration version directly into the tracking table.
+    sqlx::query(&format!(
+        "INSERT INTO {schema}._duroxide_migrations (version, name) VALUES ($1, $2)"
+    ))
+    .bind(9_999_i64)
+    .bind("9999_future.sql")
+    .execute(bootstrap.pool())
+    .await
+    .expect("insert unknown migration row");
+    drop(bootstrap);
+
+    // VerifyOnly must refuse to claim a schema that is ahead of the code.
+    let mut config = ProviderConfig::default();
+    config.migration_policy = MigrationPolicy::VerifyOnly;
+
+    let result =
+        PostgresProvider::new_with_schema_and_config(&database_url, Some(&schema), config).await;
+    let msg = match result {
+        Ok(_) => panic!("VerifyOnly must reject unknown applied migrations"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        msg.contains("not recognized") && msg.contains("9999"),
+        "expected ahead-of-code error mentioning the unknown version; got: {msg}"
+    );
+
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn apply_all_unknown_migrations_causes_no_mutations() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    // Fully initialize the schema.
+    let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("bootstrap apply");
+
+    // Snapshot the applied migrations before the perturbation.
+    let before: Vec<(i64, String)> = sqlx::query_as(&format!(
+        "SELECT version, name FROM {schema}._duroxide_migrations ORDER BY version"
+    ))
+    .fetch_all(bootstrap.pool())
+    .await
+    .expect("read migrations");
+    let last_version = before.last().expect("at least one bundled migration").0;
+
+    // Create a "pending migration" condition by removing the last real
+    // migration record, drop a core table to disable the re-apply-if-missing
+    // path, then insert an unknown future migration.
+    sqlx::query(&format!(
+        "DELETE FROM {schema}._duroxide_migrations WHERE version = $1"
+    ))
+    .bind(last_version)
+    .execute(bootstrap.pool())
+    .await
+    .expect("delete last migration");
+
+    sqlx::query(&format!("DROP TABLE {schema}.instances"))
+        .execute(bootstrap.pool())
+        .await
+        .expect("drop instances table");
+
+    sqlx::query(&format!(
+        "INSERT INTO {schema}._duroxide_migrations (version, name) VALUES ($1, $2)"
+    ))
+    .bind(9_999_i64)
+    .bind("9999_future.sql")
+    .execute(bootstrap.pool())
+    .await
+    .expect("insert unknown migration row");
+
+    drop(bootstrap);
+
+    // ApplyAll must short-circuit on the unknown migration and run no DDL.
+    let result = PostgresProvider::new_with_schema(&database_url, Some(&schema)).await;
+    let msg = match result {
+        Ok(_) => panic!("ApplyAll must reject unknown applied migrations"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        msg.contains("not recognized") && msg.contains("9999"),
+        "expected ahead-of-code error; got: {msg}"
+    );
+
+    // Prove no DDL fired: the deleted real migration is still absent and the
+    // dropped core table is still missing.
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect for verification");
+
+    let after_versions: Vec<i64> = sqlx::query_scalar(&format!(
+        "SELECT version FROM {schema}._duroxide_migrations"
+    ))
+    .fetch_all(&pool)
+    .await
+    .expect("read migrations after rejection");
+    assert!(
+        !after_versions.contains(&last_version),
+        "migrate_inner should not have re-applied migration {last_version}; \
+         current set: {after_versions:?}"
+    );
+
+    let instances_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
+         WHERE table_schema = $1 AND table_name = 'instances')",
+    )
+    .bind(&schema)
+    .fetch_one(&pool)
+    .await
+    .expect("check instances table after rejection");
+    assert!(
+        !instances_exists,
+        "migrate_inner should not have recreated the instances table"
+    );
+
+    drop_schema(&schema).await;
+}

@@ -71,7 +71,14 @@ impl MigrationRunner {
         let conn = &mut *conn;
         self.lock_for_migrations(conn).await?;
 
-        let result = self.migrate_inner(conn).await;
+        // Reject unknown migrations while holding the advisory lock so that an
+        // older binary cannot rewrite a schema that is ahead of its code.
+        // Short-circuit: do NOT run migrate_inner if unknown migrations are
+        // detected.
+        let result = match self.check_no_unknown_migrations(conn).await {
+            Ok(()) => self.migrate_inner(conn).await,
+            Err(e) => Err(e),
+        };
         self.unlock_for_migrations(conn).await;
 
         result
@@ -110,6 +117,10 @@ impl MigrationRunner {
             );
         }
 
+        // Reject schemas that have migrations the running binary does not
+        // recognize (schema is ahead of the code).
+        self.check_no_unknown_migrations(conn).await?;
+
         let migrations = self.load_migrations()?;
         let applied: std::collections::HashSet<i64> =
             self.get_applied_versions(conn).await?.into_iter().collect();
@@ -129,6 +140,57 @@ impl MigrationRunner {
                  providers.",
                 self.schema_name,
                 missing,
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Check that the database has no migrations the running binary does not
+    /// recognize. Used by both `migrate()` (to refuse running DDL against a
+    /// schema ahead of the code) and `verify()` (to refuse claiming
+    /// successful verification of an unknown schema).
+    ///
+    /// Returns `Ok(())` if the tracking table does not yet exist: under
+    /// `ApplyAll` it will be created by `migrate_inner`, and under
+    /// `VerifyOnly` the missing table is reported separately before this is
+    /// called.
+    async fn check_no_unknown_migrations(
+        &self,
+        conn: &mut sqlx::postgres::PgConnection,
+    ) -> Result<()> {
+        let tracking_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_name = '_duroxide_migrations')",
+        )
+        .bind(&self.schema_name)
+        .fetch_one(&mut *conn)
+        .await?;
+
+        if !tracking_exists {
+            return Ok(());
+        }
+
+        let applied = self.get_applied_versions(conn).await?;
+        let expected: std::collections::HashSet<i64> = self
+            .load_migrations()?
+            .into_iter()
+            .map(|m| m.version)
+            .collect();
+
+        let mut unknown: Vec<i64> = applied
+            .into_iter()
+            .filter(|v| !expected.contains(v))
+            .collect();
+        unknown.sort_unstable();
+
+        if !unknown.is_empty() {
+            anyhow::bail!(
+                "schema {:?} has migrations not recognized by this version of \
+                 the code: {:?}. The database schema is ahead of the code. \
+                 Update the code to a compatible version.",
+                self.schema_name,
+                unknown,
             );
         }
 

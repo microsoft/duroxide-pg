@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Reject schemas ahead of the running binary.** Both `MigrationPolicy::ApplyAll`
+  and `MigrationPolicy::VerifyOnly` now fail fast when the `_duroxide_migrations`
+  tracking table records migration versions that are not bundled with the
+  running binary. Under `ApplyAll` the check runs under the migration advisory
+  lock and short-circuits before any DDL is executed, so an older binary
+  cannot rewrite a schema that is ahead of its code. The error message names
+  the unknown versions and instructs the operator to update the code.
+
 - **Configurable migration policy at provider construction.** New
   `MigrationPolicy` enum and `ProviderConfig` struct, plus two new
   constructors `PostgresProvider::new_with_config` and
