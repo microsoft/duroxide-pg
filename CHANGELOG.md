@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (unreleased API surface only):** Collapsed all `*_with_config`
+  and Entra-specific constructors into a single
+  `PostgresProvider::new_with_config(ProviderConfig)`. `ProviderConfig` now
+  carries the connection variant via a new `ConnectionConfig` enum
+  (`Url(String)` or `Entra { host, port, database, user, options }`),
+  the optional schema name, and the migration policy. Construct via
+  `ProviderConfig::url(database_url)` or
+  `ProviderConfig::entra(host, port, db, user, options)` and adjust fields
+  as needed. The previously unreleased `new_with_config(url, config)` and
+  `new_with_schema_and_config(url, schema, config)` constructors are
+  removed. `new(url)` and `new_with_schema(url, schema)` remain as
+  convenience wrappers.
+
+### Deprecated
+
+- `PostgresProvider::new_with_entra` and
+  `PostgresProvider::new_with_schema_and_entra` are deprecated in favor of
+  `new_with_config(ProviderConfig::entra(...))`. They continue to work and
+  delegate to the new path; they will be removed in a future release.
+- `PostgresProvider::initialize_schema` is deprecated. Every constructor
+  already runs the migration runner; this back-compat shim will be removed
+  in a future release.
+
 ### Added
 
 - **Reject schemas ahead of the running binary.** Both `MigrationPolicy::ApplyAll`
@@ -18,11 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the unknown versions and instructs the operator to update the code.
 
 - **Configurable migration policy at provider construction.** New
-  `MigrationPolicy` enum and `ProviderConfig` struct, plus two new
-  constructors `PostgresProvider::new_with_config` and
-  `PostgresProvider::new_with_schema_and_config`. The default policy is
-  `MigrationPolicy::ApplyAll`, which preserves pre-feature behavior — all
-  existing constructors (`new`, `new_with_schema`, `new_with_entra`,
+  `MigrationPolicy` enum, `ProviderConfig` struct, and `ConnectionConfig`
+  enum, plus the single new constructor `PostgresProvider::new_with_config`.
+  The default policy is `MigrationPolicy::ApplyAll`, which preserves
+  pre-feature behavior — all existing constructors (`new`,
+  `new_with_schema`, and the deprecated `new_with_entra` /
   `new_with_schema_and_entra`) continue to apply pending migrations on
   startup. The new `MigrationPolicy::VerifyOnly` policy skips migration
   application and instead verifies that the `_duroxide_migrations` tracking

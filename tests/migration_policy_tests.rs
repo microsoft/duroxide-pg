@@ -56,15 +56,13 @@ async fn apply_all_creates_schema_and_tables() {
     let database_url = get_database_url();
     let schema = get_test_schema();
 
-    // `ProviderConfig::default()` is equivalent to `MigrationPolicy::ApplyAll`,
-    // so this also smoke-tests the default-derived value.
-    let _provider = PostgresProvider::new_with_schema_and_config(
-        &database_url,
-        Some(&schema),
-        ProviderConfig::default(),
-    )
-    .await
-    .expect("ApplyAll should succeed against a fresh schema");
+    // `ProviderConfig::url` defaults to `MigrationPolicy::ApplyAll`,
+    // so this also smoke-tests the default policy via the new API.
+    let mut config = ProviderConfig::url(&database_url);
+    config.schema_name = Some(schema.clone());
+    let _provider = PostgresProvider::new_with_config(config)
+        .await
+        .expect("ApplyAll should succeed against a fresh schema");
 
     assert!(
         schema_exists(&schema).await,
@@ -85,13 +83,13 @@ async fn verify_only_succeeds_against_initialized_schema() {
         .expect("bootstrap apply");
 
     // Then construct a VerifyOnly provider against the same schema.
-    let mut config = ProviderConfig::default();
+    let mut config = ProviderConfig::url(&database_url);
+    config.schema_name = Some(schema.clone());
     config.migration_policy = MigrationPolicy::VerifyOnly;
 
-    let _verify =
-        PostgresProvider::new_with_schema_and_config(&database_url, Some(&schema), config)
-            .await
-            .expect("VerifyOnly should succeed when migrations are up to date");
+    let _verify = PostgresProvider::new_with_config(config)
+        .await
+        .expect("VerifyOnly should succeed when migrations are up to date");
 
     drop_schema(&schema).await;
 }
@@ -101,11 +99,11 @@ async fn verify_only_errors_against_uninitialized_schema() {
     let database_url = get_database_url();
     let schema = get_test_schema();
 
-    let mut config = ProviderConfig::default();
+    let mut config = ProviderConfig::url(&database_url);
+    config.schema_name = Some(schema.clone());
     config.migration_policy = MigrationPolicy::VerifyOnly;
 
-    let result =
-        PostgresProvider::new_with_schema_and_config(&database_url, Some(&schema), config).await;
+    let result = PostgresProvider::new_with_config(config).await;
 
     let err = match result {
         Ok(_) => panic!("VerifyOnly must fail when the target schema has no migrations applied"),
@@ -146,11 +144,11 @@ async fn verify_only_rejects_unknown_migrations() {
     drop(bootstrap);
 
     // VerifyOnly must refuse to claim a schema that is ahead of the code.
-    let mut config = ProviderConfig::default();
+    let mut config = ProviderConfig::url(&database_url);
+    config.schema_name = Some(schema.clone());
     config.migration_policy = MigrationPolicy::VerifyOnly;
 
-    let result =
-        PostgresProvider::new_with_schema_and_config(&database_url, Some(&schema), config).await;
+    let result = PostgresProvider::new_with_config(config).await;
     let msg = match result {
         Ok(_) => panic!("VerifyOnly must reject unknown applied migrations"),
         Err(e) => format!("{e:#}"),
