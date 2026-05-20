@@ -78,6 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes. `VerifyOnly` does not take the migration advisory lock and does
   not create or modify any database objects.
 
+- **Initialization regression tests.** Added integration tests for the
+  provider initialization paths: `VerifyOnly` against a missing schema, a
+  bare schema with no tracking table, and a schema whose tracking table is
+  behind the bundled migrations; and a concurrency test that exercises the
+  migration advisory lock by running two `ApplyAll` initializations against
+  the same fresh schema in parallel.
+
 ## [0.1.33] - 2026-05-13
 
 ### Fixed

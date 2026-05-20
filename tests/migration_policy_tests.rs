@@ -272,3 +272,158 @@ async fn schema_name_validation_rejects_unsafe_identifiers() {
         }
     }
 }
+
+#[tokio::test]
+async fn verify_only_errors_when_schema_missing() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    // Belt-and-braces: make sure the schema is absent.
+    drop_schema(&schema).await;
+
+    let mut config = ProviderConfig::url(&database_url);
+    config.schema_name = Some(schema.clone());
+    config.migration_policy = MigrationPolicy::VerifyOnly;
+
+    let result = PostgresProvider::new_with_config(config).await;
+    let msg = match result {
+        Ok(_) => panic!("VerifyOnly should fail when the target schema does not exist"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        msg.contains("not initialized") || msg.contains("_duroxide_migrations"),
+        "expected missing-schema/missing-tracking-table error, got: {msg}"
+    );
+
+    // VerifyOnly must not create the schema as a side effect.
+    assert!(
+        !schema_exists(&schema).await,
+        "VerifyOnly must not create schema {schema}"
+    );
+}
+
+#[tokio::test]
+async fn verify_only_errors_when_tracking_table_missing() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    // Create a bare schema with no tables (no migrations applied).
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect for setup");
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&pool)
+        .await
+        .expect("create bare schema");
+
+    let mut config = ProviderConfig::url(&database_url);
+    config.schema_name = Some(schema.clone());
+    config.migration_policy = MigrationPolicy::VerifyOnly;
+
+    let result = PostgresProvider::new_with_config(config).await;
+    let msg = match result {
+        Ok(_) => panic!("VerifyOnly should fail when the tracking table is missing"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        msg.contains("not initialized") && msg.contains("_duroxide_migrations"),
+        "expected tracking-table-missing error, got: {msg}"
+    );
+
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn verify_only_errors_when_migrations_behind() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    // Fully initialize, then synthesize a "behind" state by deleting the
+    // most recent migration record without dropping the tracking table.
+    let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("bootstrap apply");
+
+    let last_version: i64 = sqlx::query_scalar(&format!(
+        "SELECT MAX(version) FROM {schema}._duroxide_migrations"
+    ))
+    .fetch_one(bootstrap.pool())
+    .await
+    .expect("read max version");
+
+    sqlx::query(&format!(
+        "DELETE FROM {schema}._duroxide_migrations WHERE version = $1"
+    ))
+    .bind(last_version)
+    .execute(bootstrap.pool())
+    .await
+    .expect("delete most-recent migration row");
+
+    drop(bootstrap);
+
+    let mut config = ProviderConfig::url(&database_url);
+    config.schema_name = Some(schema.clone());
+    config.migration_policy = MigrationPolicy::VerifyOnly;
+
+    let result = PostgresProvider::new_with_config(config).await;
+    let msg = match result {
+        Ok(_) => panic!("VerifyOnly should fail when migrations are behind"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        msg.contains("not up to date") && msg.contains(&last_version.to_string()),
+        "expected behind-schema error mentioning version {last_version}; got: {msg}"
+    );
+
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn concurrent_apply_all_is_serialized() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    // Ensure a clean slate.
+    drop_schema(&schema).await;
+
+    let make_config = |schema: String| {
+        let mut cfg = ProviderConfig::url(&database_url);
+        cfg.schema_name = Some(schema);
+        cfg.migration_policy = MigrationPolicy::ApplyAll;
+        cfg
+    };
+
+    let h1 = {
+        let cfg = make_config(schema.clone());
+        tokio::spawn(async move { PostgresProvider::new_with_config(cfg).await })
+    };
+    let h2 = {
+        let cfg = make_config(schema.clone());
+        tokio::spawn(async move { PostgresProvider::new_with_config(cfg).await })
+    };
+
+    let (r1, r2) = tokio::join!(h1, h2);
+    let p1 = r1
+        .expect("task 1 panicked")
+        .expect("concurrent ApplyAll #1 should succeed under the advisory lock");
+    let _p2 = r2
+        .expect("task 2 panicked")
+        .expect("concurrent ApplyAll #2 should succeed under the advisory lock");
+
+    // Sanity check: the schema is fully migrated.
+    let row_count: (i64,) = sqlx::query_as(&format!(
+        "SELECT COUNT(*) FROM {schema}._duroxide_migrations"
+    ))
+    .fetch_one(p1.pool())
+    .await
+    .expect("count applied migrations");
+    assert!(
+        row_count.0 > 0,
+        "expected at least one applied migration after concurrent ApplyAll"
+    );
+
+    drop(p1);
+    drop_schema(&schema).await;
+}
