@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Schema name validation at provider construction.** All constructors now
+  reject schema names that do not match `^[A-Za-z_][A-Za-z0-9_]*$`.
+  PostgreSQL identifiers cannot be bound as SQL parameters, so the schema
+  name is interpolated directly into the DDL and DML the provider issues.
+  Restricting the accepted character set up front eliminates the SQL
+  injection vector that would otherwise exist for callers that pass
+  attacker-controlled schema names. PostgreSQL's full identifier grammar
+  (including quoted identifiers) is broader; this validation is
+  intentionally conservative.
+
 ### Changed
+
+- **BREAKING (unreleased API surface only):** `PostgresProvider::new_with_config`,
+  `new_with_schema`, and the deprecated Entra constructors now return an
+  error when `schema_name` contains characters outside
+  `[A-Za-z_][A-Za-z0-9_]*`. Previously such names were silently
+  interpolated into SQL. Callers passing only constants from their own code
+  (the common case) are unaffected. Already-shipped releases (`<= 0.1.33`)
+  are unaffected.
 
 - **BREAKING (unreleased API surface only):** Collapsed all `*_with_config`
   and Entra-specific constructors into a single

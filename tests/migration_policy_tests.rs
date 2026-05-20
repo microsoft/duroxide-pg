@@ -253,3 +253,22 @@ async fn apply_all_unknown_migrations_causes_no_mutations() {
 
     drop_schema(&schema).await;
 }
+
+#[tokio::test]
+async fn schema_name_validation_rejects_unsafe_identifiers() {
+    let database_url = get_database_url();
+
+    let mut config = ProviderConfig::url(&database_url);
+    config.schema_name = Some("bad-name".to_string());
+
+    match PostgresProvider::new_with_config(config).await {
+        Ok(_) => panic!("Expected schema name validation to fail"),
+        Err(e) => {
+            let msg = format!("{e:#}");
+            assert!(
+                msg.contains("Invalid schema_name"),
+                "expected validation error, got: {msg}"
+            );
+        }
+    }
+}

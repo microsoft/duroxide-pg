@@ -214,6 +214,36 @@ pub enum ConnectionConfig {
     },
 }
 
+/// Validate that `schema_name` is a safe PostgreSQL identifier.
+///
+/// PostgreSQL identifiers cannot be bound as SQL parameters, so the schema
+/// name is interpolated directly into the SQL we issue (e.g.
+/// `CREATE SCHEMA {schema}`, `SELECT … FROM {schema}.instances`). To prevent
+/// SQL injection, we restrict schema names to a conservative subset:
+///
+/// `^[A-Za-z_][A-Za-z0-9_]*$`
+///
+/// PostgreSQL's full identifier grammar is broader (quoted identifiers can
+/// contain almost anything), but accepting the broader grammar would require
+/// quoting every interpolation site and validating that the input does not
+/// contain a closing quote — strictly less safe than refusing surprising
+/// names up front.
+fn validate_schema_name(schema_name: &str) -> Result<()> {
+    let mut chars = schema_name.chars();
+    let Some(first) = chars.next() else {
+        anyhow::bail!("Invalid schema_name '': must match [A-Za-z_][A-Za-z0-9_]*");
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        anyhow::bail!("Invalid schema_name '{schema_name}': must match [A-Za-z_][A-Za-z0-9_]*");
+    }
+    for ch in chars {
+        if !(ch == '_' || ch.is_ascii_alphanumeric()) {
+            anyhow::bail!("Invalid schema_name '{schema_name}': must match [A-Za-z_][A-Za-z0-9_]*");
+        }
+    }
+    Ok(())
+}
+
 /// Newtype around `tokio::task::AbortHandle` that aborts the task on drop.
 /// Used to ensure the Entra token refresh task is cleaned up when the
 /// provider is dropped.
@@ -255,6 +285,10 @@ impl PostgresProvider {
             schema_name,
             migration_policy,
         } = config;
+
+        if let Some(ref s) = schema_name {
+            validate_schema_name(s)?;
+        }
 
         match connection {
             ConnectionConfig::Url(database_url) => {
