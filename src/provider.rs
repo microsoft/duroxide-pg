@@ -382,7 +382,7 @@ impl PostgresProvider {
     /// Returns an error if credential resolution fails, the initial token
     /// cannot be acquired, the database connection fails, or migrations fail.
     #[deprecated(
-        since = "0.2.0",
+        since = "0.1.34",
         note = "use `PostgresProvider::new_with_config(ProviderConfig::entra(...))` instead"
     )]
     pub async fn new_with_entra(
@@ -398,7 +398,7 @@ impl PostgresProvider {
     /// Same as [`Self::new_with_entra`] but uses a custom schema for tenant
     /// isolation.
     #[deprecated(
-        since = "0.2.0",
+        since = "0.1.34",
         note = "use `PostgresProvider::new_with_config(ProviderConfig::entra(...))` with `schema_name` set instead"
     )]
     #[instrument(
@@ -484,13 +484,11 @@ impl PostgresProvider {
     }
 
     #[deprecated(
-        since = "0.2.0",
+        since = "0.1.34",
         note = "schema initialization is now run automatically by every constructor; this shim will be removed in a future release"
     )]
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
     pub async fn initialize_schema(&self) -> Result<()> {
-        // Schema initialization is now handled by migrations
-        // This method is kept for backward compatibility but delegates to migrations
         let migration_runner = MigrationRunner::new(self.pool.clone(), self.schema_name.clone());
         migration_runner.migrate().await?;
         Ok(())
