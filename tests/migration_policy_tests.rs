@@ -381,6 +381,41 @@ async fn verify_only_errors_when_migrations_behind() {
 }
 
 #[tokio::test]
+async fn verify_only_errors_when_core_tables_are_missing() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    // Fully initialize, then leave migration records intact while dropping a
+    // core table. VerifyOnly must not trust the tracking table alone.
+    let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("bootstrap apply");
+
+    sqlx::query(&format!("DROP TABLE {schema}.instances"))
+        .execute(bootstrap.pool())
+        .await
+        .expect("drop instances table");
+
+    drop(bootstrap);
+
+    let mut config = ProviderConfig::url(&database_url);
+    config.schema_name = Some(schema.clone());
+    config.migration_policy = MigrationPolicy::VerifyOnly;
+
+    let result = PostgresProvider::new_with_config(config).await;
+    let msg = match result {
+        Ok(_) => panic!("VerifyOnly should fail when core tables are missing"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        msg.contains("core tables are missing") || msg.contains("corrupted"),
+        "expected missing-core-tables error, got: {msg}"
+    );
+
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
 async fn concurrent_apply_all_is_serialized() {
     let database_url = get_database_url();
     let schema = get_test_schema();

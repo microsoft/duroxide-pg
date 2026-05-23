@@ -143,6 +143,17 @@ impl MigrationRunner {
             );
         }
 
+        if !self.check_tables_exist(conn).await.unwrap_or(false) {
+            anyhow::bail!(
+                "duroxide migrations recorded as complete in schema {:?}, but \
+                 core tables are missing. The schema may be corrupted; run \
+                 migrations from a provider configured with \
+                 MigrationPolicy::ApplyAll before constructing VerifyOnly \
+                 providers.",
+                self.schema_name,
+            );
+        }
+
         Ok(())
     }
 
