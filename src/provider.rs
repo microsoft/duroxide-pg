@@ -54,17 +54,17 @@ use crate::migrations::MigrationRunner;
 /// ## Azure Database for PostgreSQL with Microsoft Entra ID
 ///
 /// ```rust,no_run
-/// use duroxide_pg::{EntraAuthOptions, PostgresProvider};
+/// use duroxide_pg::{EntraAuthOptions, PostgresProvider, ProviderConfig};
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// let provider = PostgresProvider::new_with_entra(
+/// let config = ProviderConfig::entra(
 ///     "myserver.postgres.database.azure.com",
 ///     5432,
 ///     "mydb",
 ///     "my-entra-principal@contoso.onmicrosoft.com",
 ///     EntraAuthOptions::new(),
-/// )
-/// .await?;
+/// );
+/// let provider = PostgresProvider::new_with_config(config).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -107,6 +107,143 @@ pub struct PostgresProvider {
     _refresh_task: Option<AbortOnDropHandle>,
 }
 
+/// Migration policy applied at [`PostgresProvider`] construction.
+///
+/// Defaults to [`MigrationPolicy::ApplyAll`], preserving pre-feature behavior:
+/// all constructors that do not take a [`ProviderConfig`] apply pending
+/// migrations on startup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MigrationPolicy {
+    /// Apply any pending embedded migrations at startup. Default.
+    ///
+    /// Requires the database role to have DDL privileges on `schema_name`
+    /// (or `public` if none was supplied).
+    #[default]
+    ApplyAll,
+    /// Skip migration application. Verify that the `_duroxide_migrations`
+    /// tracking table exists and every embedded migration has already been
+    /// applied; return an error otherwise.
+    ///
+    /// Intended for processes that must not run DDL — e.g. application
+    /// backends, when a separately privileged worker is responsible for
+    /// applying schema changes.
+    VerifyOnly,
+}
+
+/// Configuration for [`PostgresProvider::new_with_config`].
+///
+/// Construct via [`ProviderConfig::url`] (standard `postgres://` URL) or
+/// [`ProviderConfig::entra`] (Azure Database for PostgreSQL with Microsoft
+/// Entra ID), then adjust fields as needed:
+///
+/// ```rust,no_run
+/// use duroxide_pg::{MigrationPolicy, PostgresProvider, ProviderConfig};
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let mut config = ProviderConfig::url("postgres://localhost/mydb");
+/// config.schema_name = Some("my_app".into());
+/// config.migration_policy = MigrationPolicy::VerifyOnly;
+/// let provider = PostgresProvider::new_with_config(config).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ProviderConfig {
+    /// How the provider should reach the database.
+    pub connection: ConnectionConfig,
+    /// PostgreSQL schema for tenant isolation. `None` resolves to `public`.
+    pub schema_name: Option<String>,
+    /// Policy for handling embedded migrations at startup.
+    pub migration_policy: MigrationPolicy,
+}
+
+impl ProviderConfig {
+    /// Build a config from a standard PostgreSQL connection URL
+    /// (`postgres://user:pass@host:port/db`). Schema defaults to `public`
+    /// and migration policy defaults to [`MigrationPolicy::ApplyAll`].
+    pub fn url(database_url: impl Into<String>) -> Self {
+        Self {
+            connection: ConnectionConfig::Url(database_url.into()),
+            schema_name: None,
+            migration_policy: MigrationPolicy::default(),
+        }
+    }
+
+    /// Build a config for Azure Database for PostgreSQL with Microsoft
+    /// Entra ID. Schema defaults to `public` and migration policy defaults
+    /// to [`MigrationPolicy::ApplyAll`]. All Entra connections use
+    /// `PgSslMode::VerifyFull`.
+    pub fn entra(
+        host: impl Into<String>,
+        port: u16,
+        database: impl Into<String>,
+        user: impl Into<String>,
+        options: EntraAuthOptions,
+    ) -> Self {
+        Self {
+            connection: ConnectionConfig::Entra {
+                host: host.into(),
+                port,
+                database: database.into(),
+                user: user.into(),
+                options,
+            },
+            schema_name: None,
+            migration_policy: MigrationPolicy::default(),
+        }
+    }
+}
+
+/// How [`PostgresProvider`] should reach the database.
+///
+/// Constructed indirectly via [`ProviderConfig::url`] or
+/// [`ProviderConfig::entra`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ConnectionConfig {
+    /// Standard PostgreSQL connection URL.
+    Url(String),
+    /// Azure Database for PostgreSQL with Microsoft Entra ID.
+    Entra {
+        host: String,
+        port: u16,
+        database: String,
+        user: String,
+        options: EntraAuthOptions,
+    },
+}
+
+/// Validate that `schema_name` is a safe PostgreSQL identifier.
+///
+/// PostgreSQL identifiers cannot be bound as SQL parameters, so the schema
+/// name is interpolated directly into the SQL we issue (e.g.
+/// `CREATE SCHEMA {schema}`, `SELECT … FROM {schema}.instances`). To prevent
+/// SQL injection, we restrict schema names to a conservative subset:
+///
+/// `^[A-Za-z_][A-Za-z0-9_]*$`
+///
+/// PostgreSQL's full identifier grammar is broader (quoted identifiers can
+/// contain almost anything), but accepting the broader grammar would require
+/// quoting every interpolation site and validating that the input does not
+/// contain a closing quote — strictly less safe than refusing surprising
+/// names up front.
+fn validate_schema_name(schema_name: &str) -> Result<()> {
+    let mut chars = schema_name.chars();
+    let Some(first) = chars.next() else {
+        anyhow::bail!("Invalid schema_name '': must match [A-Za-z_][A-Za-z0-9_]*");
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        anyhow::bail!("Invalid schema_name '{schema_name}': must match [A-Za-z_][A-Za-z0-9_]*");
+    }
+    for ch in chars {
+        if !(ch == '_' || ch.is_ascii_alphanumeric()) {
+            anyhow::bail!("Invalid schema_name '{schema_name}': must match [A-Za-z_][A-Za-z0-9_]*");
+        }
+    }
+    Ok(())
+}
+
 /// Newtype around `tokio::task::AbortHandle` that aborts the task on drop.
 /// Used to ensure the Entra token refresh task is cleaned up when the
 /// provider is dropped.
@@ -119,11 +256,75 @@ impl Drop for AbortOnDropHandle {
 }
 
 impl PostgresProvider {
+    /// Create a provider from a PostgreSQL connection URL, using the
+    /// `public` schema and applying any pending migrations.
+    ///
+    /// Convenience wrapper around [`Self::new_with_config`].
     pub async fn new(database_url: &str) -> Result<Self> {
-        Self::new_with_schema(database_url, None).await
+        Self::new_with_config(ProviderConfig::url(database_url)).await
     }
 
+    /// Create a provider from a PostgreSQL connection URL, using a custom
+    /// schema for tenant isolation, and applying any pending migrations.
+    ///
+    /// Convenience wrapper around [`Self::new_with_config`].
     pub async fn new_with_schema(database_url: &str, schema_name: Option<&str>) -> Result<Self> {
+        let mut config = ProviderConfig::url(database_url);
+        config.schema_name = schema_name.map(str::to_string);
+        Self::new_with_config(config).await
+    }
+
+    /// Create a provider from a [`ProviderConfig`]. This is the single
+    /// constructor that fully exposes the configuration surface:
+    /// connection variant (URL or Entra), schema, and migration policy.
+    ///
+    /// All other public constructors delegate to this one.
+    pub async fn new_with_config(config: ProviderConfig) -> Result<Self> {
+        let ProviderConfig {
+            connection,
+            schema_name,
+            migration_policy,
+        } = config;
+
+        if let Some(ref s) = schema_name {
+            validate_schema_name(s)?;
+        }
+
+        match connection {
+            ConnectionConfig::Url(database_url) => {
+                Self::new_from_url(&database_url, schema_name.as_deref(), migration_policy).await
+            }
+            ConnectionConfig::Entra {
+                host,
+                port,
+                database,
+                user,
+                options,
+            } => {
+                let token_source = options.default_token_source().context(
+                    "Entra credential resolution failed: could not build the default credential chain",
+                )?;
+                Self::new_with_entra_with_token_source(
+                    &host,
+                    port,
+                    &database,
+                    &user,
+                    schema_name.as_deref(),
+                    options,
+                    token_source,
+                    PgSslMode::VerifyFull,
+                    migration_policy,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn new_from_url(
+        database_url: &str,
+        schema_name: Option<&str>,
+        migration_policy: MigrationPolicy,
+    ) -> Result<Self> {
         let max_connections = std::env::var("DUROXIDE_PG_POOL_MAX")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -145,9 +346,11 @@ impl PostgresProvider {
             _refresh_task: None,
         };
 
-        // Run migrations to initialize schema
-        let migration_runner = MigrationRunner::new(provider.pool.clone(), schema_name.clone());
-        migration_runner.migrate().await?;
+        let migration_runner = MigrationRunner::new(provider.pool.clone(), schema_name);
+        match migration_policy {
+            MigrationPolicy::ApplyAll => migration_runner.migrate().await?,
+            MigrationPolicy::VerifyOnly => migration_runner.verify().await?,
+        }
 
         Ok(provider)
     }
@@ -178,6 +381,10 @@ impl PostgresProvider {
     /// # Errors
     /// Returns an error if credential resolution fails, the initial token
     /// cannot be acquired, the database connection fails, or migrations fail.
+    #[deprecated(
+        since = "0.1.34",
+        note = "use `PostgresProvider::new_with_config(ProviderConfig::entra(...))` instead"
+    )]
     pub async fn new_with_entra(
         host: &str,
         port: u16,
@@ -185,11 +392,15 @@ impl PostgresProvider {
         user: &str,
         options: EntraAuthOptions,
     ) -> Result<Self> {
-        Self::new_with_schema_and_entra(host, port, database, user, None, options).await
+        Self::new_with_config(ProviderConfig::entra(host, port, database, user, options)).await
     }
 
     /// Same as [`Self::new_with_entra`] but uses a custom schema for tenant
     /// isolation.
+    #[deprecated(
+        since = "0.1.34",
+        note = "use `PostgresProvider::new_with_config(ProviderConfig::entra(...))` with `schema_name` set instead"
+    )]
     #[instrument(
         skip(options),
         fields(host = %host, port = %port, database = %database, user = %user, schema = ?schema_name),
@@ -203,21 +414,9 @@ impl PostgresProvider {
         schema_name: Option<&str>,
         options: EntraAuthOptions,
     ) -> Result<Self> {
-        let token_source = options.default_token_source().context(
-            "Entra credential resolution failed: could not build the default credential chain",
-        )?;
-
-        Self::new_with_entra_with_token_source(
-            host,
-            port,
-            database,
-            user,
-            schema_name,
-            options,
-            token_source,
-            PgSslMode::VerifyFull,
-        )
-        .await
+        let mut config = ProviderConfig::entra(host, port, database, user, options);
+        config.schema_name = schema_name.map(str::to_string);
+        Self::new_with_config(config).await
     }
 
     /// Crate-internal Entra constructor. Accepts an explicit
@@ -229,6 +428,7 @@ impl PostgresProvider {
     /// connect-options → pool → migrations → refresh task) against a local
     /// PostgreSQL without an Azure dependency, by injecting a fake
     /// [`TokenSource`] that returns the local password and disabling TLS.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_with_entra_with_token_source(
         host: &str,
         port: u16,
@@ -238,6 +438,7 @@ impl PostgresProvider {
         options: EntraAuthOptions,
         token_source: Arc<dyn TokenSource>,
         ssl_mode: PgSslMode,
+        migration_policy: MigrationPolicy,
     ) -> Result<Self> {
         let audience = options.audience_str().to_string();
         let token = token_source
@@ -260,7 +461,10 @@ impl PostgresProvider {
         let schema_name = schema_name.unwrap_or("public").to_string();
 
         let migration_runner = MigrationRunner::new(pool.clone(), schema_name.clone());
-        migration_runner.migrate().await?;
+        match migration_policy {
+            MigrationPolicy::ApplyAll => migration_runner.migrate().await?,
+            MigrationPolicy::VerifyOnly => migration_runner.verify().await?,
+        }
 
         let refresh_handle = spawn_token_refresh_task(
             pool.clone(),
@@ -279,10 +483,12 @@ impl PostgresProvider {
         })
     }
 
+    #[deprecated(
+        since = "0.1.34",
+        note = "schema initialization is now run automatically by every constructor; this shim will be removed in a future release"
+    )]
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
     pub async fn initialize_schema(&self) -> Result<()> {
-        // Schema initialization is now handled by migrations
-        // This method is kept for backward compatibility but delegates to migrations
         let migration_runner = MigrationRunner::new(self.pool.clone(), self.schema_name.clone());
         migration_runner.migrate().await?;
         Ok(())
@@ -2977,6 +3183,7 @@ mod entra_pipeline_tests {
             EntraAuthOptions::new(),
             token_source,
             PgSslMode::Disable,
+            MigrationPolicy::ApplyAll,
         )
         .await
         .expect("Entra pipeline must succeed against local PG with correct token");
@@ -3018,6 +3225,7 @@ mod entra_pipeline_tests {
             EntraAuthOptions::new(),
             token_source,
             PgSslMode::Disable,
+            MigrationPolicy::ApplyAll,
         )
         .await;
 
@@ -3066,6 +3274,7 @@ mod entra_pipeline_tests {
             EntraAuthOptions::new().refresh_interval(Duration::from_secs(60 * 60)),
             token_source,
             PgSslMode::Disable,
+            MigrationPolicy::ApplyAll,
         )
         .await
         .expect("default-constructor variant must succeed");

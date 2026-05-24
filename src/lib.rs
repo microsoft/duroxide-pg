@@ -43,17 +43,17 @@
 //! [`EntraAuthOptions`] for tunables.
 //!
 //! ```rust,no_run
-//! use duroxide_pg::{EntraAuthOptions, PostgresProvider};
+//! use duroxide_pg::{EntraAuthOptions, PostgresProvider, ProviderConfig};
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! let provider = PostgresProvider::new_with_entra(
+//! let config = ProviderConfig::entra(
 //!     "myserver.postgres.database.azure.com",
 //!     5432,
 //!     "mydb",
 //!     "my-entra-principal@contoso.onmicrosoft.com",
 //!     EntraAuthOptions::new(),
-//! )
-//! .await?;
+//! );
+//! let provider = PostgresProvider::new_with_config(config).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -82,4 +82,4 @@ pub mod migrations;
 pub mod provider;
 
 pub use entra::EntraAuthOptions;
-pub use provider::PostgresProvider;
+pub use provider::{ConnectionConfig, MigrationPolicy, PostgresProvider, ProviderConfig};

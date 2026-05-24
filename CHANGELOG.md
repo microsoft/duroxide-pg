@@ -5,6 +5,86 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Schema name validation at provider construction.** All constructors now
+  reject schema names that do not match `^[A-Za-z_][A-Za-z0-9_]*$`.
+  PostgreSQL identifiers cannot be bound as SQL parameters, so the schema
+  name is interpolated directly into the DDL and DML the provider issues.
+  Restricting the accepted character set up front eliminates the SQL
+  injection vector that would otherwise exist for callers that pass
+  attacker-controlled schema names. PostgreSQL's full identifier grammar
+  (including quoted identifiers) is broader; this validation is
+  intentionally conservative.
+
+### Changed
+
+- **BREAKING (unreleased API surface only):** `PostgresProvider::new_with_config`,
+  `new_with_schema`, and the deprecated Entra constructors now return an
+  error when `schema_name` contains characters outside
+  `[A-Za-z_][A-Za-z0-9_]*`. Previously such names were silently
+  interpolated into SQL. Callers passing only constants from their own code
+  (the common case) are unaffected. Already-shipped releases (`<= 0.1.33`)
+  are unaffected.
+
+- **BREAKING (unreleased API surface only):** Collapsed all `*_with_config`
+  and Entra-specific constructors into a single
+  `PostgresProvider::new_with_config(ProviderConfig)`. `ProviderConfig` now
+  carries the connection variant via a new `ConnectionConfig` enum
+  (`Url(String)` or `Entra { host, port, database, user, options }`),
+  the optional schema name, and the migration policy. Construct via
+  `ProviderConfig::url(database_url)` or
+  `ProviderConfig::entra(host, port, db, user, options)` and adjust fields
+  as needed. The previously unreleased `new_with_config(url, config)` and
+  `new_with_schema_and_config(url, schema, config)` constructors are
+  removed. `new(url)` and `new_with_schema(url, schema)` remain as
+  convenience wrappers.
+
+### Deprecated
+
+- `PostgresProvider::new_with_entra` and
+  `PostgresProvider::new_with_schema_and_entra` are deprecated in favor of
+  `new_with_config(ProviderConfig::entra(...))`. They continue to work and
+  delegate to the new path; they will be removed in a future release.
+- `PostgresProvider::initialize_schema` is deprecated. Every constructor
+  already runs the migration runner; this back-compat shim will be removed
+  in a future release.
+
+### Added
+
+- **Reject schemas ahead of the running binary.** Both `MigrationPolicy::ApplyAll`
+  and `MigrationPolicy::VerifyOnly` now fail fast when the `_duroxide_migrations`
+  tracking table records migration versions that are not bundled with the
+  running binary. Under `ApplyAll` the check runs under the migration advisory
+  lock and short-circuits before any DDL is executed, so an older binary
+  cannot rewrite a schema that is ahead of its code. The error message names
+  the unknown versions and instructs the operator to update the code.
+
+- **Configurable migration policy at provider construction.** New
+  `MigrationPolicy` enum, `ProviderConfig` struct, and `ConnectionConfig`
+  enum, plus the single new constructor `PostgresProvider::new_with_config`.
+  The default policy is `MigrationPolicy::ApplyAll`, which preserves
+  pre-feature behavior — all existing constructors (`new`,
+  `new_with_schema`, and the deprecated `new_with_entra` /
+  `new_with_schema_and_entra`) continue to apply pending migrations on
+  startup. The new `MigrationPolicy::VerifyOnly` policy skips migration
+  application and instead verifies that the `_duroxide_migrations` tracking
+  table exists in the target schema and that every embedded migration has
+  already been applied, returning an error otherwise. Intended for
+  processes that must not run DDL — e.g. application backends, where a
+  separately privileged worker is responsible for applying schema
+  changes. `VerifyOnly` does not take the migration advisory lock and does
+  not create or modify any database objects.
+
+- **Initialization regression tests.** Added integration tests for the
+  provider initialization paths: `VerifyOnly` against a missing schema, a
+  bare schema with no tracking table, and a schema whose tracking table is
+  behind the bundled migrations; and a concurrency test that exercises the
+  migration advisory lock by running two `ApplyAll` initializations against
+  the same fresh schema in parallel.
+
 ## [0.1.33] - 2026-05-13
 
 ### Fixed
