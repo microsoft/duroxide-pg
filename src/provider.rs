@@ -3155,6 +3155,38 @@ mod entra_pipeline_tests {
         format!("entra_inj_{}", &id[id.len() - 8..])
     }
 
+    async fn wrong_password_is_rejected(host: &str, port: u16, db: &str, user: &str) -> bool {
+        let result = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                PgConnectOptions::new()
+                    .host(host)
+                    .port(port)
+                    .database(db)
+                    .username(user)
+                    .password("definitely-wrong-password")
+                    .ssl_mode(PgSslMode::Disable),
+            )
+            .await;
+
+        match result {
+            Ok(pool) => {
+                pool.close().await;
+                false
+            }
+            Err(err) => {
+                let msg = format!("{err:#}");
+                assert!(
+                    msg.to_lowercase().contains("password")
+                        || msg.contains("28P01")
+                        || msg.contains("28000"),
+                    "expected authentication failure, got: {msg}"
+                );
+                true
+            }
+        }
+    }
+
     /// Drop a schema cleanly. Best-effort; failures are logged but don't fail
     /// the test (the schema cleanup script handles leaks).
     async fn drop_schema(pool: &PgPool, schema: &str) {
@@ -3211,6 +3243,13 @@ mod entra_pipeline_tests {
         let Some((host, port, db, user, _password)) = pg_connection_or_skip() else {
             return;
         };
+
+        if !wrong_password_is_rejected(&host, port, &db, &user).await {
+            eprintln!(
+                "local PostgreSQL accepts wrong passwords; skipping negative Entra pipeline test"
+            );
+            return;
+        }
 
         let token_source: Arc<dyn TokenSource> =
             RecordingFakeTokenSource::with_tokens(vec![token("definitely-wrong-password", 3600)]);

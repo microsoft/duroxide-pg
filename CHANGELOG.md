@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.34] - 2026-05-25
 
 ### Security
 
@@ -84,6 +84,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behind the bundled migrations; and a concurrency test that exercises the
   migration advisory lock by running two `ApplyAll` initializations against
   the same fresh schema in parallel.
+
+### Fixed
+
+- Made the local Entra negative pipeline test detect PostgreSQL
+  trust-style authentication and skip that case instead of failing when the
+  test database accepts deliberately wrong passwords.
 
 ## [0.1.33] - 2026-05-13
 

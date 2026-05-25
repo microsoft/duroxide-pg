@@ -184,15 +184,16 @@ Two test layers cover the Entra integration:
 - Orchestration stats introspection via `Client::get_orchestration_stats()`
 - Microsoft Entra ID authentication for Azure Database for PostgreSQL (managed identity, Workload Identity, az CLI)
 
-## Latest Release (0.1.33)
+## Latest Release (0.1.34)
 
-- Fix: add `native-tls` feature to the `reqwest` dependency so HTTPS calls compiled into the crate (including AAD token acquisition for `connectWithEntra` / `connectWithSchemaAndEntra`) work end-to-end. Prior 0.1.32 binaries failed with `error sending request` / `invalid URL, scheme is not http` whenever Entra auth was used.
-- No API changes; no migrations required.
+- Adds `ProviderConfig`, `ConnectionConfig`, and `MigrationPolicy` so callers can select `ApplyAll` or `VerifyOnly` migration behavior at provider construction.
+- Breaking API cleanup: `PostgresProvider::new_with_config` now takes a single `ProviderConfig`; build URL configs with `ProviderConfig::url(...)` and Entra configs with `ProviderConfig::entra(...)`.
+- Hardens initialization by rejecting unsafe schema names and failing fast when the database has unknown migration versions.
 - See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
-## Previous Release (0.1.32)
+## Previous Release (0.1.33)
 
-- Bumped `duroxide` core dependency to `0.1.29`. The core 0.1.29 release replaces `futures::join_all`/`join`/`select_biased!` with replay-safe crate-local combinators that eliminate a latent large-fan-in (≥ 1024 children) replay hang. No provider-level code or schema changes required.
+- Fix: add `native-tls` feature to the `reqwest` dependency so HTTPS calls compiled into the crate (including AAD token acquisition for `connectWithEntra` / `connectWithSchemaAndEntra`) work end-to-end. Prior 0.1.32 binaries failed with `error sending request` / `invalid URL, scheme is not http` whenever Entra auth was used.
 
 ## License
 
