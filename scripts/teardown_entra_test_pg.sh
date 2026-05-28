@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Tear down the resource group created by `provision_entra_test_pg.sh`.
 #
 # Uses the same naming convention as the provision script. Override

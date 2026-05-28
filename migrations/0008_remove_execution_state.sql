@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0008_remove_execution_state.sql
 -- Description: Removes ExecutionState from fetch_work_item and renew_work_item_lock
 -- Required for duroxide main branch which removed ExecutionState from provider API

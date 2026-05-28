@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Regression tests for duroxide-pg bugs.
 //!
 //! Each test in this file reproduces a specific bug that was reported and fixed.

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0015_add_custom_status.sql
 -- Description: Adds custom status support for orchestration instances.
 -- Adds custom_status and custom_status_version columns to instances table,

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0003_add_attempt_count.sql
 -- Description: Adds attempt_count column for poison message detection (duroxide 0.1.2)
 -- This column tracks how many times a message has been fetched for processing

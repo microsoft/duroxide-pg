@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0011_fix_cancellation_ordering.sql
 -- Description: Fixes the ordering of operations in ack_orchestration_item
 -- Required for duroxide 0.1.15 test: test_same_activity_in_worker_items_and_cancelled_is_noop

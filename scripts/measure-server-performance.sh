@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Measure server-side performance using pg_stat_statements
 # This script runs stress tests and compares server execution time vs network RTT
 

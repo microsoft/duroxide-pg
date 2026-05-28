@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Live Entra ID smoke test against a real Azure Database for PostgreSQL.
 //!
 //! This test is `#[ignore]` by default and is opt-in via the

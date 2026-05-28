@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Repro for https://github.com/microsoft/duroxide/issues/10
 //!
 //! When multiple workers start simultaneously against a fresh database,

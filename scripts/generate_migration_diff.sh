@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Generate a per-function diff markdown file for a specific migration.
 # Usage: ./scripts/generate_migration_diff.sh <migration_number>
 # Example: ./scripts/generate_migration_diff.sh 9

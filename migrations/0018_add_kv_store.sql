@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration 0018: Add KV store support
 -- Description: Adds a durable per-instance KV store, returns KV snapshots during orchestration fetch,
 -- materializes KV mutations during ack, and cleans up KV state during deletion/pruning.

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0004_update_stored_procedures_for_attempt_count.sql
 -- Description: Updates stored procedures to support attempt_count for poison message detection
 -- This migration updates procedures that were created in 0002 to work with the attempt_count

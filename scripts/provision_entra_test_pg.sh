@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Provision an Azure Database for PostgreSQL Flexible Server suitable for
 # running `tests/entra_live_test.rs`.
 #

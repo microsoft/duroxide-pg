@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration 0017: Retry orchestration fetch on contention
 -- Description: Updates fetch_orchestration_item to continue searching for
 -- another eligible instance when the initially selected instance becomes locked

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0009_add_activity_cancellation_support.sql
 -- Description: Adds support for activity cancellation via lock stealing
 -- Required for duroxide main branch which adds cancelled_activities to ack_orchestration_item
