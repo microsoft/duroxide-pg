@@ -2,6 +2,8 @@
 
 A PostgreSQL-based provider implementation for [Duroxide](https://github.com/microsoft/duroxide), a durable task orchestration framework for Rust.
 
+> **Preview:** This project is currently in preview.
+
 > **Note:** See [CHANGELOG.md](CHANGELOG.md) for version history and breaking changes.
 
 ## Installation
