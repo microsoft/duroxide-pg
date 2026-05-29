@@ -2,6 +2,8 @@
 
 A PostgreSQL-based provider implementation for [Duroxide](https://github.com/microsoft/duroxide), a durable task orchestration framework for Rust.
 
+> **Looking for durable functions directly in SQL?** That's [pg_durable](https://github.com/microsoft/pg_durable) — a PostgreSQL extension built on top of duroxide + duroxide-pg. duroxide-pg itself is the lower-level Rust building block: use it when you want to author your own workflows in Rust against a Postgres-backed store.
+
 > **Note:** See [CHANGELOG.md](CHANGELOG.md) for version history and breaking changes.
 
 ## Installation
