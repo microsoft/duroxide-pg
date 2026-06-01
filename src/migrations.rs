@@ -602,11 +602,10 @@ mod tests {
 
     #[test]
     fn migration_search_path_pins_pg_temp_last() {
-        let stmt = MigrationRunner::migration_search_path_stmt("duroxide");
-        assert_eq!(stmt, "SET LOCAL search_path TO duroxide, pg_temp");
         // The security property: pg_temp must be present and last, so temporary
         // objects cannot shadow the unqualified references a migration relies on
         // the search_path to resolve.
-        assert!(stmt.ends_with(", pg_temp"));
+        let stmt = MigrationRunner::migration_search_path_stmt("duroxide");
+        assert_eq!(stmt, "SET LOCAL search_path TO duroxide, pg_temp");
     }
 }
