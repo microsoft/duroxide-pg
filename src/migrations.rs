@@ -482,6 +482,11 @@ impl MigrationRunner {
     /// trusted, in-repo SQL the runner executes today; this hardens against future
     /// reuse of the migration connection or `SECURITY DEFINER` migrations.
     ///
+    /// This narrows but does not fully eliminate `pg_temp`: an unqualified name
+    /// that exists *only* in `pg_temp` (with no match in `<schema>` or
+    /// `pg_catalog`) still resolves to the temporary object. Migrations should
+    /// therefore continue to reference only objects they define in `<schema>`.
+    ///
     /// `pg_catalog` is intentionally *not* listed: when it is unnamed PostgreSQL
     /// places it implicitly first, giving the desired `pg_catalog -> <schema> ->
     /// pg_temp` order. Prepending it explicitly would add a maintenance trap without
@@ -600,7 +605,8 @@ mod tests {
         let stmt = MigrationRunner::migration_search_path_stmt("duroxide");
         assert_eq!(stmt, "SET LOCAL search_path TO duroxide, pg_temp");
         // The security property: pg_temp must be present and last, so temporary
-        // objects cannot shadow the migration's schema-qualified references.
+        // objects cannot shadow the unqualified references a migration relies on
+        // the search_path to resolve.
         assert!(stmt.ends_with(", pg_temp"));
     }
 }

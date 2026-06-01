@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defense-in-depth following the PostgreSQL `search_path` hardening guidance
   (CVE-2018-1058); `pg_temp` is per-session, so there is no live escalation path for
   the trusted SQL the runner executes today. No schema or behavioral change for
-  well-behaved callers.
+  well-behaved callers. Existing deployments are unaffected and require no
+  re-migration — the change only governs how future migrations are applied.
 
 ## [0.1.34] - 2026-05-25
 
