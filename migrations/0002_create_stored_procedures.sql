@@ -1,6 +1,6 @@
 -- Migration 0002: Create stored procedures for PostgreSQL provider
 -- This migration creates schema-qualified stored procedures to replace inline SQL queries
--- Note: This migration runs with SET LOCAL search_path TO {schema_name}, so procedures
+-- Note: This migration runs with SET LOCAL search_path TO {schema_name}, pg_temp, so procedures
 -- will be created in the target schema automatically. However, procedures need to use
 -- schema-qualified table names to work correctly when called from different contexts.
 

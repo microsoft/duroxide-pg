@@ -469,6 +469,20 @@ impl MigrationRunner {
         statements
     }
 
+    /// Build the `SET LOCAL search_path` statement used while applying a migration.
+    ///
+    /// `pg_temp` is pinned last so it sits at the lowest priority instead of its
+    /// implicit highest-priority position, preventing a temporary object from
+    /// shadowing the unqualified references a migration resolves via the
+    /// `search_path`. This is defense-in-depth (CVE-2018-1058); `pg_catalog` is left
+    /// unlisted so PostgreSQL keeps it implicitly first.
+    ///
+    /// `schema_name` is validated at provider construction
+    /// (`^[A-Za-z_][A-Za-z0-9_]*$`), so direct interpolation here is safe.
+    fn migration_search_path_stmt(schema_name: &str) -> String {
+        format!("SET LOCAL search_path TO {schema_name}, pg_temp")
+    }
+
     /// Apply a single migration
     async fn apply_migration(
         &self,
@@ -478,8 +492,14 @@ impl MigrationRunner {
         // Start transaction
         let mut tx = conn.begin().await?;
 
-        // Set search_path for this transaction
-        sqlx::query(&format!("SET LOCAL search_path TO {}", self.schema_name))
+        // Set search_path for this transaction.
+        //
+        // `pg_temp` is pinned explicitly at the lowest priority. Without it,
+        // `pg_temp` keeps its implicit highest-priority position, which would let a
+        // temporary object shadow the unqualified references this migration relies on
+        // the search_path to resolve. This is defense-in-depth (CVE-2018-1058
+        // guidance); see `migration_search_path_stmt` for the threat model.
+        sqlx::query(&Self::migration_search_path_stmt(&self.schema_name))
             .execute(&mut *tx)
             .await?;
 
@@ -558,5 +578,19 @@ impl MigrationRunner {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_search_path_pins_pg_temp_last() {
+        // The security property: pg_temp must be present and last, so temporary
+        // objects cannot shadow the unqualified references a migration relies on
+        // the search_path to resolve.
+        let stmt = MigrationRunner::migration_search_path_stmt("duroxide");
+        assert_eq!(stmt, "SET LOCAL search_path TO duroxide, pg_temp");
     }
 }
