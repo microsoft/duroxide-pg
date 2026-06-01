@@ -43,7 +43,8 @@ CREATE TABLE {schema}._duroxide_migrations (
 
 When writing migrations:
 
-1. **Use schema-relative names**: Migrations are executed with `SET LOCAL search_path`, so use unqualified table names:
+1. **Use schema-relative names**: Migrations are executed with
+   `SET LOCAL search_path TO <schema>, pg_temp`, so use unqualified table names:
    ```sql
    CREATE TABLE instances (...);
    ```
@@ -93,7 +94,8 @@ Migrations are automatically applied when creating a `PostgresProvider`. Each te
 
 - Migrations run inside transactions
 - Each migration is executed atomically (all-or-nothing)
-- The `search_path` is set to the target schema for each migration
+- The `search_path` is set to `<target schema>, pg_temp` for each migration
+  (`pg_temp` is pinned last so temporary objects cannot shadow schema objects)
 - Migrations run in the order specified by their version numbers
 
 ## Troubleshooting

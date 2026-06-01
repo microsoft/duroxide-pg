@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.35] - 2026-06-01
+
+### Security
+
+- **Pin `pg_temp` last in the migration `search_path`.** Each migration was applied
+  with `SET LOCAL search_path TO <schema>`, which left `pg_temp` at its implicit
+  highest-priority position. A temporary object could therefore shadow the
+  schema-qualified objects a migration references while it runs with elevated (DDL)
+  privileges — a privilege-escalation vector. Migrations now run with
+  `SET LOCAL search_path TO <schema>, pg_temp`, pinning the temporary-object schema
+  to the lowest priority. No schema or behavioral change for well-behaved callers.
+
 ## [0.1.34] - 2026-05-25
 
 ### Security
