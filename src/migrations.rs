@@ -473,8 +473,17 @@ impl MigrationRunner {
     ///
     /// `pg_temp` is appended explicitly so that the temporary-object schema sits at
     /// the lowest search priority instead of its implicit highest-priority position.
-    /// This prevents an attacker-created temporary object from shadowing the objects
-    /// a migration references while it executes with elevated privileges.
+    /// This is defense-in-depth following the PostgreSQL `search_path` guidance
+    /// (CVE-2018-1058): it stops a temporary object from shadowing the objects a
+    /// migration references while it runs with elevated (DDL) privileges. `pg_temp`
+    /// is per-session, so there is no live escalation path for the trusted, in-repo
+    /// SQL the runner executes today; this hardens against future reuse of the
+    /// migration connection or `SECURITY DEFINER` migrations.
+    ///
+    /// `pg_catalog` is intentionally *not* listed: when it is unnamed PostgreSQL
+    /// places it implicitly first, giving the desired `pg_catalog -> <schema> ->
+    /// pg_temp` order. Prepending it explicitly would add a maintenance trap without
+    /// improving safety, so leave it implicit.
     ///
     /// `schema_name` is validated at provider construction (it must match
     /// `^[A-Za-z_][A-Za-z0-9_]*$`), so direct interpolation here is safe.
@@ -495,9 +504,9 @@ impl MigrationRunner {
         //
         // `pg_temp` is pinned explicitly at the lowest priority. Without it,
         // `pg_temp` keeps its implicit highest-priority position, which would let
-        // a temporary object shadow the schema objects this migration references
-        // while it runs with elevated (DDL) privileges — a privilege-escalation
-        // vector. See `migration_search_path_stmt`.
+        // a temporary object shadow the schema objects this migration references.
+        // This is defense-in-depth (CVE-2018-1058 guidance); see
+        // `migration_search_path_stmt` for the threat model.
         sqlx::query(&Self::migration_search_path_stmt(&self.schema_name))
             .execute(&mut *tx)
             .await?;
