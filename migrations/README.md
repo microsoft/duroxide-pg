@@ -95,7 +95,8 @@ Migrations are automatically applied when creating a `PostgresProvider`. Each te
 - Migrations run inside transactions
 - Each migration is executed atomically (all-or-nothing)
 - The `search_path` is set to `<target schema>, pg_temp` for each migration
-  (`pg_temp` is pinned last so temporary objects cannot shadow schema objects)
+  (`pg_temp` is pinned last so temporary objects cannot shadow the unqualified
+  references migrations rely on the `search_path` to resolve)
 - Migrations run in the order specified by their version numbers
 
 ## Troubleshooting
