@@ -471,29 +471,14 @@ impl MigrationRunner {
 
     /// Build the `SET LOCAL search_path` statement used while applying a migration.
     ///
-    /// `pg_temp` is appended explicitly so that the temporary-object schema sits at
-    /// the lowest search priority instead of its implicit highest-priority position.
-    /// This is defense-in-depth following the PostgreSQL `search_path` guidance
-    /// (CVE-2018-1058): migrations reference objects by unqualified name and rely on
-    /// the `search_path` to resolve them to the target schema, so this stops a
-    /// same-named temporary object from being resolved instead while a migration runs
-    /// with elevated (DDL) privileges. (Schema-qualified references are never at
-    /// risk.) `pg_temp` is per-session, so there is no live escalation path for the
-    /// trusted, in-repo SQL the runner executes today; this hardens against future
-    /// reuse of the migration connection or `SECURITY DEFINER` migrations.
+    /// `pg_temp` is pinned last so it sits at the lowest priority instead of its
+    /// implicit highest-priority position, preventing a temporary object from
+    /// shadowing the unqualified references a migration resolves via the
+    /// `search_path`. This is defense-in-depth (CVE-2018-1058); `pg_catalog` is left
+    /// unlisted so PostgreSQL keeps it implicitly first.
     ///
-    /// This narrows but does not fully eliminate `pg_temp`: an unqualified name
-    /// that exists *only* in `pg_temp` (with no match in `<schema>` or
-    /// `pg_catalog`) still resolves to the temporary object. Migrations should
-    /// therefore continue to reference only objects they define in `<schema>`.
-    ///
-    /// `pg_catalog` is intentionally *not* listed: when it is unnamed PostgreSQL
-    /// places it implicitly first, giving the desired `pg_catalog -> <schema> ->
-    /// pg_temp` order. Prepending it explicitly would add a maintenance trap without
-    /// improving safety, so leave it implicit.
-    ///
-    /// `schema_name` is validated at provider construction (it must match
-    /// `^[A-Za-z_][A-Za-z0-9_]*$`), so direct interpolation here is safe.
+    /// `schema_name` is validated at provider construction
+    /// (`^[A-Za-z_][A-Za-z0-9_]*$`), so direct interpolation here is safe.
     fn migration_search_path_stmt(schema_name: &str) -> String {
         format!("SET LOCAL search_path TO {schema_name}, pg_temp")
     }
