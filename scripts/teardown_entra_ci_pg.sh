@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Tear down the resources created by `provision_entra_ci_pg.sh`.
 #
 # Deletes:

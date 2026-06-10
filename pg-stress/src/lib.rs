@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! PostgreSQL Provider Stress Tests for Duroxide
 //!
 //! This library provides PostgreSQL-specific stress test implementations for Duroxide,

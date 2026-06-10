@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Microsoft Entra ID (formerly Azure Active Directory) authentication support
 //! for [`PostgresProvider`](crate::PostgresProvider).
 //!

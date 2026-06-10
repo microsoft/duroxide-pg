@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # One-time provisioning for the Entra-auth live test in GitHub Actions CI.
 #
 # What this creates (idempotent — safe to re-run):

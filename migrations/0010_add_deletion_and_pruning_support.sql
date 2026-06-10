@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration 0010: Add deletion and pruning support
 -- This migration adds:
 -- 1. parent_instance_id column to instances table (for cascade deletion)

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0005_add_visible_at_to_worker_queue.sql
 -- Description: Adds visible_at column to worker_queue for delayed visibility (duroxide 0.1.5)
 -- This provides consistent visibility semantics between orchestrator_queue and worker_queue.

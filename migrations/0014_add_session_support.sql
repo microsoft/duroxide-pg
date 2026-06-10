@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0014_add_session_support.sql
 -- Description: Adds session affinity support for worker queue items.
 -- Creates sessions table, adds session_id column to worker_queue,

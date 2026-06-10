@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0006_use_rust_timestamps.sql
 -- Description: Updates all stored procedures to use Rust-provided timestamps (p_now_ms)
 -- instead of database NOW(). This ensures consistent time handling between the application

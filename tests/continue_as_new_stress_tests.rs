@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Stress tests for continue-as-new functionality with PostgreSQL provider
 //!
 //! These tests verify that long-running orchestrations using continue-as-new

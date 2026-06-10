@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration 0002: Create stored procedures for PostgreSQL provider
 -- This migration creates schema-qualified stored procedures to replace inline SQL queries
 -- Note: This migration runs with SET LOCAL search_path TO {schema_name}, pg_temp, so procedures

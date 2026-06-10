@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Tests that `cached plan must not change result type` (SQLSTATE 0A000) is
 //! handled as a retryable error, allowing transparent recovery when a stored
 //! procedure is replaced by a concurrent migration.

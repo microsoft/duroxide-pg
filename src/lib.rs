@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! # Duroxide PostgreSQL Provider
 //!
 //! A PostgreSQL-based provider implementation for [Duroxide](https://crates.io/crates/duroxide),
