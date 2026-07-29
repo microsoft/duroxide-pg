@@ -15,7 +15,7 @@ One-time provisioning (see `scripts/provision_entra_ci_pg.sh`) creates:
 | PG Flex Server | `pg-duroxide-entra-ci` | Burstable B1ms, **Entra-only auth** (password auth disabled), PG 16 |
 | Firewall rule | `allow-public` | `0.0.0.0`–`255.255.255.255`. Safe because Entra is the auth gate and the server has no production data. |
 | AAD application | `duroxide-pg-entra-ci` | Workload-identity-federated; **no client secret** |
-| Federated creds | `github-pr`, `github-main` | Subjects: `repo:microsoft/duroxide-pg:pull_request`, `repo:microsoft/duroxide-pg:ref:refs/heads/main` |
+| Federated creds | `github-pr-id`, `github-main-id` | Subjects: `repository_owner_id:6154722:repository_id:1157352866:pull_request`, `...:ref:refs/heads/main`. The `microsoft` org customizes the OIDC subject claim to the ID-based form — see [OIDC subject format](#oidc-subject-format). |
 | Entra admin | the SP above | Service principal is the test user |
 
 Approximate cost: ~$15-20/month for the Burstable B1ms server.
@@ -30,8 +30,9 @@ PR triggers workflow
          ▼                                  
 azure/login@v2                              
    issues OIDC token w/ subject ───────►   AAD app verifies federated
-   "repo:microsoft/duroxide-pg:             credential matches subject;
-    pull_request"                           returns AAD access token
+   "repository_owner_id:6154722:            credential matches subject;
+    repository_id:1157352866:               returns AAD access token
+    pull_request"                          
          │                                  
          ▼                                  
 sets env: AZURE_FEDERATED_TOKEN_FILE,       
@@ -110,14 +111,44 @@ runs on PR + nightly + manual dispatch:
       live test, which connects to the PG server using a fresh Entra token
       and exercises schema migrations + a basic query.
 
+## OIDC subject format
+
+GitHub issues **exactly one** subject per OIDC token. Its format depends on the
+repository's [subject claim customization][gh-sub]:
+
+| `use_default` | Subject format |
+|---|---|
+| `true` (GitHub default) | `repo:OWNER/REPO:<context>` |
+| `false` (this repo) | the customized claim keys, e.g. `repository_owner_id:<id>:repository_id:<id>:<context>` |
+
+The `microsoft` org customizes it to the ID-based form, which resists
+repo-rename attacks. Check the current setting with:
+
+```bash
+gh api repos/microsoft/duroxide-pg/actions/oidc/customization/sub
+# {"use_default":false,"include_claim_keys":["repository_owner_id","repository_id","context"], ...}
+```
+
+**Only register credentials in the format this repo actually emits.** A
+credential in the other format can never match, so it is permanent dead weight
+on the app — and tenant security sweeps delete such credentials, which looks
+exactly like CI breaking for no reason. `scripts/provision_entra_ci_pg.sh`
+detects the format and registers only the matching pair; it warns about any
+leftovers in the other format.
+
+> Because both credentials depend on this customization, resetting it to
+> `use_default: true` (or transferring the repo) breaks `main` and PR auth
+> simultaneously.
+
 ## Updating the federated credentials
 
 To allow another branch / environment to use the same AAD app, add another
-federated credential. Examples of valid GitHub OIDC subjects:
+federated credential. Build the subject from this repo's ID-based prefix
+`repository_owner_id:6154722:repository_id:1157352866:` plus the context:
 
-- `repo:OWNER/REPO:pull_request`
-- `repo:OWNER/REPO:ref:refs/heads/BRANCH`
-- `repo:OWNER/REPO:environment:ENVNAME`
+- `...:pull_request`
+- `...:ref:refs/heads/BRANCH`
+- `...:environment:ENVNAME`
 
 Add via:
 
@@ -125,12 +156,16 @@ Add via:
 az ad app federated-credential create \
   --id "$APP_ID" \
   --parameters '{
-    "name": "github-release",
+    "name": "github-release-id",
     "issuer": "https://token.actions.githubusercontent.com",
-    "subject": "repo:microsoft/duroxide-pg:ref:refs/tags/v*",
+    "subject": "repository_owner_id:6154722:repository_id:1157352866:ref:refs/tags/v1.0.0",
     "audiences": ["api://AzureADTokenExchange"]
   }'
 ```
+
+> Subjects are matched **exactly** — wildcards are not supported. Re-running
+> `scripts/provision_entra_ci_pg.sh` is the safer way to restore the standard
+> pair, since it derives the subjects from the live GitHub API.
 
 ## Teardown
 
@@ -145,6 +180,18 @@ shot) and the AAD application (federated creds + SP go with it).
 
 - **Workflow logs `Skipping live Entra test — missing repo vars`** — set
   the six repository variables (see Setup).
+- **`AADSTS700213` from `azure/login@v2`** — "No matching federated identity
+  record found for presented assertion subject". The app has no credential for
+  the subject GitHub sent. The error message quotes the exact subject received;
+  compare it against the app's credentials and re-run
+  `scripts/provision_entra_ci_pg.sh` to restore the standard pair:
+  ```bash
+  az ad app federated-credential list --id "$APP_ID" \
+    --query '[].{name:name,subject:subject}' -o table
+  ```
+  If `main` works but PRs fail (or vice versa), only one of the two credentials
+  is missing — this is what a deleted credential looks like, so check the
+  [Entra audit log](#auditing-credential-changes) before assuming misconfiguration.
 - **`AADSTS70021` from `azure/login@v2`** — the federated credential's
   `subject` doesn't match the workflow's actual OIDC subject. The
   `pull_request` subject only matches PR runs from the same repo, not
@@ -175,4 +222,21 @@ shot) and the AAD application (federated creds + SP go with it).
   chain. Running the live test through federated identity validates the
   primary credential path, not a developer-only fallback.
 
+## Auditing credential changes
+
+Federated credentials can be removed out-of-band (tenant security sweeps have
+done exactly this), and the only symptom is a failing `azure/login@v2` step.
+The Entra audit log records every change, including the before/after subject:
+
+```bash
+APP_OBJECT_ID=$(az ad app show --id "$APP_ID" --query id -o tsv)
+az rest --method GET --url \
+  "https://graph.microsoft.com/v1.0/auditLogs/directoryAudits?\$filter=targetResources/any(t:t/id eq '$APP_OBJECT_ID')&\$top=50"
+```
+
+Look for `Update application` entries whose `modifiedProperties` include
+`FederatedIdentityCredentials`; `oldValue` and `newValue` show exactly which
+credentials existed before and after.
+
+[gh-sub]: https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect#customizing-the-subject-claims-for-an-organization-or-repository
 [gh-oidc]: https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect
