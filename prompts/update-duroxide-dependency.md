@@ -196,22 +196,21 @@ done
 
 ## Step 9: Update Documentation
 
-### 8.1 Update CHANGELOG.md
-Add a new version entry with:
-- Version number and date
+### 9.1 Update CHANGELOG.md
+Add the dependency update to the existing `## [Unreleased]` section with:
 - Breaking changes section
 - Added features section
 - Any migration notes
 
-### 8.2 Update README.md
-- Update the "Latest Release" section
-- Update duroxide version compatibility if mentioned
+Do not create a dated version heading in a dependency update PR.
 
-### 8.3 Update Cargo.toml version
-Bump duroxide-pg version appropriately:
-- MAJOR: Breaking API changes
-- MINOR: New features, backward compatible
-- PATCH: Bug fixes only
+### 9.2 Preserve Release Metadata
+Dependency update and feature PRs are not release preparation. Keep all of the following unchanged:
+- The `duroxide-pg` package version in `Cargo.toml`
+- README's `Latest Release` and `Previous Release` sections
+- Existing dated version headings in `CHANGELOG.md`
+
+Only bump the package version, convert `[Unreleased]` to a dated release, and update README release sections when the user explicitly requests release or publish preparation. Follow `prompts/publish-crate.md` for that workflow.
 
 ## Step 10: Create Pull Request
 
