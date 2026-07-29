@@ -150,7 +150,9 @@ Follow the detailed guide in [prompts/update-duroxide-dependency.md](../prompts/
 3. **Implement API changes**: Update `src/provider.rs`, add migrations if needed
 4. **Add validation tests**: New tests go in `tests/postgres_provider_test.rs` using the `provider_validation_test!` macro
 5. **Test thoroughly**: `cargo test`, run flaky tests 10x
-6. **Update docs**: CHANGELOG.md, README.md, bump version
+6. **Document as unreleased**: Add dependency and compatibility notes under `CHANGELOG.md`'s existing `[Unreleased]` section
+
+Dependency update and feature PRs must keep the current `duroxide-pg` package version and published README release sections unchanged. Only bump `Cargo.toml`, convert `[Unreleased]` to a dated version, and update README's `Latest Release` section during an explicitly requested release/publish preparation following [prompts/publish-crate.md](../prompts/publish-crate.md).
 
 > ⚠️ **Never push to remote or publish to crates.io without explicit user confirmation**
 
