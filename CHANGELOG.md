@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.35] - 2026-07-29
+
 ### Security
 
 - **Pin `pg_temp` last in the migration `search_path`.** Each migration was applied
@@ -22,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the trusted SQL the runner executes today. No schema or behavioral change for
   well-behaved callers. Existing deployments are unaffected and require no
   re-migration — the change only governs how future migrations are applied.
+
+### Changed
+
+- **Bumped `duroxide` dependency** — `0.1.29` → `0.1.30`. The core 0.1.30
+  release fixes sub-orchestration parent notification across `continue_as_new`
+  and instance-id collisions, reserves the `sub::` marker for runtime-generated
+  child ids, and switches runtime-generated GUIDs and lock tokens to UUIDs.
+  The provider trait and PostgreSQL schema are unchanged; newly added parent-link
+  fields remain optional for wire compatibility with older work items.
+- Updated the `pg-stress` companion crate to use `duroxide` 0.1.30 as well.
+- Synced the upstream child `continue_as_new` E2E regression test for PostgreSQL.
 
 ## [0.1.34] - 2026-05-25
 
