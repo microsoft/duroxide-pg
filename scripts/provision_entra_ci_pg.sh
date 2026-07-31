@@ -15,9 +15,11 @@
 #                                                       the server)
 #   * AAD application    duroxide-pg-entra-ci          (federated workload identity)
 #   * Service principal  for the application
-#   * Federated creds    on the AAD app:
-#                          - repo:OWNER/REPO:pull_request
-#                          - repo:OWNER/REPO:ref:refs/heads/main
+#   * Federated creds    on the AAD app, in whichever subject format this
+#                        repo's OIDC token actually uses:
+#                          - ID-based    when the repo customizes the OIDC
+#                            subject claim (the microsoft org does), else
+#                          - repo-slug   when it uses GitHub's default
 #   * Entra admin        the application's service principal
 #
 # The script also prints the exact `gh variable set` commands (or the values
@@ -25,7 +27,10 @@
 #
 # Required:
 #   * az CLI logged in (`az login`)
-#   * gh CLI (optional; only used when --auto-set-vars is passed)
+#   * jq
+#   * gh CLI authenticated with read access to $GH_REPO. This is required (not
+#     optional): the federated credential subject format depends on the repo's
+#     OIDC subject-claim customization, which is read via the GitHub API.
 #
 # Optional env vars:
 #   GH_REPO              Repo slug, default "microsoft/duroxide-pg"
@@ -55,6 +60,7 @@ warn() { printf '\033[33m%s\033[0m\n' "$*" >&2; }
 require() { command -v "$1" >/dev/null 2>&1 || { err "Missing on PATH: $1"; exit 1; }; }
 require az
 require jq
+require gh
 
 AUTO_SET_VARS=0
 for arg in "$@"; do
@@ -141,28 +147,65 @@ add_federated() {
     ok "Federated credential '$name' created."
 }
 
-add_federated "github-pr"   "repo:${GH_REPO}:pull_request"
-add_federated "github-main" "repo:${GH_REPO}:ref:refs/heads/main"
+# GitHub emits exactly ONE subject per OIDC token, and its format depends on the
+# repo's "subject claim customization":
+#
+#   use_default: true   ->  repo:OWNER/REPO:<context>
+#   use_default: false  ->  the customized claim keys, e.g.
+#                           repository_owner_id:<id>:repository_id:<id>:<context>
+#
+# The microsoft org customizes it to the ID-based form (resists repo-rename
+# attacks). Registering the other format "just in case" is NOT harmless: such a
+# credential can never match, so it is permanent dead weight on the app and gets
+# flagged and removed by tenant security sweeps. Register only the matching pair.
 
-# Some GitHub orgs (including microsoft) customize the OIDC subject claim to
-# include repository_owner_id and repository_id (resists rename attacks).
-# Detect that customization via the GitHub API and register matching FICs.
-if command -v gh >/dev/null 2>&1; then
-    sub_template=$(gh api "repos/${GH_REPO}/actions/oidc/customization/sub" 2>/dev/null || true)
-    if [ -n "$sub_template" ] && echo "$sub_template" | grep -q '"repository_id"'; then
-        owner_id=$(gh api "repos/${GH_REPO}" --jq '.owner.id' 2>/dev/null || true)
-        repo_id=$(gh api "repos/${GH_REPO}" --jq '.id' 2>/dev/null || true)
-        if [ -n "$owner_id" ] && [ -n "$repo_id" ]; then
-            id_prefix="repository_owner_id:${owner_id}:repository_id:${repo_id}"
-            info "Org uses ID-based OIDC subject; registering ID-based FICs."
-            add_federated "github-pr-id"   "${id_prefix}:pull_request"
-            add_federated "github-main-id" "${id_prefix}:ref:refs/heads/main"
-        else
-            warn "Could not look up owner/repo IDs via gh; skipping ID-based FICs."
-        fi
+if ! sub_template=$(gh api "repos/${GH_REPO}/actions/oidc/customization/sub" 2>/dev/null); then
+    err "Could not read the OIDC subject-claim template for ${GH_REPO}."
+    err "The federated credential subject format depends on it, so continuing"
+    err "would likely create credentials that never match. Check that gh is"
+    err "authenticated with read access to the repo:"
+    err "  gh auth status && gh api repos/${GH_REPO}"
+    exit 1
+fi
+
+# Note: jq's `//` operator treats `false` as absent, so `(.use_default // true)`
+# would wrongly yield true here. Compare against true directly instead.
+if echo "$sub_template" | jq -e '(.use_default != true)
+        and ((.include_claim_keys // []) | index("repository_id")) != null' >/dev/null; then
+    owner_id=$(gh api "repos/${GH_REPO}" --jq '.owner.id' 2>/dev/null || true)
+    repo_id=$(gh api "repos/${GH_REPO}" --jq '.id' 2>/dev/null || true)
+    if [ -z "$owner_id" ] || [ -z "$repo_id" ]; then
+        err "${GH_REPO} uses an ID-based OIDC subject, but its owner/repo IDs"
+        err "could not be read via gh. Refusing to continue: the app would be"
+        err "left with no usable federated credential."
+        exit 1
     fi
+    id_prefix="repository_owner_id:${owner_id}:repository_id:${repo_id}"
+    info "Repo uses an ID-based OIDC subject; registering ID-based FICs."
+    FIC_PR="github-pr-id"
+    FIC_MAIN="github-main-id"
+    add_federated "$FIC_PR"   "${id_prefix}:pull_request"
+    add_federated "$FIC_MAIN" "${id_prefix}:ref:refs/heads/main"
 else
-    warn "gh CLI not found; skipping ID-based OIDC subject FICs."
+    info "Repo uses the default OIDC subject; registering repo-slug FICs."
+    FIC_PR="github-pr"
+    FIC_MAIN="github-main"
+    add_federated "$FIC_PR"   "repo:${GH_REPO}:pull_request"
+    add_federated "$FIC_MAIN" "repo:${GH_REPO}:ref:refs/heads/main"
+fi
+
+# Surface credentials left over from a previous subject format. They can never
+# match a token from this repo, and tenant security sweeps delete them -- which
+# is indistinguishable from CI breaking for no reason unless you know to look.
+stale=$(az ad app federated-credential list --id "$APP_ID" \
+    --query "[?name!='${FIC_PR}' && name!='${FIC_MAIN}'].name" -o tsv 2>/dev/null || true)
+if [ -n "$stale" ]; then
+    warn "Federated credentials that do not match ${GH_REPO}'s OIDC subject format:"
+    printf '%s\n' "$stale" | while IFS= read -r n; do
+        [ -n "$n" ] && warn "    - $n"
+    done
+    warn "These can never match a token from this repo. Remove them with:"
+    warn "    az ad app federated-credential delete --id $APP_ID --federated-credential-id NAME"
 fi
 
 # ---------- Postgres Flexible Server ----------
