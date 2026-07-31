@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **Stop `fetch_work_item` from scanning the future-visible backlog (migration
+  `0022`).** Inside the PL/pgSQL function the dequeue `SELECT` is cached as a
+  *generic* plan, which cannot estimate `visible_at <= $param` and so walks
+  `worker_queue_pkey` in `id` order, filtering every row whose `visible_at` is
+  still in the future — O(future-visible rows) per dequeue (~0.44 µs/row; ~44 ms
+  at 100k, crossing 10 ms near 25k). `fetch_work_item` now adds a redundant
+  `AND visible_at <= statement_timestamp()` bound, which the generic plan *can*
+  estimate, so it uses `idx_worker_visible` instead; measured flat at ~12 µs out
+  to 100k future-visible rows, with no dequeue-throughput regression. Behaviour is
+  otherwise unchanged: a row is returned only if it also passes the existing
+  application-clock bound. Caveat: this re-introduces a database-clock dependency
+  for visibility gating (cf. migration `0006`); if a worker's clock runs ahead of
+  the database's, a due timer fires late by up to the skew — bounded, self-healing,
+  never lost. Reproduce via `scripts/bench-fetch-work-item.sh`.
 - **Make mostly-NULL secondary indexes partial (migration `0023`).** Three
   secondary indexes cover columns that are NULL for the majority of rows, yet a
   plain B-tree still stored an entry for every row: `worker_queue.session_id`
@@ -22,8 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   i.e. non-session/untagged, population), so a session- or tag-heavy workload sees
   little benefit — but no regression, as value lookups still use the indexes.
   Reproduce via `scripts/bench-secondary-indexes.sh`.
-  (`0022` is reserved by the concurrent worker_queue dequeue change; this migration
-  is independent of it.)
 
 ### Security
 
