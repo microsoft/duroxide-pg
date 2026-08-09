@@ -1,0 +1,739 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Security
+
+- **Pin `pg_temp` last in the migration `search_path`.** Each migration was applied
+  with `SET LOCAL search_path TO <schema>`, which left `pg_temp` at its implicit
+  highest-priority position. Migrations reference objects by unqualified name and
+  rely on the `search_path` to resolve them to the target schema, so a same-named
+  temporary object could be resolved instead while a migration runs with elevated
+  (DDL) privileges. Migrations now run with `SET LOCAL search_path TO <schema>,
+  pg_temp`, pinning the temporary-object schema to the lowest priority so it can no
+  longer shadow those unqualified references. This is
+  defense-in-depth following the PostgreSQL `search_path` hardening guidance
+  (CVE-2018-1058); `pg_temp` is per-session, so there is no live escalation path for
+  the trusted SQL the runner executes today. No schema or behavioral change for
+  well-behaved callers. Existing deployments are unaffected and require no
+  re-migration — the change only governs how future migrations are applied.
+
+### Changed
+
+- **Bump `duroxide` dependency** — `0.1.29` → `0.1.30`. The core 0.1.30
+  release fixes sub-orchestration parent notification across `continue_as_new`
+  and instance-id collisions, reserves the `sub::` marker for runtime-generated
+  child ids, and switches runtime-generated GUIDs and lock tokens to UUIDs.
+  The provider trait and PostgreSQL schema are unchanged; newly added parent-link
+  fields remain optional for wire compatibility with older work items.
+- Update the `pg-stress` companion crate to use `duroxide` 0.1.30 as well.
+- Sync the upstream child `continue_as_new` E2E regression test for PostgreSQL.
+
+## [0.1.34] - 2026-05-25
+
+### Security
+
+- **Schema name validation at provider construction.** All constructors now
+  reject schema names that do not match `^[A-Za-z_][A-Za-z0-9_]*$`.
+  PostgreSQL identifiers cannot be bound as SQL parameters, so the schema
+  name is interpolated directly into the DDL and DML the provider issues.
+  Restricting the accepted character set up front eliminates the SQL
+  injection vector that would otherwise exist for callers that pass
+  attacker-controlled schema names. PostgreSQL's full identifier grammar
+  (including quoted identifiers) is broader; this validation is
+  intentionally conservative.
+
+### Changed
+
+- **BREAKING (unreleased API surface only):** `PostgresProvider::new_with_config`,
+  `new_with_schema`, and the deprecated Entra constructors now return an
+  error when `schema_name` contains characters outside
+  `[A-Za-z_][A-Za-z0-9_]*`. Previously such names were silently
+  interpolated into SQL. Callers passing only constants from their own code
+  (the common case) are unaffected. Already-shipped releases (`<= 0.1.33`)
+  are unaffected.
+
+- **BREAKING (unreleased API surface only):** Collapsed all `*_with_config`
+  and Entra-specific constructors into a single
+  `PostgresProvider::new_with_config(ProviderConfig)`. `ProviderConfig` now
+  carries the connection variant via a new `ConnectionConfig` enum
+  (`Url(String)` or `Entra { host, port, database, user, options }`),
+  the optional schema name, and the migration policy. Construct via
+  `ProviderConfig::url(database_url)` or
+  `ProviderConfig::entra(host, port, db, user, options)` and adjust fields
+  as needed. The previously unreleased `new_with_config(url, config)` and
+  `new_with_schema_and_config(url, schema, config)` constructors are
+  removed. `new(url)` and `new_with_schema(url, schema)` remain as
+  convenience wrappers.
+
+### Deprecated
+
+- `PostgresProvider::new_with_entra` and
+  `PostgresProvider::new_with_schema_and_entra` are deprecated in favor of
+  `new_with_config(ProviderConfig::entra(...))`. They continue to work and
+  delegate to the new path; they will be removed in a future release.
+- `PostgresProvider::initialize_schema` is deprecated. Every constructor
+  already runs the migration runner; this back-compat shim will be removed
+  in a future release.
+
+### Added
+
+- **Reject schemas ahead of the running binary.** Both `MigrationPolicy::ApplyAll`
+  and `MigrationPolicy::VerifyOnly` now fail fast when the `_duroxide_migrations`
+  tracking table records migration versions that are not bundled with the
+  running binary. Under `ApplyAll` the check runs under the migration advisory
+  lock and short-circuits before any DDL is executed, so an older binary
+  cannot rewrite a schema that is ahead of its code. The error message names
+  the unknown versions and instructs the operator to update the code.
+
+- **Configurable migration policy at provider construction.** New
+  `MigrationPolicy` enum, `ProviderConfig` struct, and `ConnectionConfig`
+  enum, plus the single new constructor `PostgresProvider::new_with_config`.
+  The default policy is `MigrationPolicy::ApplyAll`, which preserves
+  pre-feature behavior — all existing constructors (`new`,
+  `new_with_schema`, and the deprecated `new_with_entra` /
+  `new_with_schema_and_entra`) continue to apply pending migrations on
+  startup. The new `MigrationPolicy::VerifyOnly` policy skips migration
+  application and instead verifies that the `_duroxide_migrations` tracking
+  table exists in the target schema and that every embedded migration has
+  already been applied, returning an error otherwise. Intended for
+  processes that must not run DDL — e.g. application backends, where a
+  separately privileged worker is responsible for applying schema
+  changes. `VerifyOnly` does not take the migration advisory lock and does
+  not create or modify any database objects.
+
+- **Initialization regression tests.** Added integration tests for the
+  provider initialization paths: `VerifyOnly` against a missing schema, a
+  bare schema with no tracking table, and a schema whose tracking table is
+  behind the bundled migrations; and a concurrency test that exercises the
+  migration advisory lock by running two `ApplyAll` initializations against
+  the same fresh schema in parallel.
+
+### Fixed
+
+- Made the local Entra negative pipeline test detect PostgreSQL
+  trust-style authentication and skip that case instead of failing when the
+  test database accepts deliberately wrong passwords.
+
+## [0.1.33] - 2026-05-13
+
+### Fixed
+
+- **HTTPS connector missing from Entra credential chain.** Every HTTPS
+  request issued by the Microsoft Entra credential chain — including
+  `WorkloadIdentityCredential` (AKS / federated identity),
+  `ManagedIdentityCredential` (when going through AAD over HTTPS), and
+  the `ClientAssertionCredential` token endpoint — failed at hyper's
+  connector layer with `"invalid URL, scheme is not http"` before any
+  network I/O occurred. As a result, `PostgresProvider::new_with_entra`
+  and `new_with_schema_and_entra` were unreachable in production
+  topologies that rely on Workload Identity (the developer-tools
+  branch via `az login` was unaffected, which is why CI did not catch
+  the regression). Root cause: `azure_core`'s `reqwest` feature flows
+  through `typespec_client_core/reqwest`, which declares the optional
+  reqwest dep with `default-features = false`. With no TLS feature
+  enabled on the resolved reqwest build, hyper rejected every HTTPS URL
+  at the connector layer. Fixed by declaring an explicit
+  `reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }`
+  dep in `Cargo.toml`. Cargo feature unification activates the
+  native-tls (openssl-backed) connector on the resolved reqwest build
+  without modifying any source code, preserving the crate's FIPS-
+  compliance posture (no rustls / ring / aws-lc-rs in the resolved
+  graph). Added a regression test
+  (`tests/native_tls_regression.rs`) that constructs the
+  `azure_core::http` client used by `azure_identity` and asserts the
+  TLS connector accepts `https://` URLs.
+
+## [0.1.32] - 2026-05-08
+
+**Release:** <https://github.com/microsoft/duroxide-pg/releases/tag/v0.1.32>
+
+### Changed
+
+- **Bumped `duroxide` dependency** — `0.1.28` → `0.1.29`. The core 0.1.29 release
+  replaces `futures::join_all` / `join` / `select_biased!` with new crate-local
+  replay-safe combinators (`PollAllJoin`, `PollAllJoin2`, `PollAllJoin3`, `Select2`,
+  `Select3`) that poll every pending child future on each replay pass. This eliminates
+  a latent large-fan-in (≥ 1024 children) replay hang. The `futures` crate is now
+  optional in the core (retained via the `provider-test` feature used by this provider).
+  No provider-level code or schema changes required.
+
+## [0.1.31] - 2026-04-29
+
+### Added
+
+- **Microsoft Entra ID authentication** for Azure Database for PostgreSQL
+  Flexible Server. Two new constructors,
+  `PostgresProvider::new_with_entra` and
+  `PostgresProvider::new_with_schema_and_entra`, accept an
+  `EntraAuthOptions` configuration and authenticate via Entra access tokens
+  instead of a static password. A background task refreshes the token before
+  expiry and swaps it into the connection pool via
+  `sqlx::Pool::set_connect_options`. The default credential chain is
+  `[WorkloadIdentityCredential (when AKS federated env vars are present),
+  ManagedIdentityCredential, DeveloperToolsCredential]`, covering managed
+  identities, AKS Workload Identity, and `az login` developer flows. All Entra
+  connections are pinned to `PgSslMode::VerifyFull`. Brief auth-failure
+  windows during token rotation (SQLSTATE `28000` / `28P01`) are classified as
+  retryable on Entra-configured providers only — password-based providers keep
+  byte-identical classification. The refresh task is wrapped in a panic guard
+  so a credential SDK panic cannot tear down the runtime, and the cached
+  `EntraToken`'s `Debug` impl redacts the bearer secret.
+- New dependencies: `azure_core` 0.35, `azure_identity` 0.35, and a thin
+  `futures-util` (std-only) for `catch_unwind`. Both Azure crates are pinned
+  with `default-features = false` and only the native-tls-backed feature set
+  (`reqwest`/`reqwest_deflate`/`reqwest_gzip`/`tokio`) is enabled, so the
+  resolved dependency graph contains no rustls-based TLS crates — the
+  FIPS-aligned native-tls posture from 0.1.30 is preserved. Verified with
+  `cargo tree --target x86_64-unknown-linux-gnu --all-features --all-targets`
+  and a fresh `Cargo.lock`.
+- **Entra test coverage** — Two new test layers exercise the Entra
+  integration. (1) `mod entra_pipeline_tests` (in `src/provider.rs`) uses a
+  crate-internal `pub(crate) new_with_entra_with_token_source` seam to
+  inject a fake `TokenSource` against a local PostgreSQL, covering the full
+  token → connect-options → pool → migrations pipeline (positive, negative,
+  and schema-isolated cases) without an Azure dependency. (2)
+  `tests/entra_live_test.rs` provides an opt-in (`#[ignore]`) live smoke
+  test against a real Azure Database for PostgreSQL, gated by
+  `DUROXIDE_PG_ENTRA_LIVE_TEST=1`.
+
+## [0.1.30] - 2026-04-23
+
+### Changed
+
+- **TLS backend** — Switched the SQLx runtime feature from
+  `runtime-tokio-rustls` to `runtime-tokio-native-tls` in both the root crate
+  and the `pg-stress` companion. This eliminates the transitive dependency on
+  the `ring` crate (not FIPS compliant for our policy requirements). The Linux
+  crypto path now goes through OpenSSL via `native-tls`; macOS uses Secure
+  Transport, Windows uses SChannel. (#5)
+- **Build hygiene** — Dropped the `path = "../../duroxide"` and
+  `path = "../../../duroxide"` workspace-relative overrides on the `duroxide`
+  dependency. The crate now resolves `duroxide` purely from crates.io. (#5)
+- **Bumped `duroxide` dependency** — `0.1.27` → `0.1.28` (also drops `ring`
+  from the transitive graph).
+
+## [0.1.29] - 2026-04-06
+
+### Fixed
+- **Migration race condition on concurrent startup** (microsoft/duroxide#10): ported advisory lock
+  from duroxide-pg-opt. Multiple workers starting simultaneously against a fresh database no longer
+  crash with `duplicate key value violates unique constraint`. The migration runner now acquires a
+  PostgreSQL advisory lock (`pg_advisory_lock`) on a dedicated connection before executing any
+  migrations, serializing concurrent startup.
+- **Cached plan invalidation now retryable**: `cached plan must not change result type` (SQLSTATE
+  `0A000`) is now classified as a retryable error instead of permanent. This allows transparent
+  recovery when a stored procedure is replaced by a concurrent migration while workers are polling.
+
+### Added
+- `tests/concurrent_migration_tests.rs`: regression tests for concurrent startup with 2 and 6
+  workers, verifying the advisory lock serializes migration execution.
+- `tests/cached_plan_retryable_test.rs`: integration test verifying that `0A000` errors from
+  invalidated prepared statements are retried and recovered transparently.
+
+## [0.1.28] - 2026-04-04
+
+### Added
+- **Orchestration stats provider surface**: implemented `Provider::get_instance_stats()` for
+  per-instance history and KV introspection through `Client::get_orchestration_stats()`
+- **Management validation coverage**: wired the 3 new core `get_instance_stats` validation tests
+  into `tests/postgres_provider_test.rs`
+- **E2E parity coverage**: added `sample_orchestration_stats` and
+  `sample_kv_read_modify_write_counter`
+- **Provider validation tests**: `test_read_corrupted_history_returns_error`,
+  `test_read_with_execution_corrupted_history_returns_error`, plus 6 stats tests
+  (`carry_forward`, `kv_delta_only`, `kv_merged`, `history`, `kv`, `nonexistent`)
+
+### Fixed
+- **Deserialization error propagation**: `read()`, `read_with_execution()`, and
+  `read_history_with_execution_id()` now return `ProviderError::permanent` instead of
+  silently dropping malformed events via `.filter_map(.ok())`
+- **get_instance_stats carry_forward fix**: corrected JSONB path from
+  `-> 'kind' -> 'carry_forward_events'` to `-> 'carry_forward_events'` in stored procedure
+- **get_instance_stats error handling**: removed `EXCEPTION WHEN OTHERS` block that swallowed
+  errors in the stats stored procedure
+
+### Changed
+- Bumped `duroxide` dependency from `0.1.26` to `0.1.27`
+- Bumped provider crate version to `0.1.28`
+
+## [0.1.27] - 2026-03-15
+
+### Breaking Changes
+- **duroxide 0.1.26**: KV delta table — fixes read-modify-write replay poisoning
+
+### Added
+- **KV delta table**: New `kv_delta` table captures current-execution KV mutations (migration 0020)
+- **Two-table KV model**: `kv_store` only written at execution completion (Completed/CAN/Failed),
+  `kv_delta` written every turn. Fixes snapshot poisoning for RMW patterns.
+- **KV read stored procedures**: `get_kv_value` and `get_kv_all_values` now implemented as SPs
+  that merge `kv_store + kv_delta` with tombstone handling
+- **9 new provider validation tests** for KV delta behavior
+
+### Changed
+- `ack_orchestration_item` SP writes KV mutations to `kv_delta` instead of `kv_store`
+- Terminal execution (Completed/CAN/Failed) triggers delta→store merge then delta clear
+- `delete_instances_atomic` SP cascades to `kv_delta` table
+
+## [0.1.26] - 2026-03-14
+
+### Breaking Changes
+- **duroxide 0.1.25**: Updated duroxide dependency with KV timestamp support
+
+### Added
+- **KV timestamps**: Added `last_updated_at_ms` column to `kv_store` table (migration 0019)
+- **Bulk KV reads**: Implemented `get_kv_all_values()` provider method
+- **KV snapshot timestamps**: `fetch_orchestration_item` now returns `KvEntry` with value + timestamp
+- **Instance-scoped KV**: Execution pruning no longer deletes KV entries
+
+### Changed
+- KV materialization now persists `last_updated_at_ms` from `KeyValueSet` events
+- Provider validation test renamed: `test_kv_prune_removes_orphan_keys` → `test_kv_prune_preserves_all_keys`
+
+## [0.1.25] - 2026-03-13
+
+- **KV store support:** Durable key-value store for per-instance state. Orchestrations can store and retrieve key-value pairs via `ctx.set_value()` / `ctx.get_value()`. Client can read values via `client.get_value()` and poll with `client.wait_for_value()`. Cross-instance reads supported via `ctx.get_value_from_instance()`.
+- Migration 0018: `add_kv_store` — creates `kv_store` table, updates `fetch_orchestration_item` to load KV snapshot, updates `ack_orchestration_item` for KV materialization, updates deletion/pruning for KV cleanup.
+- Added 2 KV e2e sample tests (`sample_kv_request_response`, `sample_kv_cross_orchestration_read`)
+- Bumped duroxide dependency to 0.1.24
+
+## [0.1.24] - 2026-03-07
+
+- Updated duroxide dependency from 0.1.21 to 0.1.22
+- **Activity tag routing:** Workers can filter activities by tag for heterogeneous worker pools
+  - New `tag TEXT` column on `worker_queue` table with index
+  - `enqueue_worker_work` stored proc now accepts 7th parameter `p_tag TEXT`
+  - `fetch_work_item` stored proc now accepts `p_tag_filter TEXT[]` and `p_tag_mode TEXT` parameters
+  - Tag modes: `default_only` (untagged only), `tags` (matching only), `default_and` (both),
+    `any` (all), `none` (nothing)
+  - `TagFilter::None` short-circuits in Rust (returns `Ok(None)` before DB call)
+- Migration 0016: `add_activity_tags` (additive schema change + stored procedure updates)
+- Added 9 tag filtering validation tests
+- Added 3 tag e2e tests (`sample_heterogeneous_workers_with_tags_fs`,
+  `sample_starvation_safe_tagged_activity_fs`, `sample_dual_runtime_tag_cooperation_fs`)
+- Total validation tests: 175 (up from 166)
+
+## [0.1.23] - 2026-03-06
+
+- Updated duroxide dependency from 0.1.20 to 0.1.21
+- **Orphan queue message handling:** Drop `QueueMessage` items enqueued before orchestration
+  starts (detected via `orchestration_name == "Unknown"` with empty history and all-QueueMessage
+  batch). Non-QueueMessage items (e.g., `CancelInstance`) are kept for retry.
+- Added `test_orphan_queue_messages_dropped` validation test
+- Added `sample_config_hot_reload_persistent_events_fs` e2e test
+- Total validation tests: 166 (up from 165)
+
+## [0.1.22] - 2026-02-22
+
+- Updated duroxide dependency from 0.1.19 to 0.1.20
+- **Custom status as history events:** `ack_orchestration_item` now scans `history_delta` for
+  `CustomStatusUpdated` events instead of reading `ExecutionMetadata.custom_status`
+  - Removed `CustomStatusUpdate` enum usage (removed upstream in duroxide 0.1.20)
+  - Custom status is now fully durable and replayable via history events
+- **`short_poll_threshold()` override:** ProviderFactory now returns 500ms for PostgreSQL,
+  resolving duroxide #51 (removed warmup workarounds from short-poll tests)
+- Added `test_orphan_activity_after_instance_force_deletion` validation test
+- Total validation tests: 165 (up from 164)
+
+## [0.1.21] - 2026-02-20
+
+- Updated duroxide dependency from 0.1.18 to 0.1.19
+- **Custom Status:** Instance-scoped custom status for progress reporting
+  - New `custom_status TEXT` and `custom_status_version INTEGER` columns on `instances` table
+  - `ack_orchestration_item` now handles `CustomStatusUpdate::Set` / `Clear` from `ExecutionMetadata`
+  - New `get_custom_status` stored procedure and Provider method for polling status changes
+  - Custom status survives `ContinueAsNew` (stored on instances, not executions)
+- **Worker lock expiry validation:** `ack_worker` now rejects acks when the worker lock has expired
+  - Aligns with SQLite provider behavior (`locked_until > now` check)
+- **QueueMessage support:** `enqueue_for_orchestrator` and `fetch_work_item` now handle the new `QueueMessage` work item variant
+- Migration 0015: `add_custom_status` (additive schema change + stored procedure updates)
+- Added 7 custom status validation tests
+- Added 1 prune validation test (`test_prune_bulk_includes_running_instances`)
+- Added 2 lock expiration validation tests
+- Total validation tests: 164 (up from 153)
+
+## [0.1.20] - 2026-02-17
+
+- Updated duroxide dependency from 0.1.17 to 0.1.18
+- **Activity Session Affinity:** Full session routing for worker queue items
+  - `fetch_work_item` now accepts `SessionFetchConfig` for session-aware routing
+  - New `renew_session_lock` stored procedure for session heartbeats
+  - New `cleanup_orphaned_sessions` stored procedure for idle session cleanup
+  - `ack_worker` and `renew_work_item_lock` piggyback `last_activity_at` updates on session rows
+  - `ack_orchestration_item` extracts `session_id` from `ActivityExecute` worker items
+- Migration 0014: `add_session_support` (new `sessions` table, `worker_queue.session_id` column, session routing logic)
+- Added 33 session validation tests (total validation tests: 153)
+- Added 7 session e2e tests
+
+## [0.1.19] - 2026-02-09
+
+- Updated duroxide dependency from 0.1.16 to 0.1.17
+- **Provider Capability Filtering (Phase 1):** SQL-level version filtering before lock acquisition
+  - `fetch_orchestration_item` now accepts `DispatcherCapabilityFilter` parameter
+  - New `duroxide_version_major/minor/patch` columns on `executions` table
+  - Pinned version stored via `ack_orchestration_item` metadata
+  - NULL versions treated as always compatible (backward compat)
+- **History deserialization contract:** History errors now surface via `history_error` field
+  instead of returning `ProviderError`, enabling poison message detection
+- Migration 0013: `add_capability_filtering` (additive, safe for rolling upgrades)
+- Total validation tests: 120 (up from 100)
+
+## [0.1.18] - 2026-02-03
+
+### Changed
+
+- Update to duroxide 0.1.16
+
+### Notes
+
+- duroxide 0.1.16 adds `ActivityCancelRequested` and `SubOrchestrationCancelRequested` history events
+- No provider API changes required (additive change only)
+- Total validation tests: 101 (unchanged)
+
+## [0.1.17] - 2026-01-30
+
+### Changed
+
+- Update to duroxide 0.1.15
+
+### Fixed
+
+- **CRITICAL:** Fix `ack_orchestration_item` cancellation ordering
+  - Worker items are now inserted BEFORE cancelled activities are deleted
+  - Enables "schedule-then-cancel" pattern where an activity is both scheduled AND cancelled in the same call
+  - Previously, activities scheduled and cancelled in the same turn would remain in the queue
+
+### Added
+
+- Migration 0011: `0011_fix_cancellation_ordering.sql`
+- 2 new cancellation validation tests from duroxide 0.1.15:
+  - `test_same_activity_in_worker_items_and_cancelled_is_noop`
+  - `test_stale_activity_after_delete_recreate`
+
+### Notes
+
+- Total validation tests: 101 (down from 135 - duroxide 0.1.15 consolidated some tests)
+
+## [0.1.16] - 2026-01-25
+
+### Fixed
+
+- **REGRESSION FIX:** `prune_executions_bulk` now correctly includes running instances
+  - Bug: The query filtered to only terminal-state instances (`WHERE e.status IN ('Completed', 'Failed', 'ContinuedAsNew')`)
+  - This excluded running instances (like long-running actors using `ContinueAsNew`) that had old executions needing pruning
+  - Fix: Changed to `WHERE 1=1` to include all instances, matching SQLite provider behavior
+  - The underlying `prune_executions()` call already protects the current execution from being pruned
+  - This fix was previously on branch `fix/cleanup-schema-drops-functions` but was never merged to main
+
+- `cleanup_schema()` now drops all stored procedures in addition to tables
+  - Previously only dropped tables, leaving stored procedures orphaned when using public schema
+  - This was problematic because `DROP SCHEMA CASCADE` only runs for non-public schemas
+  - Now drops all 26 stored procedures for complete cleanup
+
+### Notes
+
+- Total validation tests: 135 (unchanged)
+- These fixes were previously on branch `fix/cleanup-schema-drops-functions` but never merged to main
+
+## [0.1.15] - 2026-01-24
+
+### Changed
+
+- Update to duroxide 0.1.14
+
+### Fixed
+
+- Upstream fix: fire-and-forget orchestrations (`ctx.schedule_orchestration()`) now correctly record `OrchestrationChained` events in history
+  - Previously, detached orchestrations followed by activities would fail replay with nondeterminism error
+  - This was a duroxide bug fixed in 0.1.14
+
+### Notes
+
+- Total validation tests: 135 (unchanged)
+- duroxide-pg 0.1.14 yanked (depended on yanked duroxide 0.1.13)
+
+## [0.1.14] - 2026-01-24 [YANKED]
+
+### Changed
+
+- Update to duroxide 0.1.13 (yanked)
+- `utcnow()` renamed to `utc_now()` in test files (breaking API change in duroxide)
+
+### Notes
+
+- Total validation tests: 135 (unchanged)
+- duroxide 0.1.13 reimplements system calls as regular activities, simplifying replay
+- **YANKED:** Depends on yanked duroxide 0.1.13
+
+## [0.1.13] - 2026-01-24
+
+### Changed
+
+- **BREAKING:** Update to duroxide 0.1.12 API with simplified future handling
+- `DurableFuture` now implements `Future` directly - no more `.into_activity()`, `.into_timer()`, etc.
+- `Runtime::start_with_store` and `start_with_options` now take `ActivityRegistry` directly (not `Arc<ActivityRegistry>`)
+- `ctx.select(vec![...])` replaced with `ctx.select2(f1, f2)` returning `Either2<T1, T2>`
+- `ctx.join(...)` now returns `Vec<T>` directly instead of `Vec<DurableOutput>`
+
+### Notes
+
+- Total validation tests: 99 (unchanged)
+- All 25 e2e sample tests passing
+- All 2 regression tests passing
+
+## [0.1.12] - 2026-01-06
+
+### Fixed
+
+- Fix migration system to handle function signature changes
+  - Add `DROP FUNCTION IF EXISTS` before all `CREATE OR REPLACE FUNCTION` statements
+  - PostgreSQL cannot replace functions when return type changes without explicit DROP
+  - Affected migrations: 0002 (13 functions), 0010 (4 functions)
+
+### Notes
+
+- Total validation tests: 135 (unchanged)
+- This fix resolves test failures when running against existing public schema
+
+## [0.1.11] - 2026-01-05
+
+### Changed
+
+- **BREAKING:** Update to duroxide 0.1.9
+- `get_instance_info` now returns `parent_instance_id` field for sub-orchestration hierarchy
+
+### Added
+
+- New migration `0010_add_deletion_and_pruning_support.sql`:
+  - Adds `parent_instance_id` column to `instances` table
+  - 5 new stored procedures: `list_children`, `get_parent_id`, `delete_instances_atomic`, `prune_executions`, `get_instance_info` (updated)
+- 6 new ProviderAdmin methods for Management API:
+  - `list_children(instance_id)` - List direct child sub-orchestrations
+  - `get_parent_id(instance_id)` - Get parent instance ID
+  - `delete_instances_atomic(ids, force)` - Atomic batch deletion with cascade
+  - `delete_instance_bulk(filter)` - Bulk delete with filters
+  - `prune_executions(instance_id, options)` - Prune old executions
+  - `prune_executions_bulk(filter, options)` - Bulk prune across instances
+- 19 new provider validation tests:
+  - 12 deletion tests (cascade delete, hierarchy, atomic operations)
+  - 3 prune tests (options, safety, bulk)
+  - 4 bulk deletion tests (filters, limits, cascading)
+
+### Notes
+
+- Total validation tests: 99 (up from 80)
+- All pruning operations now raise error for non-existent instances (matches duroxide semantics)
+- Parent/child relationships tracked via `parent_instance_id` column
+
+## [0.1.10] - 2026-01-02
+
+### Changed
+
+- **BREAKING:** Update to duroxide 0.1.8 (crates.io release)
+- Remove `ExecutionState` from provider API (was experimental in 0.1.7, removed in 0.1.8)
+  - `fetch_work_item` now returns `(WorkItem, String, u32)` (removed 4th column)
+  - `renew_work_item_lock` now returns `()` instead of `ExecutionState`
+- Add activity cancellation support via lock stealing
+  - `ack_orchestration_item` now accepts `cancelled_activities` parameter
+  - Worker queue items now track `instance_id`, `execution_id`, `activity_id` for cancellation lookup
+
+### Added
+
+- New migration `0008_remove_execution_state.sql` - removes ExecutionState from stored procedures
+- New migration `0009_add_activity_cancellation_support.sql` - adds lock stealing support
+- New script `scripts/generate_migration_diff.sh` - auto-generates migration diff markdown files
+- 5 new lock-stealing validation tests:
+  - `test_cancelled_activities_deleted_from_worker_queue`
+  - `test_ack_work_item_fails_when_entry_deleted`
+  - `test_renew_fails_when_entry_deleted`
+  - `test_cancelling_nonexistent_activities_is_idempotent`
+  - `test_batch_cancellation_deletes_multiple_activities`
+- 3 new long-polling validation tests
+
+### Fixed
+
+- All timestamps in migration 0009 now use Rust-provided time (`v_now_ts`) instead of database `NOW()`
+
+### Notes
+
+- Total validation tests: 80 (up from 72)
+- Switched duroxide dependency from git to crates.io
+- Migration diff files are now required for all schema changes
+
+## [0.1.9] - 2025-12-28
+
+### Added
+
+- Activity cancellation support (duroxide 0.1.7)
+  - `fetch_work_item` now returns `ExecutionState` as fourth column
+  - `renew_work_item_lock` now returns `ExecutionState` (was `void`)
+  - `ack_work_item` now accepts `Option<WorkItem>` to support cancellation without enqueue
+- New migration `0007_add_execution_state_support.sql`
+- 9 new provider validation tests for cancellation:
+  - `test_fetch_returns_running_state_for_active_orchestration`
+  - `test_fetch_returns_terminal_state_when_orchestration_completed`
+  - `test_fetch_returns_terminal_state_when_orchestration_failed`
+  - `test_fetch_returns_terminal_state_when_orchestration_continued_as_new`
+  - `test_fetch_returns_missing_state_when_instance_deleted`
+  - `test_renew_returns_running_when_orchestration_active`
+  - `test_renew_returns_terminal_when_orchestration_completed`
+  - `test_renew_returns_missing_when_instance_deleted`
+  - `test_ack_work_item_none_deletes_without_enqueue`
+
+### Changed
+
+- Updated to duroxide 0.1.7
+- `parse_execution_state` helper added to convert database strings to `ExecutionState` enum
+
+### Notes
+
+- Total validation tests: 72 (up from 63)
+- ExecutionState values: `Running`, `Terminal:<status>`, `Missing`
+- Enables runtime to detect orchestration state changes during long-running activities
+
+## [0.1.8] - 2025-12-19
+
+### Fixed
+
+- Fix timestamp consistency issue causing intermittent test failures
+  - All stored procedures now receive timestamps from Rust (`p_now_ms`) instead of using database `NOW()`
+  - Eliminates clock skew and precision mismatch between application and database time
+  - Affected procedures: `enqueue_worker_work`, `abandon_work_item`, `abandon_orchestration_item`, `ack_worker`, `ack_orchestration`, `enqueue_orchestration_work`, `enqueue_completion`, `enqueue_message`
+
+### Added
+
+- New migration `0006_use_rust_timestamps.sql` - updates all stored procedures to use Rust-provided timestamps
+
+### Notes
+
+- Total validation tests: 93 (25 basic + 63 provider + 2 regression + 3 doc tests)
+- This fix resolves timing-related failures that varied by database latency
+
+## [0.1.7] - 2025-12-19
+
+### Added
+
+- Worker queue visibility control via `visible_at` column (duroxide 0.1.5)
+  - Added `visible_at` column to `worker_queue` table
+  - `fetch_work_item` now checks `visible_at <= now` in addition to lock status
+  - `abandon_work_item` with delay now sets `visible_at` instead of keeping `locked_until`
+  - Cleaner semantics: `visible_at` controls visibility, `locked_until` only for lock expiry
+- New migration `0005_add_visible_at_to_worker_queue.sql`
+- 2 new provider validation tests:
+  - `test_worker_item_immediate_visibility` - Verify newly enqueued items are immediately visible
+  - `test_worker_delayed_visibility_skips_future_items` - Verify items with future visible_at are skipped
+
+### Changed
+
+- Updated to duroxide 0.1.5
+
+### Notes
+
+- Total validation tests: 64 (up from 62)
+
+## [0.1.6] - 2024-12-13
+
+### Added
+
+- `name()` method on Provider trait - returns "duroxide-pg"
+- `version()` method on Provider trait - returns crate version
+- Long-polling design document (`docs/LONG_POLLING_DESIGN.md`)
+
+### Changed
+
+- Updated to duroxide 0.1.4
+
+### Notes
+
+- Long-polling is a design document only; implementation pending
+
+## [0.1.5] - 2024-12-14
+
+### Fixed
+
+- Added migration 0004 to update stored procedures for existing databases
+  - 0.1.4 only updated migration 0002 which doesn't run on existing databases
+  - This migration recreates procedures with attempt_count support
+
+## [0.1.4] - 2024-12-14
+
+### Added
+
+- 3 new provider validation tests from duroxide 0.1.3:
+  - `test_abandon_work_item_releases_lock` - Verify abandon_work_item releases lock immediately
+  - `test_abandon_work_item_with_delay` - Verify abandon_work_item with delay defers refetch
+  - `max_attempt_count_across_message_batch` - Verify MAX attempt_count returned for batched messages
+
+### Fixed
+
+- `abandon_work_item` with delay now correctly keeps lock_token to prevent immediate refetch
+  (matches SQLite provider behavior from duroxide 0.1.3)
+- `abandon_orchestration_item` without delay no longer updates visible_at
+  (was causing timing issues where messages became temporarily invisible)
+
+### Notes
+
+- Total validation tests: 61 passing
+- Updated to duroxide 0.1.3 from crates.io
+
+## [0.1.3] - 2024-12-14
+
+### Changed
+
+- **BREAKING:** Updated to duroxide 0.1.2 API with poison message handling
+- `fetch_orchestration_item` now returns `(OrchestrationItem, String, u32)` tuple (lock_token and attempt_count moved to tuple)
+- `fetch_work_item` now returns `(WorkItem, String, u32)` tuple (added attempt_count)
+- `abandon_orchestration_item` now requires `ignore_attempt: bool` parameter
+- `OrchestrationItem` no longer contains `lock_token` field (moved to return tuple)
+
+### Added
+
+- New migration `0003_add_attempt_count.sql` - adds `attempt_count` column to queue tables
+- `abandon_work_item()` method - explicit work item lock release with delay and ignore_attempt support
+- `renew_orchestration_item_lock()` method - extends orchestration lock timeout for long-running turns
+- 8 new poison message validation tests:
+  - `orchestration_attempt_count_starts_at_one`
+  - `orchestration_attempt_count_increments_on_refetch`
+  - `worker_attempt_count_starts_at_one`
+  - `worker_attempt_count_increments_on_lock_expiry`
+  - `attempt_count_is_per_message`
+  - `abandon_work_item_ignore_attempt_decrements`
+  - `abandon_orchestration_item_ignore_attempt_decrements`
+  - `ignore_attempt_never_goes_negative`
+
+### Notes
+
+- Total validation tests: 58 (up from 50)
+- Poison message detection is automatic in duroxide runtime when `attempt_count` exceeds `max_attempts` (default: 10)
+
+## [0.1.2] - 2024-12-10
+
+### Changed
+
+- Updated to duroxide 0.1.1 API
+- `fetch_orchestration_item` now accepts `poll_timeout: Duration` parameter (for long-polling support)
+- `fetch_work_item` now accepts `poll_timeout: Duration` parameter (for long-polling support)
+- Updated test configurations to use `dispatcher_min_poll_interval` (renamed from `dispatcher_idle_sleep`)
+- Updated tests to use new `continue_as_new()` awaitable API (`return ctx.continue_as_new(input).await`)
+
+### Notes
+
+- The `test_worker_lock_renewal_extends_timeout` validation test may fail with high-latency database connections (>200ms round-trip). This is a timing-sensitive test from the duroxide validation suite, not a provider bug.
+
+## [0.1.1] - 2024-12-09
+
+### Added
+
+- Initial release on crates.io
+- Full implementation of `Provider` trait for PostgreSQL
+- Full implementation of `ProviderAdmin` trait for management/observability
+- Atomic stored procedures for all provider operations
+- Instance-level locking with advisory locks
+- Worker queue with lock renewal support
+- Multi-execution support for continue-as-new
+- Comprehensive test suite with 50+ validation tests

@@ -1,0 +1,82 @@
+[workspace]
+members = [".", "pg-stress"]
+
+[package]
+name = "duroxide-pg"
+version = "0.1.34"
+edition = "2021"
+authors = ["Affan Dar <affandar@gmail.com>"]
+description = "A PostgreSQL-based provider implementation for Duroxide, a durable task orchestration framework"
+license = "MIT"
+repository = "https://github.com/microsoft/duroxide-pg"
+readme = "README.md"
+keywords = ["duroxide", "postgresql", "workflow", "orchestration", "durable-execution"]
+categories = ["database", "asynchronous"]
+exclude = [
+    "pg-stress/",
+    "tests/",
+    "scripts/",
+    "docs/",
+    "prompts/",
+    "logs/",
+    "target/",
+    ".paw/",
+    ".env*",
+    "STATUS.md",
+    "QUICK_REFERENCE.txt",
+    "STRESS_TEST_SUMMARY.md",
+    "TODO.md",
+]
+
+[dependencies]
+duroxide = { version = "0.1.30", features = ["provider-test"] }
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "chrono"], default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dotenvy = "0.15"
+uuid = { version = "1.0", features = ["v4"] }
+anyhow = "1.0"
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+semver = "1.0"
+include_dir = "0.7"
+# Azure SDK for Microsoft Entra ID authentication.
+#
+# FIPS-compliance posture: this crate's TLS stack is native-tls/openssl only
+# (sqlx is pinned to `runtime-tokio-native-tls` above; see commit 8406eaec).
+# Both Azure crates are pinned with `default-features = false` to suppress
+# their `reqwest_rustls` default feature, which would otherwise pull a
+# rustls-based TLS stack into the dependency graph. We enable only the
+# minimum needed for HTTP transport (`reqwest` + gzip/deflate) and `tokio`
+# for the async runtime.
+#
+# The explicit `reqwest` dep below is required: `azure_core/reqwest` activates
+# `typespec_client_core/reqwest`, which activates the optional reqwest dep
+# with `default-features = false`. Without this line, the resolved reqwest
+# build has NO TLS backend compiled in — every HTTPS request fails at the
+# hyper connector with `"invalid URL, scheme is not http"`, which breaks
+# `WorkloadIdentityCredential`, `ManagedIdentityCredential` (HTTPS-bound)
+# and the `ClientAssertionCredential` token endpoint. Note that in
+# reqwest 0.13.3 the `default-tls` feature resolves to rustls, NOT
+# native-tls, so we cannot rely on enabling reqwest defaults to preserve
+# the openssl posture; we must select `native-tls` explicitly. Cargo
+# feature unification merges this dep with `typespec_client_core`'s reqwest
+# dep at the same resolved version, activating the openssl-backed
+# connector throughout the graph.
+#
+# Verified with `cargo tree --target x86_64-unknown-linux-gnu --edges normal`
+# and a fresh Cargo.lock: no rustls / ring / aws-lc-rs / hyper-rustls
+# crates appear in the resolved dependency graph; `hyper-tls` +
+# `tokio-native-tls` + `native-tls` are activated.
+azure_core = { version = "0.35", default-features = false, features = ["reqwest", "reqwest_deflate", "reqwest_gzip", "tokio"] }
+azure_identity = { version = "0.35", default-features = false, features = ["tokio"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
+# Used for FutureExt::catch_unwind in the Entra refresh task panic guard.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+duroxide-pg-stress = { path = "pg-stress" }
+url = "2"
