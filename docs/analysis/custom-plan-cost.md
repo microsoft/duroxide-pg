@@ -67,6 +67,15 @@ With **no** future-visible backlog, the worst case for the fix:
 
 | Clients | A: current | B: forced custom | Change |
 |---:|---:|---:|---|
+| 1 | 2,425.2/s | 1,922.5/s | **-20.7%** |
+| 8 | 6,566.5/s | 5,391.1/s | **-17.9%** |
+| 32 | 5,883.4/s | 4,912.6/s | **-16.5%** |
+| 64 | 4,591.5/s | 4,283.0/s | -6.7% |
+
+With a small backlog of 100 future-visible rows:
+
+| Clients | A: current | B: forced custom | Change |
+|---:|---:|---:|---|
 | 1 | 2,126.0/s | 1,916.7/s | -9.8% |
 | 8 | 5,935.5/s | 5,481.9/s | -7.6% |
 | 32 | 5,256.3/s | 4,968.3/s | -5.5% |

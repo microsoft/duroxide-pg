@@ -79,7 +79,7 @@ Several plausible explanations were tested and ruled out.
   blocks the index.
 - **A missing index.** Adding `(visible_at, id)` had no effect at all
   (439.806 ms). The generic plan still prefers the primary key scan.
-- **The `LEFT JOIN sessions`.** Withe join, 434.22 ms. No material
+- **The `LEFT JOIN sessions`.** With the join, 434.22 ms. No material
   difference.
 - **The tag filter branches.** The no-tag case was 451.569 ms. No material
   difference.
