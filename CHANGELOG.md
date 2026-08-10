@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Make mostly-NULL secondary indexes partial (migration `0023`).** Three
+  secondary indexes cover columns that are NULL for the majority of rows, yet a
+  plain B-tree still stored an entry for every row: `worker_queue.session_id`
+  (NULL for non-session work items), `worker_queue.tag` (NULL for untagged items),
+  and `orchestrator_queue.lock_token` (NULL for unclaimed rows). Each is only ever
+  probed by a concrete non-NULL value, so they are now `... WHERE <col> IS NOT NULL`.
+  On a 500k-row load (~5% sessioned/tagged, ~10% claimed) this shrank the indexes
+  ~12x/~18x/~2x (session/tag/lock) and cut bulk-insert time ~16%, with value lookups
+  still index-served. This is a distribution-dependent write-path win: the savings
+  scale with how NULL-heavy the columns are (the figures use a ~95%-NULL,
+  i.e. non-session/untagged, population), so a session- or tag-heavy workload sees
+  little benefit — but no regression, as value lookups still use the indexes.
+  Reproduce via `scripts/bench-secondary-indexes.sh`.
+  (`0022` is reserved by the concurrent worker_queue dequeue change; this migration
+  is independent of it.)
+
 ### Security
 
 - **Pin `pg_temp` last in the migration `search_path`.** Each migration was applied
