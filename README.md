@@ -190,6 +190,8 @@ Two test layers cover the Entra integration:
 - No API changes; no migrations required.
 - See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
+> **Releases are published by Microsoft's internal OSS infrastructure.** See [RELEASE_POLICY.md](RELEASE_POLICY.md) for details.
+
 ## Previous Release (0.1.32)
 
 - Bumped `duroxide` core dependency to `0.1.29`. The core 0.1.29 release replaces `futures::join_all`/`join`/`select_biased!` with replay-safe crate-local combinators that eliminate a latent large-fan-in (≥ 1024 children) replay hang. No provider-level code or schema changes required.
