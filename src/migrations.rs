@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use anyhow::Result;
 use include_dir::{include_dir, Dir};
 use sqlx::Connection;
@@ -71,10 +74,141 @@ impl MigrationRunner {
         let conn = &mut *conn;
         self.lock_for_migrations(conn).await?;
 
-        let result = self.migrate_inner(conn).await;
+        // Reject unknown migrations while holding the advisory lock so that an
+        // older binary cannot rewrite a schema that is ahead of its code.
+        // Short-circuit: do NOT run migrate_inner if unknown migrations are
+        // detected.
+        let result = match self.check_no_unknown_migrations(conn).await {
+            Ok(()) => self.migrate_inner(conn).await,
+            Err(e) => Err(e),
+        };
         self.unlock_for_migrations(conn).await;
 
         result
+    }
+
+    /// Verify that the migration tracking table exists and that every embedded
+    /// migration has already been applied. Does not take the migration
+    /// advisory lock and does not create or modify any database objects.
+    ///
+    /// Returns an error if the `_duroxide_migrations` table is missing in
+    /// `schema_name` or if any bundled migration version is absent from it.
+    ///
+    /// Intended for processes that must not perform DDL (e.g. application
+    /// backends, where a separately privileged worker is responsible for
+    /// applying schema changes).
+    pub async fn verify(&self) -> Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        let conn = &mut *conn;
+
+        // Check that the tracking table exists in the target schema.
+        let table_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_name = '_duroxide_migrations')",
+        )
+        .bind(&self.schema_name)
+        .fetch_one(&mut *conn)
+        .await?;
+
+        if !table_exists {
+            anyhow::bail!(
+                "duroxide migrations not initialized: schema {:?} does not \
+                 contain _duroxide_migrations. Construct a provider with \
+                 MigrationPolicy::ApplyAll (the default) from a process with \
+                 DDL privileges before using MigrationPolicy::VerifyOnly.",
+                self.schema_name
+            );
+        }
+
+        // Reject schemas that have migrations the running binary does not
+        // recognize (schema is ahead of the code).
+        self.check_no_unknown_migrations(conn).await?;
+
+        let migrations = self.load_migrations()?;
+        let applied: std::collections::HashSet<i64> =
+            self.get_applied_versions(conn).await?.into_iter().collect();
+
+        let mut missing: Vec<i64> = migrations
+            .iter()
+            .map(|m| m.version)
+            .filter(|v| !applied.contains(v))
+            .collect();
+        missing.sort_unstable();
+
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "duroxide migrations not up to date in schema {:?}: missing \
+                 versions {:?}. Run migrations from a provider configured with \
+                 MigrationPolicy::ApplyAll before constructing VerifyOnly \
+                 providers.",
+                self.schema_name,
+                missing,
+            );
+        }
+
+        if !self.check_tables_exist(conn).await.unwrap_or(false) {
+            anyhow::bail!(
+                "duroxide migrations recorded as complete in schema {:?}, but \
+                 core tables are missing. The schema may be corrupted; run \
+                 migrations from a provider configured with \
+                 MigrationPolicy::ApplyAll before constructing VerifyOnly \
+                 providers.",
+                self.schema_name,
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Check that the database has no migrations the running binary does not
+    /// recognize. Used by both `migrate()` (to refuse running DDL against a
+    /// schema ahead of the code) and `verify()` (to refuse claiming
+    /// successful verification of an unknown schema).
+    ///
+    /// Returns `Ok(())` if the tracking table does not yet exist: under
+    /// `ApplyAll` it will be created by `migrate_inner`, and under
+    /// `VerifyOnly` the missing table is reported separately before this is
+    /// called.
+    async fn check_no_unknown_migrations(
+        &self,
+        conn: &mut sqlx::postgres::PgConnection,
+    ) -> Result<()> {
+        let tracking_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_name = '_duroxide_migrations')",
+        )
+        .bind(&self.schema_name)
+        .fetch_one(&mut *conn)
+        .await?;
+
+        if !tracking_exists {
+            return Ok(());
+        }
+
+        let applied = self.get_applied_versions(conn).await?;
+        let expected: std::collections::HashSet<i64> = self
+            .load_migrations()?
+            .into_iter()
+            .map(|m| m.version)
+            .collect();
+
+        let mut unknown: Vec<i64> = applied
+            .into_iter()
+            .filter(|v| !expected.contains(v))
+            .collect();
+        unknown.sort_unstable();
+
+        if !unknown.is_empty() {
+            anyhow::bail!(
+                "schema {:?} has migrations not recognized by this version of \
+                 the code: {:?}. The database schema is ahead of the code. \
+                 Update the code to a compatible version.",
+                self.schema_name,
+                unknown,
+            );
+        }
+
+        Ok(())
     }
 
     async fn migrate_inner(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<()> {
@@ -338,6 +472,20 @@ impl MigrationRunner {
         statements
     }
 
+    /// Build the `SET LOCAL search_path` statement used while applying a migration.
+    ///
+    /// `pg_temp` is pinned last so it sits at the lowest priority instead of its
+    /// implicit highest-priority position, preventing a temporary object from
+    /// shadowing the unqualified references a migration resolves via the
+    /// `search_path`. This is defense-in-depth (CVE-2018-1058); `pg_catalog` is left
+    /// unlisted so PostgreSQL keeps it implicitly first.
+    ///
+    /// `schema_name` is validated at provider construction
+    /// (`^[A-Za-z_][A-Za-z0-9_]*$`), so direct interpolation here is safe.
+    fn migration_search_path_stmt(schema_name: &str) -> String {
+        format!("SET LOCAL search_path TO {schema_name}, pg_temp")
+    }
+
     /// Apply a single migration
     async fn apply_migration(
         &self,
@@ -347,8 +495,14 @@ impl MigrationRunner {
         // Start transaction
         let mut tx = conn.begin().await?;
 
-        // Set search_path for this transaction
-        sqlx::query(&format!("SET LOCAL search_path TO {}", self.schema_name))
+        // Set search_path for this transaction.
+        //
+        // `pg_temp` is pinned explicitly at the lowest priority. Without it,
+        // `pg_temp` keeps its implicit highest-priority position, which would let a
+        // temporary object shadow the unqualified references this migration relies on
+        // the search_path to resolve. This is defense-in-depth (CVE-2018-1058
+        // guidance); see `migration_search_path_stmt` for the threat model.
+        sqlx::query(&Self::migration_search_path_stmt(&self.schema_name))
             .execute(&mut *tx)
             .await?;
 
@@ -427,5 +581,19 @@ impl MigrationRunner {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_search_path_pins_pg_temp_last() {
+        // The security property: pg_temp must be present and last, so temporary
+        // objects cannot shadow the unqualified references a migration relies on
+        // the search_path to resolve.
+        let stmt = MigrationRunner::migration_search_path_stmt("duroxide");
+        assert_eq!(stmt, "SET LOCAL search_path TO duroxide, pg_temp");
     }
 }

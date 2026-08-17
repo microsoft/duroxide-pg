@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0016_add_activity_tags.sql
 -- Description: Adds activity tag routing support for worker queue items.
 -- Adds tag column to worker_queue, updates enqueue_worker_work to accept tag,

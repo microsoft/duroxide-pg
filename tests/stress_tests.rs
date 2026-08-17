@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use duroxide::provider_stress_tests::parallel_orchestrations::run_parallel_orchestrations_test_with_config;
 use duroxide::provider_stress_tests::StressTestConfig;
 use duroxide_pg_stress::PostgresStressFactory;

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration 0020: Add KV delta table
 -- Description: Captures current-execution KV mutations in kv_delta, merges them into
 -- kv_store only at execution completion boundaries, and cleans up delta rows on deletion.

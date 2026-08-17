@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0007_add_execution_state_support.sql
 -- Description: Updates fetch_work_item and renew_work_item_lock to return ExecutionState
 -- Required for duroxide 0.1.7 activity cancellation support

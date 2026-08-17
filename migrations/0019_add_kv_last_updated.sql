@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration 0019: Add KV last-updated timestamps
 -- Description: Adds per-key last_updated_at_ms tracking, returns timestamped KV snapshots,
 -- materializes KV timestamps during ack, and preserves KV state across execution pruning.

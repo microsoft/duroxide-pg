@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration 0021: Add get_instance_stats stored procedure
 -- Description: Moves the inline get_instance_stats queries into a single stored procedure,
 -- consolidating four round trips into one and correctly merging kv_delta + kv_store counts.

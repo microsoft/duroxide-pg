@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use clap::Parser;
 use duroxide_pg_stress::run_test_suite;
 use tracing_subscriber::EnvFilter;

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0012_require_timestamps.sql
 -- Description: Aligns timestamp handling with duroxide-pg-opt.
 -- Stored procedure now accepts p_now_ms from Rust (app-server clock)

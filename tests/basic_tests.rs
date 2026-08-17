@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use duroxide::providers::{ExecutionMetadata, Provider, TagFilter, WorkItem};
 use duroxide::{Event, EventKind, INITIAL_EVENT_ID, INITIAL_EXECUTION_ID};
 use duroxide_pg::PostgresProvider;
@@ -205,6 +208,7 @@ async fn test_enqueue_for_orchestrator() {
         version: Some("1.0.0".to_string()),
         parent_instance: None,
         parent_id: None,
+        parent_execution_id: None,
         execution_id,
     };
 
@@ -244,6 +248,7 @@ async fn test_enqueue_for_orchestrator() {
                     input: "test_input".to_string(),
                     parent_instance: None,
                     parent_id: None,
+                    parent_execution_id: None,
                     carry_forward_events: None,
                     initial_custom_status: None,
                 },
@@ -450,6 +455,7 @@ async fn test_list_instances_and_executions() {
         version: Some("1.0.0".to_string()),
         parent_instance: None,
         parent_id: None,
+        parent_execution_id: None,
         execution_id: 1u64,
     };
 
@@ -460,6 +466,7 @@ async fn test_list_instances_and_executions() {
         version: Some("1.0.0".to_string()),
         parent_instance: None,
         parent_id: None,
+        parent_execution_id: None,
         execution_id: 1u64,
     };
 
@@ -500,6 +507,7 @@ async fn test_list_instances_and_executions() {
                         input: "input".to_string(),
                         parent_instance: None,
                         parent_id: None,
+                        parent_execution_id: None,
                         carry_forward_events: None,
                         initial_custom_status: None,
                     },

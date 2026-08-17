@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Generate per-function migration diff with full context."""
 import subprocess, sys, os, tempfile, textwrap
 

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Regression test for the missing-TLS-backend bug in the resolved reqwest build.
 //
 // Background: `azure_core 0.35`'s `reqwest` feature activates

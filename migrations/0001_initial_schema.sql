@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0001_initial_schema.sql
 -- Description: Creates initial schema for Duroxide PostgreSQL provider
 -- This migration will be executed with schema-qualified names via the migration runner

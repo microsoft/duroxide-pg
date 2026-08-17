@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Start performance measurement by resetting pg_stat_statements
 
 set -e

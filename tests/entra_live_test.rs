@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Live Entra ID smoke test against a real Azure Database for PostgreSQL.
 //!
 //! This test is `#[ignore]` by default and is opt-in via the
@@ -32,7 +35,7 @@
 //! cargo test --test entra_live_test -- --ignored --nocapture
 //! ```
 
-use duroxide_pg::{EntraAuthOptions, PostgresProvider};
+use duroxide_pg::{EntraAuthOptions, PostgresProvider, ProviderConfig};
 use sqlx::Row;
 
 const ENABLE_VAR: &str = "DUROXIDE_PG_ENTRA_LIVE_TEST";
@@ -77,16 +80,11 @@ async fn entra_live_smoke_test() {
         "Live Entra smoke test: host={host} port={port} db={database} user={user} schema={schema}"
     );
 
-    let provider = PostgresProvider::new_with_schema_and_entra(
-        &host,
-        port,
-        &database,
-        &user,
-        Some(&schema),
-        EntraAuthOptions::new(),
-    )
-    .await
-    .expect("provider construction with default Entra credential chain must succeed");
+    let mut config = ProviderConfig::entra(&host, port, &database, &user, EntraAuthOptions::new());
+    config.schema_name = Some(schema.clone());
+    let provider = PostgresProvider::new_with_config(config)
+        .await
+        .expect("provider construction with default Entra credential chain must succeed");
 
     // Use a basic query to prove the pool is functional and the schema/migrations
     // were applied. We look for one of the well-known tables migrations create.

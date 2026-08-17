@@ -5,6 +5,139 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Performance
+
+- **Make mostly-NULL secondary indexes partial (migration `0023`).** Three
+  secondary indexes cover columns that are NULL for the majority of rows, yet a
+  plain B-tree still stored an entry for every row: `worker_queue.session_id`
+  (NULL for non-session work items), `worker_queue.tag` (NULL for untagged items),
+  and `orchestrator_queue.lock_token` (NULL for unclaimed rows). Each is only ever
+  probed by a concrete non-NULL value, so they are now `... WHERE <col> IS NOT NULL`.
+  On a 500k-row load (~5% sessioned/tagged, ~10% claimed) this shrank the indexes
+  ~12x/~18x/~2x (session/tag/lock) and cut bulk-insert time ~16%, with value lookups
+  still index-served. This is a distribution-dependent write-path win: the savings
+  scale with how NULL-heavy the columns are (the figures use a ~95%-NULL,
+  i.e. non-session/untagged, population), so a session- or tag-heavy workload sees
+  little benefit — but no regression, as value lookups still use the indexes.
+  Reproduce via `scripts/bench-secondary-indexes.sh`.
+  (`0022` is reserved by the concurrent worker_queue dequeue change; this migration
+  is independent of it.)
+
+### Security
+
+- **Pin `pg_temp` last in the migration `search_path`.** Each migration was applied
+  with `SET LOCAL search_path TO <schema>`, which left `pg_temp` at its implicit
+  highest-priority position. Migrations reference objects by unqualified name and
+  rely on the `search_path` to resolve them to the target schema, so a same-named
+  temporary object could be resolved instead while a migration runs with elevated
+  (DDL) privileges. Migrations now run with `SET LOCAL search_path TO <schema>,
+  pg_temp`, pinning the temporary-object schema to the lowest priority so it can no
+  longer shadow those unqualified references. This is
+  defense-in-depth following the PostgreSQL `search_path` hardening guidance
+  (CVE-2018-1058); `pg_temp` is per-session, so there is no live escalation path for
+  the trusted SQL the runner executes today. No schema or behavioral change for
+  well-behaved callers. Existing deployments are unaffected and require no
+  re-migration — the change only governs how future migrations are applied.
+
+### Changed
+
+- **Bump `duroxide` dependency** — `0.1.29` → `0.1.30`. The core 0.1.30
+  release fixes sub-orchestration parent notification across `continue_as_new`
+  and instance-id collisions, reserves the `sub::` marker for runtime-generated
+  child ids, and switches runtime-generated GUIDs and lock tokens to UUIDs.
+  The provider trait and PostgreSQL schema are unchanged; newly added parent-link
+  fields remain optional for wire compatibility with older work items.
+- Update the `pg-stress` companion crate to use `duroxide` 0.1.30 as well.
+- Sync the upstream child `continue_as_new` E2E regression test for PostgreSQL.
+
+## [0.1.34] - 2026-05-25
+
+### Security
+
+- **Schema name validation at provider construction.** All constructors now
+  reject schema names that do not match `^[A-Za-z_][A-Za-z0-9_]*$`.
+  PostgreSQL identifiers cannot be bound as SQL parameters, so the schema
+  name is interpolated directly into the DDL and DML the provider issues.
+  Restricting the accepted character set up front eliminates the SQL
+  injection vector that would otherwise exist for callers that pass
+  attacker-controlled schema names. PostgreSQL's full identifier grammar
+  (including quoted identifiers) is broader; this validation is
+  intentionally conservative.
+
+### Changed
+
+- **BREAKING (unreleased API surface only):** `PostgresProvider::new_with_config`,
+  `new_with_schema`, and the deprecated Entra constructors now return an
+  error when `schema_name` contains characters outside
+  `[A-Za-z_][A-Za-z0-9_]*`. Previously such names were silently
+  interpolated into SQL. Callers passing only constants from their own code
+  (the common case) are unaffected. Already-shipped releases (`<= 0.1.33`)
+  are unaffected.
+
+- **BREAKING (unreleased API surface only):** Collapsed all `*_with_config`
+  and Entra-specific constructors into a single
+  `PostgresProvider::new_with_config(ProviderConfig)`. `ProviderConfig` now
+  carries the connection variant via a new `ConnectionConfig` enum
+  (`Url(String)` or `Entra { host, port, database, user, options }`),
+  the optional schema name, and the migration policy. Construct via
+  `ProviderConfig::url(database_url)` or
+  `ProviderConfig::entra(host, port, db, user, options)` and adjust fields
+  as needed. The previously unreleased `new_with_config(url, config)` and
+  `new_with_schema_and_config(url, schema, config)` constructors are
+  removed. `new(url)` and `new_with_schema(url, schema)` remain as
+  convenience wrappers.
+
+### Deprecated
+
+- `PostgresProvider::new_with_entra` and
+  `PostgresProvider::new_with_schema_and_entra` are deprecated in favor of
+  `new_with_config(ProviderConfig::entra(...))`. They continue to work and
+  delegate to the new path; they will be removed in a future release.
+- `PostgresProvider::initialize_schema` is deprecated. Every constructor
+  already runs the migration runner; this back-compat shim will be removed
+  in a future release.
+
+### Added
+
+- **Reject schemas ahead of the running binary.** Both `MigrationPolicy::ApplyAll`
+  and `MigrationPolicy::VerifyOnly` now fail fast when the `_duroxide_migrations`
+  tracking table records migration versions that are not bundled with the
+  running binary. Under `ApplyAll` the check runs under the migration advisory
+  lock and short-circuits before any DDL is executed, so an older binary
+  cannot rewrite a schema that is ahead of its code. The error message names
+  the unknown versions and instructs the operator to update the code.
+
+- **Configurable migration policy at provider construction.** New
+  `MigrationPolicy` enum, `ProviderConfig` struct, and `ConnectionConfig`
+  enum, plus the single new constructor `PostgresProvider::new_with_config`.
+  The default policy is `MigrationPolicy::ApplyAll`, which preserves
+  pre-feature behavior — all existing constructors (`new`,
+  `new_with_schema`, and the deprecated `new_with_entra` /
+  `new_with_schema_and_entra`) continue to apply pending migrations on
+  startup. The new `MigrationPolicy::VerifyOnly` policy skips migration
+  application and instead verifies that the `_duroxide_migrations` tracking
+  table exists in the target schema and that every embedded migration has
+  already been applied, returning an error otherwise. Intended for
+  processes that must not run DDL — e.g. application backends, where a
+  separately privileged worker is responsible for applying schema
+  changes. `VerifyOnly` does not take the migration advisory lock and does
+  not create or modify any database objects.
+
+- **Initialization regression tests.** Added integration tests for the
+  provider initialization paths: `VerifyOnly` against a missing schema, a
+  bare schema with no tracking table, and a schema whose tracking table is
+  behind the bundled migrations; and a concurrency test that exercises the
+  migration advisory lock by running two `ApplyAll` initializations against
+  the same fresh schema in parallel.
+
+### Fixed
+
+- Made the local Entra negative pipeline test detect PostgreSQL
+  trust-style authentication and skip that case instead of failing when the
+  test database accepts deliberately wrong passwords.
+
 ## [0.1.33] - 2026-05-13
 
 ### Fixed

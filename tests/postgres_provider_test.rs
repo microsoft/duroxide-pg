@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use std::sync::{Arc, Once};
 
 use duroxide::provider_validation::{

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use duroxide::providers::{ExecutionMetadata, Provider, WorkItem};
 use duroxide::{Event, EventKind};
 use duroxide_pg::PostgresProvider;
@@ -153,6 +156,7 @@ pub async fn test_create_execution(
                 input: input.to_string(),
                 parent_instance: parent_instance.map(|s| s.to_string()),
                 parent_id,
+                parent_execution_id: None,
                 execution_id: next_execution_id,
             },
             None,
@@ -190,6 +194,7 @@ pub async fn test_create_execution(
                     input: input.to_string(),
                     parent_instance: parent_instance.map(|s| s.to_string()),
                     parent_id,
+                    parent_execution_id: None,
                     carry_forward_events: None,
                     initial_custom_status: None,
                 },

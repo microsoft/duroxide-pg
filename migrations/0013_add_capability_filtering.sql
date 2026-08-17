@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
 -- Migration: 0013_add_capability_filtering.sql
 -- Description: Adds capability filtering support for provider-level version matching.
 -- Adds duroxide_version columns to executions table, updates fetch_orchestration_item

@@ -1,10 +1,12 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Microsoft Entra ID (formerly Azure Active Directory) authentication support
 //! for [`PostgresProvider`](crate::PostgresProvider).
 //!
 //! This module exposes [`EntraAuthOptions`] — the configuration type passed to
-//! `PostgresProvider::new_with_entra` and `PostgresProvider::new_with_schema_and_entra`
-//! (added in Phase 2) — plus the internal credential abstractions used to
-//! fetch and rotate Entra access tokens.
+//! [`ProviderConfig::entra`](crate::ProviderConfig::entra) — plus the internal
+//! credential abstractions used to fetch and rotate Entra access tokens.
 //!
 //! Azure SDK types (`azure_core::credentials::TokenCredential`,
 //! `azure_identity::ManagedIdentityCredential`, etc.) are intentionally **not

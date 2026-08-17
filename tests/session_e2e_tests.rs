@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! End-to-end tests for the activity session feature on PostgreSQL.
 //!
 //! Adapted from upstream duroxide `tests/session_e2e_tests.rs` and

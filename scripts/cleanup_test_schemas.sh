@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Clean up all test schemas from the PostgreSQL database
 # Usage: ./scripts/cleanup_test_schemas.sh
 
