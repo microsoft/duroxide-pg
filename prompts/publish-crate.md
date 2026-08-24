@@ -85,20 +85,19 @@ git tag vX.Y.Z
 git push origin main --tags
 ```
 
-### 7. Publish to crates.io
+### 7. Tag for Release
 
-```bash
-cargo publish
-```
+Do not run `cargo publish`. Microsoft's internal OSS release pipeline detects the
+version tag and publishes `duroxide-pg` to crates.io.
 
-**Prerequisites:**
-- Must be logged in: `cargo login`
-- Must have publish permissions for the crate
+See [RELEASE_POLICY.md](../RELEASE_POLICY.md) for the public and internal
+responsibilities in the release workflow.
 
-### 8. Verify Publication
+### 8. Verify Release
 
-- Check https://crates.io/crates/duroxide-pg
-- Verify version appears and documentation is correct
+- Monitor the internal release pipeline for completion.
+- Verify the version appears at https://crates.io/crates/duroxide-pg after publication.
+- Contact the duroxide maintainers if the internal release does not complete.
 
 ## Example
 

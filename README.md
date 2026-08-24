@@ -193,6 +193,8 @@ Two test layers cover the Entra integration:
 - Hardens initialization by rejecting unsafe schema names and failing fast when the database has unknown migration versions.
 - See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
+> **Releases are published by Microsoft's internal OSS infrastructure.** See [RELEASE_POLICY.md](RELEASE_POLICY.md) for details.
+
 ## Previous Release (0.1.33)
 
 - Fix: add `native-tls` feature to the `reqwest` dependency so HTTPS calls compiled into the crate (including AAD token acquisition for `connectWithEntra` / `connectWithSchemaAndEntra`) work end-to-end. Prior 0.1.32 binaries failed with `error sending request` / `invalid URL, scheme is not http` whenever Entra auth was used.
