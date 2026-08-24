@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.35] - 2026-08-24
+
 ### Performance
 
 - **Make mostly-NULL secondary indexes partial (migration `0023`).** Three

@@ -186,16 +186,16 @@ Two test layers cover the Entra integration:
 - Orchestration stats introspection via `Client::get_orchestration_stats()`
 - Microsoft Entra ID authentication for Azure Database for PostgreSQL (managed identity, Workload Identity, az CLI)
 
-## Latest Release (0.1.34)
+## Latest Release (0.1.35)
 
-- Adds `ProviderConfig`, `ConnectionConfig`, and `MigrationPolicy` so callers can select `ApplyAll` or `VerifyOnly` migration behavior at provider construction.
-- Breaking API cleanup: `PostgresProvider::new_with_config` now takes a single `ProviderConfig`; build URL configs with `ProviderConfig::url(...)` and Entra configs with `ProviderConfig::entra(...)`.
-- Hardens initialization by rejecting unsafe schema names and failing fast when the database has unknown migration versions.
+- Reduces write overhead and index size for mostly-NULL worker and orchestrator queue columns with migration `0023`.
+- Hardens future migrations against temporary-object shadowing by placing `pg_temp` last in the migration `search_path`.
+- Updates the provider and `pg-stress` companion crate to Duroxide 0.1.30.
 - See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
-## Previous Release (0.1.33)
+## Previous Release (0.1.34)
 
-- Fix: add `native-tls` feature to the `reqwest` dependency so HTTPS calls compiled into the crate (including AAD token acquisition for `connectWithEntra` / `connectWithSchemaAndEntra`) work end-to-end. Prior 0.1.32 binaries failed with `error sending request` / `invalid URL, scheme is not http` whenever Entra auth was used.
+- Adds `ProviderConfig`, `ConnectionConfig`, and `MigrationPolicy` for construction-time migration behavior, simplifies the configuration API, and hardens initialization against unsafe schema names and unknown migration versions.
 
 ## Support
 
