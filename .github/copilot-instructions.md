@@ -154,9 +154,9 @@ Follow the detailed guide in [prompts/update-duroxide-dependency.md](../prompts/
 
 Dependency update and feature PRs must keep the current `duroxide-pg` package version and published README release sections unchanged. Release preparation and publishing are governed by [RELEASE_POLICY.md](../RELEASE_POLICY.md).
 
-> ⚠️ **Never push to a remote or publish directly to crates.io.**
+> ⚠️ **Never publish directly to crates.io.**
 
-Use [.agents/skills/release-preparation/SKILL.md](../.agents/skills/release-preparation/SKILL.md) to prepare release metadata and create a local tag after the release PR has merged. The skill must never perform remote operations.
+Use [.agents/skills/release-preparation/SKILL.md](../.agents/skills/release-preparation/SKILL.md) to prepare release metadata and create the release PR. After the PR is merged into `main`, the skill may create and push the version tag only with fresh explicit user approval.
 
 ## Key Files Reference
 | File | Purpose |

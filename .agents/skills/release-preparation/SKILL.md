@@ -1,21 +1,21 @@
 ---
 name: release-preparation
-description: Prepare a duroxide-pg release locally by updating version and release notes, validating the crate, and creating a local tag after the release PR is merged. Never push or publish.
+description: Prepare a duroxide-pg release, create its pull request, and create and push the version tag after the pull request is merged. Never publish directly.
 ---
 
 # Release Preparation
 
-Use this skill when preparing a `duroxide-pg` release or creating its local tag
-after the release pull request has merged.
+Use this skill when preparing a `duroxide-pg` release or creating its version
+tag after the release pull request has merged.
 
 ## Non-Negotiable Boundaries
 
-- Never push commits or tags to a remote.
-- Never create a pull request.
 - Never run `cargo publish` or publish directly to crates.io.
 - Never request, use, or store publishing credentials.
-- Leave all remote operations and publication to Microsoft maintainers and the
-  internal release pipeline.
+- Require explicit user approval before pushing a release branch, creating a
+  pull request, or creating and pushing a version tag.
+- Publishing remains a separate Microsoft internal release process. Creating or
+  pushing a tag does not publish the crate.
 - Follow [RELEASE_POLICY.md](../../../RELEASE_POLICY.md).
 
 ## Phase 1: Prepare the Release Change
@@ -65,7 +65,7 @@ cargo package --allow-dirty
 Report any unavailable prerequisite or failing check. Do not bypass failures or
 add new tooling solely for release preparation.
 
-### 5. Leave a Local Handoff
+### 5. Create the Release Pull Request
 
 Review the diff and summarize:
 
@@ -74,34 +74,57 @@ Review the diff and summarize:
 - Validation results
 - Files changed
 
-A local commit may be created, but never push it or create a pull request.
+Ask for explicit user approval before performing remote operations. After
+approval:
 
-## Phase 2: Create the Post-Merge Local Tag
+1. Commit the release preparation changes.
+2. Push the release branch.
+3. Create a pull request targeting `main`.
+4. Report the pull request URL and stop.
 
-Run this phase only after the release pull request has merged.
+Do not create a tag while the pull request is open. Run Phase 2 in a later
+invocation after the pull request is merged.
+
+## Phase 2: Create the Post-Merge Tag
+
+Run this phase only after the release pull request has merged into `main`.
 
 ### 1. Verify the Merge State
 
 Before tagging, confirm:
 
-- The current branch is `main`.
-- `HEAD` is the merged release commit.
-- The working tree is clean.
-- `Cargo.toml`, `CHANGELOG.md`, and `README.md` all contain the target version.
+- The release pull request is merged and its base branch is `main`.
+- The merged commit is present in the latest `origin/main`.
+- `Cargo.toml`, `CHANGELOG.md`, and `README.md` at the merged commit all contain
+  the target version.
 - The tag `vX.Y.Z` does not already exist.
 
 If any condition is not met, stop without creating a tag. Never tag a feature
 branch or an unmerged release commit.
 
-### 2. Create and Verify the Local Tag
+### 2. Request Tag Approval
 
-Create an annotated tag:
+Show the user:
+
+- The merged pull request URL
+- The exact merged commit to tag
+- The proposed tag name `vX.Y.Z`
+
+Ask for explicit approval to create and push the tag. Approval from the pull
+request phase does not carry over; obtain fresh approval immediately before
+tagging.
+
+### 3. Create, Push, and Verify the Tag
+
+After approval, create an annotated tag on the verified merged commit and push
+only that tag:
 
 ```bash
-git tag -a vX.Y.Z -m "Release vX.Y.Z"
+git tag -a vX.Y.Z <merged-commit> -m "Release vX.Y.Z"
+git push origin vX.Y.Z
 git show --no-patch --decorate vX.Y.Z
 ```
 
-The skill ends after verifying the local tag. Never push the tag. A Microsoft
-maintainer is responsible for all remote tag operations and the internal release
-pipeline.
+Confirm that the remote tag resolves to the same commit. The skill ends after
+tag verification. Do not run `cargo publish`; publication is handled separately
+by Microsoft's internal release process.

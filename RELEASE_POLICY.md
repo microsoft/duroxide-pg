@@ -13,11 +13,14 @@ Contributors can prepare a release through a pull request:
 3. Run the build, tests, and documentation checks.
 4. Open a pull request for review.
 
-After the release change is merged, the repository's `release-preparation` skill
-can create the matching annotated `vX.Y.Z` tag locally on the merged `main`
-commit. The skill never pushes the tag. A Microsoft maintainer handles the
-remote tag operation and uses the internal release pipeline to build and publish
-the crate to crates.io.
+The repository's `release-preparation` skill can perform these steps and create
+the pull request after explicit user approval.
+
+After the release pull request is merged into `main`, the skill verifies the
+merged commit and asks for fresh user approval before creating and pushing the
+matching annotated `vX.Y.Z` tag. Tagging does not itself publish the crate or
+trigger the internal release pipeline. Publication is a separate Microsoft
+internal process.
 
 ## Publishing Boundary
 
