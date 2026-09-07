@@ -10,11 +10,12 @@ Contributors can prepare a release through a pull request:
 
 1. Update the version in `Cargo.toml`.
 2. Update `CHANGELOG.md` and relevant documentation.
-3. Run the build, tests, and documentation checks.
+3. Run `cargo package --allow-dirty` to validate the release package.
 4. Open a pull request for review.
 
 The repository's `release-preparation` skill can perform these steps and create
-the pull request after explicit user approval.
+the pull request after explicit user approval. Build and test validation is
+handled by the pull request checks.
 
 After the release pull request is merged into `main`, the skill verifies the
 merged commit and asks for fresh user approval before creating and pushing the

@@ -51,19 +51,16 @@ In `README.md`:
 2. Move the former latest release summary into `Previous Release`.
 3. Keep the link to `CHANGELOG.md` and the release policy notice.
 
-### 4. Validate Locally
+### 4. Validate the Package Locally
 
-Run the repository's existing release checks:
+Run the packaging-specific check:
 
 ```bash
-cargo build
-cargo test
-cargo doc --no-deps
 cargo package --allow-dirty
 ```
 
-Report any unavailable prerequisite or failing check. Do not bypass failures or
-add new tooling solely for release preparation.
+Report any packaging failure. Build and test validation is handled by the pull
+request checks; do not duplicate the full CI suite locally.
 
 ### 5. Create the Release Pull Request
 
