@@ -193,6 +193,9 @@ Two test layers cover the Entra integration:
 - Updates the provider and `pg-stress` companion crate to Duroxide 0.1.30.
 - See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
+> **Releases are published by Microsoft's internal OSS infrastructure.** See
+> [RELEASE_POLICY.md](RELEASE_POLICY.md) for details.
+
 ## Previous Release (0.1.34)
 
 - Adds `ProviderConfig`, `ConnectionConfig`, and `MigrationPolicy` for construction-time migration behavior, simplifies the configuration API, and hardens initialization against unsafe schema names and unknown migration versions.

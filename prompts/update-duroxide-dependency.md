@@ -4,15 +4,9 @@ This guide describes how to update duroxide-pg when a new version of the duroxid
 
 ## Important Guidelines for LLM Assistants
 
-> **DO NOT** push to any remote git repository or publish to crates.io unless explicitly asked by the user.
-> 
-> **DO** ask the user for confirmation before:
-> - Pushing commits to remote branches
-> - Creating pull requests  
-> - Publishing to crates.io
-> - Any other action that affects external systems
+> **NEVER** push to any remote git repository. All changes and commits must remain local.
 >
-> When in doubt about how to proceed, **ask the user** for guidance.
+> **NEVER** publish directly to crates.io. Releases must use Microsoft's internal release pipeline.
 
 ## Prerequisites
 
@@ -210,44 +204,22 @@ Dependency update and feature PRs are not release preparation. Keep all of the f
 - README's `Latest Release` and `Previous Release` sections
 - Existing dated version headings in `CHANGELOG.md`
 
-Only bump the package version, convert `[Unreleased]` to a dated release, and update README release sections when the user explicitly requests release or publish preparation. Follow `prompts/publish-crate.md` for that workflow.
+Release preparation and publishing are governed by [RELEASE_POLICY.md](../RELEASE_POLICY.md).
 
-## Step 10: Create Pull Request
+## Step 10: Local Handoff
 
-> **STOP**: Ask the user before proceeding with any git push or PR creation.
+> **STOP**: Do not push to a remote or create a pull request.
 
-### 9.1 Commit changes (local only)
+### 10.1 Commit changes (local only)
 ```bash
 git add .
 git commit -m "Update to duroxide <version> with <main feature>"
 ```
 
-### 9.2 Ask user before pushing
-Before pushing or creating a PR, confirm with the user:
-- "Ready to push to remote and create a PR?"
-- "Would you like to review the changes first?"
+### 10.2 Hand off to a maintainer
 
-### 9.3 Push and create PR (only when user confirms)
-```bash
-git push -u origin update-duroxide-<version>
-gh pr create --title "Update to duroxide <version>" --body "<PR description>"
-```
-
-### 9.4 Verify CI passes
-- Check GitHub Actions workflow runs
-- Address any CI failures
-
-## Step 11: Post-Merge
-
-> **STOP**: Only proceed with publishing when explicitly requested by the user.
-
-### 10.1 Publish to crates.io (user must explicitly request)
-Follow `prompts/publish-crate.md` for publishing instructions.
-**Do not publish without user confirmation.**
-
-### 10.2 Create GitHub release (user must explicitly request)
-Tag the release and create release notes.
-**Do not create releases without user confirmation.**
+Summarize the local changes and validation results. A maintainer is responsible
+for pushing the branch and creating the pull request.
 
 ---
 
