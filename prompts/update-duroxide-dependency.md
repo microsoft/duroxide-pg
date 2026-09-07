@@ -4,9 +4,14 @@ This guide describes how to update duroxide-pg when a new version of the duroxid
 
 ## Important Guidelines for LLM Assistants
 
-> **NEVER** push to any remote git repository. All changes and commits must remain local.
+> **DO NOT** push to any remote git repository unless explicitly asked by the user.
 >
-> **NEVER** publish directly to crates.io. Releases must use Microsoft's internal release pipeline.
+> **DO** ask the user for confirmation before:
+> - Pushing commits to remote branches
+> - Creating pull requests
+> - Any other action that affects external systems
+>
+> When in doubt about how to proceed, **ask the user** for guidance.
 
 ## Prerequisites
 
@@ -206,20 +211,30 @@ Dependency update and feature PRs are not release preparation. Keep all of the f
 
 Release preparation and publishing are governed by [RELEASE_POLICY.md](../RELEASE_POLICY.md).
 
-## Step 10: Local Handoff
+## Step 10: Create Pull Request
 
-> **STOP**: Do not push to a remote or create a pull request.
+> **STOP**: Ask the user before proceeding with any git push or PR creation.
 
-### 10.1 Commit changes (local only)
+### 9.1 Commit changes (local only)
 ```bash
 git add .
 git commit -m "Update to duroxide <version> with <main feature>"
 ```
 
-### 10.2 Hand off to a maintainer
+### 9.2 Ask user before pushing
+Before pushing or creating a PR, confirm with the user:
+- "Ready to push to remote and create a PR?"
+- "Would you like to review the changes first?"
 
-Summarize the local changes and validation results. A maintainer is responsible
-for pushing the branch and creating the pull request.
+### 9.3 Push and create PR (only when user confirms)
+```bash
+git push -u origin update-duroxide-<version>
+gh pr create --title "Update to duroxide <version>" --body "<PR description>"
+```
+
+### 9.4 Verify CI passes
+- Check GitHub Actions workflow runs
+- Address any CI failures
 
 ---
 
