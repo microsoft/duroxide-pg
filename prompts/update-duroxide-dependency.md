@@ -4,12 +4,11 @@ This guide describes how to update duroxide-pg when a new version of the duroxid
 
 ## Important Guidelines for LLM Assistants
 
-> **DO NOT** push to any remote git repository or publish to crates.io unless explicitly asked by the user.
-> 
+> **DO NOT** push to any remote git repository unless explicitly asked by the user.
+>
 > **DO** ask the user for confirmation before:
 > - Pushing commits to remote branches
-> - Creating pull requests  
-> - Publishing to crates.io
+> - Creating pull requests
 > - Any other action that affects external systems
 >
 > When in doubt about how to proceed, **ask the user** for guidance.
@@ -210,7 +209,7 @@ Dependency update and feature PRs are not release preparation. Keep all of the f
 - README's `Latest Release` and `Previous Release` sections
 - Existing dated version headings in `CHANGELOG.md`
 
-Only bump the package version, convert `[Unreleased]` to a dated release, and update README release sections when the user explicitly requests release or publish preparation. Follow `prompts/publish-crate.md` for that workflow.
+Release preparation and publishing are governed by [RELEASE_POLICY.md](../RELEASE_POLICY.md).
 
 ## Step 10: Create Pull Request
 
@@ -236,18 +235,6 @@ gh pr create --title "Update to duroxide <version>" --body "<PR description>"
 ### 9.4 Verify CI passes
 - Check GitHub Actions workflow runs
 - Address any CI failures
-
-## Step 11: Post-Merge
-
-> **STOP**: Only proceed with publishing when explicitly requested by the user.
-
-### 10.1 Publish to crates.io (user must explicitly request)
-Follow `prompts/publish-crate.md` for publishing instructions.
-**Do not publish without user confirmation.**
-
-### 10.2 Create GitHub release (user must explicitly request)
-Tag the release and create release notes.
-**Do not create releases without user confirmation.**
 
 ---
 

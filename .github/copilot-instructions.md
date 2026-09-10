@@ -152,9 +152,11 @@ Follow the detailed guide in [prompts/update-duroxide-dependency.md](../prompts/
 5. **Test thoroughly**: `cargo test`, run flaky tests 10x
 6. **Document as unreleased**: Add dependency and compatibility notes under `CHANGELOG.md`'s existing `[Unreleased]` section
 
-Dependency update and feature PRs must keep the current `duroxide-pg` package version and published README release sections unchanged. Only bump `Cargo.toml`, convert `[Unreleased]` to a dated version, and update README's `Latest Release` section during an explicitly requested release/publish preparation following [prompts/publish-crate.md](../prompts/publish-crate.md).
+Dependency update and feature PRs must keep the current `duroxide-pg` package version and published README release sections unchanged. Release preparation and publishing are governed by [RELEASE_POLICY.md](../RELEASE_POLICY.md).
 
-> ⚠️ **Never push to remote or publish to crates.io without explicit user confirmation**
+> ⚠️ **Never publish directly to crates.io.**
+
+Use [.agents/skills/release-preparation/SKILL.md](../.agents/skills/release-preparation/SKILL.md) to prepare release metadata and create the release PR. After the PR is merged into `main`, the skill may create and push the version tag only with fresh explicit user approval.
 
 ## Key Files Reference
 | File | Purpose |
