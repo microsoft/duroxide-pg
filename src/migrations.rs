@@ -7,6 +7,7 @@ use sqlx::Connection;
 use sqlx::PgPool;
 use std::sync::Arc;
 
+// Touch this module when adding migrations so incremental builds re-embed them. Latest: 0024.
 static MIGRATIONS: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations");
 
 /// Migration metadata
