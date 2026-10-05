@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Record `completed_at` for `ContinuedAsNew` executions so age-based execution
+  pruning also works for long-running workflows. Migration `0027` recovers
+  missing timestamps from terminal history events without changing current
+  execution protection. Rows without a recoverable terminal event remain NULL
+  and produce a migration warning.
+
 ## [0.1.38] - 2026-10-26
 
 ### Fixed
