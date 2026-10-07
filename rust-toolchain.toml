@@ -1,3 +1,5 @@
 [toolchain]
-channel = "1.99.0"
+# Before changing this version, check Microsoft's internal Rust availability:
+# msrustup toolchain available --all-channels=prod
+channel = "1.97.1"
 profile = "minimal"
