@@ -1,0 +1,313 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT License.
+
+-- Migration 0024: Record completion times for continued executions.
+-- The acknowledgement body is unchanged from 0020 except for completion timestamps.
+
+DO $$
+DECLARE
+    v_schema_name TEXT := current_schema();
+    v_unresolved BIGINT;
+BEGIN
+    EXECUTE format($fmt$
+        CREATE OR REPLACE FUNCTION %1$I.ack_orchestration_item(
+            p_lock_token TEXT,
+            p_now_ms BIGINT,
+            p_execution_id BIGINT,
+            p_history_delta JSONB,
+            p_worker_items JSONB,
+            p_orchestrator_items JSONB,
+            p_metadata JSONB,
+            p_cancelled_activities JSONB DEFAULT '[]'::JSONB
+        )
+        RETURNS VOID AS $ack_orch$
+        DECLARE
+            v_instance_id TEXT;
+            v_orchestration_name TEXT;
+            v_orchestration_version TEXT;
+            v_parent_instance_id TEXT;
+            v_status TEXT;
+            v_output TEXT;
+            v_completed_at TIMESTAMPTZ;
+            v_elem JSONB;
+            v_visible_at TIMESTAMPTZ;
+            v_fire_at_ms BIGINT;
+            v_item_instance_id TEXT;
+            v_item_execution_id BIGINT;
+            v_item_activity_id BIGINT;
+            v_item_session_id TEXT;
+            v_item_tag TEXT;
+            v_now_ts TIMESTAMPTZ;
+            v_custom_status_action TEXT;
+            v_custom_status_value TEXT;
+            v_current_execution_id BIGINT;
+            v_kv_mutations JSONB;
+            v_kv_item JSONB;
+            v_kv_action TEXT;
+            v_i INTEGER;
+            v_is_terminal BOOLEAN;
+        BEGIN
+            -- Convert Rust-supplied millisecond timestamp to TIMESTAMPTZ
+            v_now_ts := TO_TIMESTAMP(p_now_ms / 1000.0);
+
+            -- Step 1: Validate lock token
+            SELECT il.instance_id INTO v_instance_id
+            FROM %1$I.instance_locks il
+            WHERE il.lock_token = p_lock_token AND il.locked_until > p_now_ms;
+
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Invalid lock token';
+            END IF;
+
+            -- Step 2: Extract metadata from JSONB
+            v_orchestration_name := p_metadata->>'orchestration_name';
+            v_orchestration_version := p_metadata->>'orchestration_version';
+            v_parent_instance_id := p_metadata->>'parent_instance_id';
+            v_status := p_metadata->>'status';
+            v_output := p_metadata->>'output';
+            v_current_execution_id := p_execution_id;
+            v_is_terminal := v_status IN ('Completed', 'ContinuedAsNew', 'Failed');
+
+            -- Step 3: Create or update instance metadata (with explicit timestamps)
+            IF v_orchestration_name IS NOT NULL AND v_orchestration_version IS NOT NULL THEN
+                INSERT INTO %1$I.instances (instance_id, orchestration_name, orchestration_version, current_execution_id, parent_instance_id, created_at, updated_at)
+                VALUES (v_instance_id, v_orchestration_name, v_orchestration_version, p_execution_id, v_parent_instance_id, v_now_ts, v_now_ts)
+                ON CONFLICT (instance_id) DO NOTHING;
+
+                UPDATE %1$I.instances i
+                SET orchestration_name = v_orchestration_name,
+                    orchestration_version = v_orchestration_version,
+                    parent_instance_id = COALESCE(i.parent_instance_id, v_parent_instance_id),
+                    updated_at = v_now_ts
+                WHERE i.instance_id = v_instance_id;
+            END IF;
+
+            -- Step 4: Create execution record (idempotent)
+            INSERT INTO %1$I.executions (instance_id, execution_id, status, started_at)
+            VALUES (v_instance_id, p_execution_id, 'Running', v_now_ts)
+            ON CONFLICT (instance_id, execution_id) DO NOTHING;
+
+            -- Step 5: Update instance current_execution_id
+            UPDATE %1$I.instances i
+            SET current_execution_id = GREATEST(i.current_execution_id, p_execution_id),
+                updated_at = v_now_ts
+            WHERE i.instance_id = v_instance_id;
+
+            -- Step 6: Append history_delta (batch insert with explicit timestamps)
+            IF p_history_delta IS NOT NULL AND JSONB_ARRAY_LENGTH(p_history_delta) > 0 THEN
+                INSERT INTO %1$I.history (instance_id, execution_id, event_id, event_type, event_data, created_at)
+                SELECT
+                    v_instance_id,
+                    p_execution_id,
+                    (elem->>'event_id')::BIGINT,
+                    elem->>'event_type',
+                    elem->>'event_data',
+                    v_now_ts
+                FROM JSONB_ARRAY_ELEMENTS(p_history_delta) AS elem;
+            END IF;
+
+            -- Step 7: Update execution status if provided
+            IF v_status IS NOT NULL THEN
+                v_completed_at := CASE
+                    WHEN v_is_terminal THEN v_now_ts
+                    ELSE NULL
+                END;
+
+                UPDATE %1$I.executions e
+                SET status = v_status, output = v_output, completed_at = v_completed_at
+                WHERE e.instance_id = v_instance_id AND e.execution_id = p_execution_id;
+            END IF;
+
+            -- Step 7b: Store pinned duroxide version if provided in metadata
+            IF p_metadata ? 'pinned_duroxide_version' AND p_metadata->'pinned_duroxide_version' IS NOT NULL
+               AND p_metadata->>'pinned_duroxide_version' != 'null' THEN
+                UPDATE %1$I.executions
+                SET duroxide_version_major = (p_metadata->'pinned_duroxide_version'->>'major')::INTEGER,
+                    duroxide_version_minor = (p_metadata->'pinned_duroxide_version'->>'minor')::INTEGER,
+                    duroxide_version_patch = (p_metadata->'pinned_duroxide_version'->>'patch')::INTEGER
+                WHERE instance_id = v_instance_id AND execution_id = p_execution_id;
+            END IF;
+
+            -- Step 7c: Handle custom_status update on instances table
+            v_custom_status_action := p_metadata->>'custom_status_action';
+            IF v_custom_status_action = 'set' THEN
+                v_custom_status_value := p_metadata->>'custom_status_value';
+                UPDATE %1$I.instances
+                SET custom_status = v_custom_status_value,
+                    custom_status_version = custom_status_version + 1
+                WHERE instance_id = v_instance_id;
+            ELSIF v_custom_status_action = 'clear' THEN
+                UPDATE %1$I.instances
+                SET custom_status = NULL,
+                    custom_status_version = custom_status_version + 1
+                WHERE instance_id = v_instance_id;
+            END IF;
+
+            -- Step 7d: Materialize KV mutations into kv_delta only
+            v_kv_mutations := p_metadata->'kv_mutations';
+            IF v_kv_mutations IS NOT NULL AND jsonb_array_length(v_kv_mutations) > 0 THEN
+                FOR v_i IN 0..jsonb_array_length(v_kv_mutations) - 1 LOOP
+                    v_kv_item := v_kv_mutations->v_i;
+                    v_kv_action := v_kv_item->>'action';
+                    IF v_kv_action = 'set' THEN
+                        INSERT INTO %1$I.kv_delta (instance_id, key, value, last_updated_at_ms)
+                        VALUES (v_instance_id, v_kv_item->>'key', v_kv_item->>'value', COALESCE((v_kv_item->>'last_updated_at_ms')::BIGINT, p_now_ms))
+                        ON CONFLICT (instance_id, key)
+                        DO UPDATE SET value = EXCLUDED.value, last_updated_at_ms = EXCLUDED.last_updated_at_ms;
+                    ELSIF v_kv_action = 'clear_key' THEN
+                        INSERT INTO %1$I.kv_delta (instance_id, key, value, last_updated_at_ms)
+                        VALUES (v_instance_id, v_kv_item->>'key', NULL, p_now_ms)
+                        ON CONFLICT (instance_id, key)
+                        DO UPDATE SET value = NULL, last_updated_at_ms = EXCLUDED.last_updated_at_ms;
+                    ELSIF v_kv_action = 'clear_all' THEN
+                        UPDATE %1$I.kv_delta
+                        SET value = NULL,
+                            last_updated_at_ms = p_now_ms
+                        WHERE instance_id = v_instance_id;
+
+                        INSERT INTO %1$I.kv_delta (instance_id, key, value, last_updated_at_ms)
+                        SELECT ks.instance_id, ks.key, NULL, p_now_ms
+                        FROM %1$I.kv_store ks
+                        WHERE ks.instance_id = v_instance_id
+                        ON CONFLICT (instance_id, key) DO NOTHING;
+                    END IF;
+                END LOOP;
+            END IF;
+
+            -- Step 7e: Merge kv_delta into kv_store on terminal execution boundaries
+            IF v_is_terminal THEN
+                INSERT INTO %1$I.kv_store (instance_id, key, value, execution_id, last_updated_at_ms)
+                SELECT kd.instance_id, kd.key, kd.value, p_execution_id, kd.last_updated_at_ms
+                FROM %1$I.kv_delta kd
+                WHERE kd.instance_id = v_instance_id AND kd.value IS NOT NULL
+                ON CONFLICT (instance_id, key)
+                DO UPDATE SET value = EXCLUDED.value,
+                              execution_id = EXCLUDED.execution_id,
+                              last_updated_at_ms = EXCLUDED.last_updated_at_ms;
+
+                DELETE FROM %1$I.kv_store ks
+                WHERE ks.instance_id = v_instance_id
+                  AND ks.key IN (
+                      SELECT kd.key
+                      FROM %1$I.kv_delta kd
+                      WHERE kd.instance_id = v_instance_id
+                        AND kd.value IS NULL
+                  );
+
+                DELETE FROM %1$I.kv_delta kd
+                WHERE kd.instance_id = v_instance_id;
+            END IF;
+
+            -- Step 8: Enqueue worker items with session_id and tag support
+            IF p_worker_items IS NOT NULL AND JSONB_ARRAY_LENGTH(p_worker_items) > 0 THEN
+                FOR v_elem IN SELECT value FROM JSONB_ARRAY_ELEMENTS(p_worker_items) LOOP
+                    IF v_elem ? 'ActivityExecute' THEN
+                        v_item_instance_id := v_elem->'ActivityExecute'->>'instance';
+                        v_item_execution_id := (v_elem->'ActivityExecute'->>'execution_id')::BIGINT;
+                        v_item_activity_id := (v_elem->'ActivityExecute'->>'id')::BIGINT;
+                        v_item_session_id := v_elem->'ActivityExecute'->>'session_id';
+                        v_item_tag := v_elem->'ActivityExecute'->>'tag';
+                    ELSE
+                        v_item_instance_id := NULL;
+                        v_item_execution_id := NULL;
+                        v_item_activity_id := NULL;
+                        v_item_session_id := NULL;
+                        v_item_tag := NULL;
+                    END IF;
+
+                    INSERT INTO %1$I.worker_queue (work_item, visible_at, created_at, instance_id, execution_id, activity_id, session_id, tag)
+                    VALUES (v_elem::TEXT, v_now_ts, v_now_ts, v_item_instance_id, v_item_execution_id, v_item_activity_id, v_item_session_id, v_item_tag);
+                END LOOP;
+            END IF;
+
+            -- Step 9: Delete cancelled activities from worker_queue (lock stealing)
+            IF p_cancelled_activities IS NOT NULL AND JSONB_ARRAY_LENGTH(p_cancelled_activities) > 0 THEN
+                FOR v_elem IN SELECT value FROM JSONB_ARRAY_ELEMENTS(p_cancelled_activities) LOOP
+                    DELETE FROM %1$I.worker_queue
+                    WHERE instance_id = v_elem->>'instance'
+                      AND execution_id = (v_elem->>'execution_id')::BIGINT
+                      AND activity_id = (v_elem->>'activity_id')::BIGINT;
+                END LOOP;
+            END IF;
+
+            -- Step 10: Enqueue orchestrator items
+            IF p_orchestrator_items IS NOT NULL AND JSONB_ARRAY_LENGTH(p_orchestrator_items) > 0 THEN
+                FOR v_elem IN SELECT value FROM JSONB_ARRAY_ELEMENTS(p_orchestrator_items) LOOP
+                    IF v_elem ? 'StartOrchestration' THEN
+                        v_item_instance_id := v_elem->'StartOrchestration'->>'instance';
+                    ELSIF v_elem ? 'ContinueAsNew' THEN
+                        v_item_instance_id := v_elem->'ContinueAsNew'->>'instance';
+                    ELSIF v_elem ? 'TimerFired' THEN
+                        v_item_instance_id := v_elem->'TimerFired'->>'instance';
+                        v_fire_at_ms := (v_elem->'TimerFired'->>'fire_at_ms')::BIGINT;
+                    ELSIF v_elem ? 'ActivityCompleted' THEN
+                        v_item_instance_id := v_elem->'ActivityCompleted'->>'instance';
+                    ELSIF v_elem ? 'ActivityFailed' THEN
+                        v_item_instance_id := v_elem->'ActivityFailed'->>'instance';
+                    ELSIF v_elem ? 'ExternalRaised' THEN
+                        v_item_instance_id := v_elem->'ExternalRaised'->>'instance';
+                    ELSIF v_elem ? 'CancelInstance' THEN
+                        v_item_instance_id := v_elem->'CancelInstance'->>'instance';
+                    ELSIF v_elem ? 'SubOrchCompleted' THEN
+                        v_item_instance_id := v_elem->'SubOrchCompleted'->>'parent_instance';
+                    ELSIF v_elem ? 'SubOrchFailed' THEN
+                        v_item_instance_id := v_elem->'SubOrchFailed'->>'parent_instance';
+                    ELSIF v_elem ? 'QueueMessage' THEN
+                        v_item_instance_id := v_elem->'QueueMessage'->>'instance';
+                    ELSE
+                        v_item_instance_id := v_instance_id;
+                    END IF;
+
+                    IF v_elem ? 'TimerFired' AND v_fire_at_ms IS NOT NULL AND v_fire_at_ms > 0 THEN
+                        v_visible_at := TO_TIMESTAMP(v_fire_at_ms / 1000.0);
+                    ELSE
+                        v_visible_at := v_now_ts;
+                    END IF;
+
+                    INSERT INTO %1$I.orchestrator_queue (instance_id, work_item, visible_at, created_at)
+                    VALUES (v_item_instance_id, v_elem::TEXT, v_visible_at, v_now_ts);
+
+                    v_fire_at_ms := NULL;
+                END LOOP;
+            END IF;
+
+            -- Step 11: Delete locked messages
+            DELETE FROM %1$I.orchestrator_queue q WHERE q.lock_token = p_lock_token;
+
+            -- Step 12: Remove instance lock
+            DELETE FROM %1$I.instance_locks il
+            WHERE il.instance_id = v_instance_id AND il.lock_token = p_lock_token;
+        END;
+        $ack_orch$ LANGUAGE plpgsql;
+$fmt$, v_schema_name);
+
+    -- History.created_at used the same provider clock as the acknowledgement.
+    -- event_type can contain "Event", so inspect the serialized discriminator.
+    EXECUTE format($fmt$
+        WITH completion_times AS (
+            SELECT e.instance_id, e.execution_id, terminal.created_at
+            FROM %1$I.executions e
+            CROSS JOIN LATERAL (
+                SELECT h.created_at FROM %1$I.history h
+                WHERE h.instance_id = e.instance_id AND h.execution_id = e.execution_id
+                  AND h.event_data::jsonb->>'type' = 'OrchestrationContinuedAsNew'
+                ORDER BY h.event_id DESC LIMIT 1
+            ) terminal
+            WHERE e.status = 'ContinuedAsNew' AND e.completed_at IS NULL
+        )
+        UPDATE %1$I.executions e
+        SET completed_at = c.created_at
+        FROM completion_times c
+        WHERE e.instance_id = c.instance_id AND e.execution_id = c.execution_id
+          AND e.status = 'ContinuedAsNew' AND e.completed_at IS NULL
+$fmt$, v_schema_name);
+
+    EXECUTE format(
+        'SELECT count(*) FROM %I.executions WHERE status = ''ContinuedAsNew'' AND completed_at IS NULL',
+        v_schema_name
+    ) INTO v_unresolved;
+    IF v_unresolved > 0 THEN
+        RAISE WARNING 'Migration 0024: % continued execution(s) in schema % have no terminal history timestamp; leaving completed_at NULL',
+            v_unresolved, v_schema_name;
+    END IF;
+END $$;

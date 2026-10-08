@@ -90,6 +90,26 @@ CREATE INDEX IF NOT EXISTS idx_worker_processed ON worker_queue(processed_at);
 
 Migrations are automatically applied when creating a `PostgresProvider`. Each test schema gets its own migration history, so you can test migrations in isolation.
 
+### Continued execution timestamps (0024)
+
+Migration `0024` fixes completion timestamps for `ContinuedAsNew` executions.
+It also fills existing NULL timestamps from the persisted `created_at` of each
+execution's last `OrchestrationContinuedAsNew` history event. This uses the same
+provider clock as acknowledgement, not the execution's start time or upgrade
+time. Existing non-NULL timestamps and other execution statuses are unchanged.
+
+If no terminal event is available, the timestamp stays NULL and the migration
+warns with the affected row count. These rows remain ineligible for age-based
+pruning; inspect their history before choosing an explicit count-based policy.
+The migration itself deletes no executions or history. Once timestamps are
+recovered, subsequent age-based pruning can remove generations older than the
+configured cutoff, while still protecting the current and running executions.
+
+Stop worker runtimes before upgrading and resume them after migrations complete,
+so acknowledgements using the old function cannot race the one-time backfill.
+The backfill can take time on a large history store. The migration is idempotent;
+reapplying it does not change already populated timestamps.
+
 ## Migration Execution Context
 
 - Migrations run inside transactions
