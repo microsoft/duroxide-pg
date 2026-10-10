@@ -1,6 +1,12 @@
 [workspace]
 members = [".", "pg-stress"]
 
+# Temporary: build against the duroxide queue-race fixes (microsoft/duroxide, branch
+# waldemort/queue-race-fixes). Remove this patch and require the released duroxide
+# version once it is published.
+[patch.crates-io]
+duroxide = { git = "https://github.com/microsoft/duroxide", branch = "waldemort/queue-race-fixes" }
+
 [package]
 name = "duroxide-pg"
 version = "0.1.35"

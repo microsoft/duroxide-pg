@@ -8,7 +8,7 @@ use duroxide::provider_validation::{
     error_handling, instance_creation, instance_locking, kv_store, lock_expiration, management,
     multi_execution, prune, queue_semantics, sessions, tag_filtering,
 };
-use duroxide::provider_validations::ProviderFactory;
+use duroxide::provider_validations::{race_replay, ProviderFactory};
 use duroxide::providers::Provider;
 use duroxide_pg::PostgresProvider;
 use sqlx::{postgres::PgPoolOptions, Executor};
@@ -179,6 +179,36 @@ macro_rules! provider_validation_test {
     };
 }
 
+mod race_replay_tests {
+    use super::*;
+
+    provider_validation_test!(race_replay::test_duplicate_start_preserves_pinned_handler);
+    provider_validation_test!(race_replay::test_continue_as_new_unregistered_backoff);
+    provider_validation_test!(race_replay::test_continue_as_new_duplicate_start);
+    provider_validation_test!(
+        race_replay::test_continue_as_new_poisoned_successor_is_own_execution
+    );
+    provider_validation_test!(race_replay::test_queue_race_cancellation_replay);
+    provider_validation_test!(race_replay::test_continue_as_new_queue_race_replay);
+    provider_validation_test!(race_replay::test_queue_replay_version_stamp_roundtrip);
+    provider_validation_test!(race_replay::test_positional_wait_race_replay);
+    provider_validation_test!(race_replay::test_legacy_queue_race_decision_preserved);
+
+    #[tokio::test]
+    async fn test_continue_as_new_transition_delivery_legacy_stamp() {
+        let factory = PostgresProviderFactory::new();
+        race_replay::test_continue_as_new_transition_delivery(&factory, "0.1.30").await;
+        factory.cleanup_schema().await;
+    }
+
+    #[tokio::test]
+    async fn test_continue_as_new_transition_delivery_new_stamp() {
+        let factory = PostgresProviderFactory::new();
+        race_replay::test_continue_as_new_transition_delivery(&factory, "0.1.31").await;
+        factory.cleanup_schema().await;
+    }
+}
+
 mod atomicity_tests {
     use super::*;
 
@@ -296,6 +326,10 @@ mod poison_message_tests {
     provider_validation_test!(poison_message::attempt_count_is_per_message);
     provider_validation_test!(poison_message::abandon_work_item_ignore_attempt_decrements);
     provider_validation_test!(poison_message::abandon_orchestration_item_ignore_attempt_decrements);
+    provider_validation_test!(poison_message::orchestration_ignore_attempt_preserves_hidden_start);
+    provider_validation_test!(
+        poison_message::orchestration_delayed_abandon_preserves_unlocked_rows
+    );
     provider_validation_test!(poison_message::ignore_attempt_never_goes_negative);
     provider_validation_test!(poison_message::max_attempt_count_across_message_batch);
 }
