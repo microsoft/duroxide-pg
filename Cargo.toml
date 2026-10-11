@@ -1,11 +1,10 @@
 [workspace]
 members = [".", "pg-stress"]
 
-# Temporary: build against the duroxide queue-race fixes (microsoft/duroxide, branch
-# waldemort/queue-race-fixes). Remove this patch and require the released duroxide
-# version once it is published.
+# Temporary: build against the duroxide v0.1.32 tag until 0.1.32 is on crates.io.
+# Then remove this patch; the dependency below already requires 0.1.32.
 [patch.crates-io]
-duroxide = { git = "https://github.com/microsoft/duroxide", branch = "waldemort/queue-race-fixes" }
+duroxide = { git = "https://github.com/microsoft/duroxide", tag = "v0.1.32" }
 
 [package]
 name = "duroxide-pg"
@@ -35,7 +34,7 @@ exclude = [
 ]
 
 [dependencies]
-duroxide = { version = "0.1.30", features = ["provider-test"] }
+duroxide = { version = "0.1.32", features = ["provider-test"] }
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "chrono"], default-features = false }
