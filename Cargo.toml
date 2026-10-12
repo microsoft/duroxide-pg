@@ -1,11 +1,6 @@
 [workspace]
 members = [".", "pg-stress"]
 
-# Temporary: build against the duroxide v0.1.32 tag until 0.1.32 is on crates.io.
-# Then remove this patch; the dependency below already requires 0.1.32.
-[patch.crates-io]
-duroxide = { git = "https://github.com/microsoft/duroxide", tag = "v0.1.32" }
-
 [package]
 name = "duroxide-pg"
 version = "0.1.35"

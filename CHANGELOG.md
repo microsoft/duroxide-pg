@@ -20,6 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Nothing else in the procedure changes. Regression tests:
   `tests/fetch_lease_regression_tests.rs`.
 
+### Changed
+
+- **Bump `duroxide` dependency** — `0.1.30` → `0.1.32` (0.1.31 was reserved
+  and not published). The core 0.1.32 release fixes queue, signal and
+  continue-as-new races, returns KV keys in key order, and makes
+  `Runtime::shutdown` stop every task the runtime spawned. No provider trait
+  changes.
+- Update the `pg-stress` companion crate to use `duroxide` 0.1.32 as well.
+- Run the new upstream provider validations on PostgreSQL: race replay,
+  continue-as-new transition delivery, duplicate starts, hidden-start attempt
+  preservation and delayed-abandon locked rows.
+
 ## [0.1.35] - 2026-08-24
 
 ### Performance
