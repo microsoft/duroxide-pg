@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.36] - 2026-10-12
+
 ### Fixed
 
 - **`fetch_orchestration_item` no longer returns an already-expired lock lease
