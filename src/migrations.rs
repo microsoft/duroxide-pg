@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-// Touch this module when adding migrations so incremental builds re-embed them. Latest: 0027.
+// Touch this module when adding migrations so incremental builds re-embed them. Latest: 0028.
 static MIGRATIONS: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations");
 
 const BASE_TABLES: &[&str] = &[

@@ -111,6 +111,29 @@ so acknowledgements using the old function cannot race the one-time backfill.
 The backfill can take time on a large history store. The migration is idempotent;
 reapplying it does not change already populated timestamps.
 
+### Batched execution pruning (0028)
+
+`<schema>.prune_executions_batch(after_instance_id, after_execution_id,
+completed_before_ms, limit)` atomically prunes one primary-key-ordered page across
+the provider store. Start with `('', 0)`, a nonnegative epoch-millisecond cutoff,
+and a limit from 1 through 1,000. It returns `last_instance_id`,
+`last_execution_id`, `executions_scanned`, `executions_deleted`, and `events_deleted`.
+Use the returned key to resume; both cursor columns are NULL only for an empty
+page. A page shorter than the requested limit ends that scan.
+
+The limit applies to **scanned execution keys**, not just eligible matches.
+Current/future executions, Running executions, and histories with NULL or recent
+completion times are preserved, but still advance the cursor. Missing instance
+metadata is not permission to delete history. No instance, queue, lock, or KV
+records are removed. The number of history events per execution is not capped.
+
+Use a maintenance connection with appropriate statement/lock timeouts. A failed
+call rolls back its entire batch. Applications that must progress past locked
+pages may pre-read the bounded page's last key and retry that page on a later
+scan; a successful call's cursor remains authoritative if concurrent work changes
+the page. Keep the original `prune_executions` API for callers that intentionally
+request a whole-instance historical cleanup.
+
 ## Migration Execution Context
 
 - Migrations run inside transactions
