@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve pending continue-as-new instances in age-filtered bulk deletion.
+  Populating their completion timestamps no longer makes queued continuations
+  eligible for deletion. Unfiltered bulk deletion retains its existing behavior.
+- Record `completed_at` for `ContinuedAsNew` executions so age-based execution
+  pruning also works for long-running workflows. Migration `0024` recovers
+  missing timestamps from terminal history events without changing current
+  execution protection. Rows without a recoverable terminal event remain NULL
+  and produce a migration warning.
+
+### Added
+
+- Migration `0026` adds the `prune_executions_batch` SQL API. It scans at most
+  1,000 execution keys per call and returns a cursor even for protected or young
+  rows, allowing maintenance to make bounded progress without changing retention.
+
 ## [0.1.36] - 2026-10-12
 
 ### Fixed

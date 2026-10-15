@@ -90,6 +90,49 @@ CREATE INDEX IF NOT EXISTS idx_worker_processed ON worker_queue(processed_at);
 
 Migrations are automatically applied when creating a `PostgresProvider`. Each test schema gets its own migration history, so you can test migrations in isolation.
 
+### Continued execution timestamps (0024)
+
+Migration `0024` fixes completion timestamps for `ContinuedAsNew` executions.
+It also fills existing NULL timestamps from the persisted `created_at` of each
+execution's last `OrchestrationContinuedAsNew` history event. This uses the same
+provider clock as acknowledgement, not the execution's start time or upgrade
+time. Existing non-NULL timestamps and other execution statuses are unchanged.
+
+If no terminal event is available, the timestamp stays NULL and the migration
+warns with the affected row count. These rows remain ineligible for age-based
+pruning; inspect their history before choosing an explicit count-based policy.
+The migration itself deletes no executions or history. Once timestamps are
+recovered, subsequent age-based pruning can remove generations older than the
+configured cutoff, while still protecting the current and running executions.
+
+Stop worker runtimes before upgrading and resume them after migrations complete,
+so acknowledgements using the old function cannot race the one-time backfill.
+The backfill can take time on a large history store. The migration is idempotent;
+reapplying it does not change already populated timestamps.
+
+### Batched execution pruning (0026)
+
+`<schema>.prune_executions_batch(after_instance_id, after_execution_id,
+completed_before_ms, limit)` atomically prunes one primary-key-ordered page across
+the provider store. Start with `('', 0)`, a nonnegative epoch-millisecond cutoff,
+and a limit from 1 through 1,000. It returns `last_instance_id`,
+`last_execution_id`, `executions_scanned`, `executions_deleted`, and `events_deleted`.
+Use the returned key to resume; both cursor columns are NULL only for an empty
+page. A page shorter than the requested limit ends that scan.
+
+The limit applies to **scanned execution keys**, not just eligible matches.
+Current/future executions, Running executions, and histories with NULL or recent
+completion times are preserved, but still advance the cursor. Missing instance
+metadata is not permission to delete history. No instance, queue, lock, or KV
+records are removed. The number of history events per execution is not capped.
+
+Use a maintenance connection with appropriate statement/lock timeouts. A failed
+call rolls back its entire batch. Applications that must progress past locked
+pages may pre-read the bounded page's last key and retry that page on a later
+scan; a successful call's cursor remains authoritative if concurrent work changes
+the page. Keep the original `prune_executions` API for callers that intentionally
+request a whole-instance historical cleanup.
+
 ## Migration Execution Context
 
 - Migrations run inside transactions
