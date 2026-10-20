@@ -221,10 +221,13 @@ a provider with both `MigrationPolicy::ApplyAll` and `long_poll.enabled = true`
 activates them for that schema. `VerifyOnly` workers require that activation
 first and perform no DDL themselves. See [Migration Policy](docs/migration-policy.md).
 
-Once activated, inserts, visibility changes, and released locks emit
-notifications, including writes from short-polling producers. Turning off a
-provider's listener does not deactivate the schema's triggers. Transactions
-writing those queues cannot use `PREPARE TRANSACTION`, because PostgreSQL does
+Once activated, inserts, visibility changes, released locks, and consumption of
+claimed orchestration messages emit notifications. Acknowledgment notifications
+are delivered after the transaction releases the instance lock, so other
+workers recheck events that arrived during the turn. This includes writes from
+short-polling producers. Turning off a provider's listener does not deactivate
+the schema's triggers. Transactions writing those queues cannot use
+`PREPARE TRANSACTION`, because PostgreSQL does
 not support preparing transactions that emit notifications. Schemas that have
 not opted in retain their existing transaction behavior.
 

@@ -10,6 +10,20 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $notify$
 BEGIN
+    IF TG_OP = 'DELETE' THEN
+        -- Acknowledgment consumes claimed rows and releases the instance lock
+        -- in one transaction; NOTIFY is delivered only after that commit.
+        IF OLD.lock_token IS NOT NULL THEN
+            PERFORM pg_catalog.pg_notify('duroxide_pg_' || TG_RELID::TEXT, '0');
+        END IF;
+        RETURN OLD;
+    ELSIF TG_OP = 'UPDATE' THEN
+        IF NEW.visible_at IS NOT DISTINCT FROM OLD.visible_at
+           AND NOT (OLD.lock_token IS NOT NULL AND NEW.lock_token IS NULL) THEN
+            RETURN NEW;
+        END IF;
+    END IF;
+
     PERFORM pg_catalog.pg_notify(
         'duroxide_pg_' || TG_RELID::TEXT,
         pg_catalog.ceil(EXTRACT(EPOCH FROM NEW.visible_at) * 1000)::BIGINT::TEXT
@@ -44,12 +58,8 @@ ALTER TABLE orchestrator_queue DISABLE TRIGGER trg_notify_orch_work;
 
 DROP TRIGGER IF EXISTS trg_notify_orch_work_released ON orchestrator_queue;
 CREATE TRIGGER trg_notify_orch_work_released
-    AFTER UPDATE OF visible_at, lock_token ON orchestrator_queue
+    AFTER DELETE OR UPDATE OF visible_at, lock_token ON orchestrator_queue
     FOR EACH ROW
-    WHEN (
-        NEW.visible_at IS DISTINCT FROM OLD.visible_at
-        OR (OLD.lock_token IS NOT NULL AND NEW.lock_token IS NULL)
-    )
     EXECUTE FUNCTION duroxide_notify_queue_work();
 ALTER TABLE orchestrator_queue DISABLE TRIGGER trg_notify_orch_work_released;
 
