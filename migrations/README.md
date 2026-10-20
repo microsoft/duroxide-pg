@@ -90,6 +90,38 @@ CREATE INDEX IF NOT EXISTS idx_worker_processed ON worker_queue(processed_at);
 
 Migrations are automatically applied when creating a `PostgresProvider`. Each test schema gets its own migration history, so you can test migrations in isolation.
 
+Migration `0027` installs disabled queue-notification triggers. A provider with
+`MigrationPolicy::ApplyAll` and `long_poll.enabled = true` activates them for the
+schema under the migration lock. `VerifyOnly` requires prior activation. See
+[Migration Policy](../docs/migration-policy.md) for compatibility and privilege
+requirements.
+
+The provider validation harness can exercise either mode:
+
+```sh
+cargo nextest run --test postgres_provider_test
+DUROXIDE_PG_TEST_LONG_POLL=true cargo nextest run --test postgres_provider_test
+cargo nextest run --test long_poll_tests
+```
+
+The ignored two-phase-commit test additionally requires a disposable PostgreSQL
+server with `max_prepared_transactions >= 1`:
+
+```sh
+cargo nextest run --test long_poll_tests --run-ignored only \
+  -E 'test(two_phase_commit_is_preserved_until_explicit_notification_activation)'
+```
+
+The ignored idle-query benchmark requires `pg_stat_statements` to be preloaded
+and installed in a disposable local database, and an optimized PostgreSQL build
+without assertions or memory wiping. It measures 65 seconds per mode, including
+the normal long-poll timeouts and notifier refresh:
+
+```sh
+cargo nextest run --release --test long_poll_tests --run-ignored only \
+  -E 'test(idle_query_load_is_reduced_with_long_polling)' --success-output final
+```
+
 ## Migration Execution Context
 
 - Migrations run inside transactions
@@ -112,4 +144,3 @@ Migrations are automatically applied when creating a `PostgresProvider`. Each te
 ### Schema conflicts
 - Each schema maintains its own migration history
 - Migrations can be applied independently to different schemas
-

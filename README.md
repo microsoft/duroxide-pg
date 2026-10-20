@@ -174,9 +174,89 @@ Two test layers cover the Entra integration:
 |---------------------|-------------|---------|
 | `DUROXIDE_PG_POOL_MAX` | Maximum connection pool size | `10` |
 
+### Optional long-polling
+
+Existing constructors use short polling. To reduce idle queries and wake workers
+when work arrives, explicitly enable long-polling:
+
+```rust,no_run
+use duroxide_pg::{PostgresProvider, ProviderConfig};
+
+# async fn example(database_url: &str) -> anyhow::Result<()> {
+let mut config = ProviderConfig::url(database_url);
+config.schema_name = Some("my_app".to_string());
+config.long_poll.enabled = true;
+let provider = PostgresProvider::new_with_config(config).await?;
+# Ok(())
+# }
+```
+
+The same setting works with `ProviderConfig::entra(...)`. Long-polling reserves
+one connection **within** the provider's pool for PostgreSQL `LISTEN`, so the
+pool must allow at least two connections. Leave it disabled for client-only
+providers, especially one-connection backend clients. It requires a
+session-preserving database connection; transaction-pooling proxies are not a
+substitute for a dedicated LISTEN session.
+
+`LongPollConfig` also provides `notifier_poll_interval` (default 60 seconds)
+and `timer_grace_period` (default 100 milliseconds). The provider schedules
+future work in both queues, rescans after a timer fires, and periodically wakes
+fetches to recover missed notifications. Reconnection resubscribes and rechecks
+work. Notifications are hints; queue predicates and locks remain authoritative.
+Lost notifications and eligibility changes such as expired leases are also
+recovered by subsequent fetches after the runtime's long-poll timeout.
+
+An enabled fetch waits for work until its `poll_timeout`; a zero timeout still
+performs a single fetch. The timeout bounds notification waiting, not an
+in-flight database operation. Dropping the provider or closing its pool stops
+the notification/timer task; connection cleanup has the network-failure
+limitation described below.
+The first notification wakes a fetch immediately. Further notifications that
+find no eligible work, and timer catch-up scans, are coalesced to a 100 ms
+cadence to bound query load. This can add up to 100 ms after an unsuccessful
+wake; the overall polling deadline is not extended.
+
+Migration `0027` installs **disabled** queue notification triggers. Constructing
+a provider with both `MigrationPolicy::ApplyAll` and `long_poll.enabled = true`
+activates them for that schema. `VerifyOnly` workers require that activation
+first and perform no DDL themselves. See [Migration Policy](docs/migration-policy.md).
+
+Once activated, inserts, visibility changes, released locks, and consumption of
+claimed orchestration messages emit notifications. Acknowledgment notifications
+are delivered after the transaction releases the instance lock, so other
+workers recheck events that arrived during the turn. This includes writes from
+short-polling producers. Turning off a provider's listener does not deactivate
+the schema's triggers. Transactions writing those queues cannot use
+`PREPARE TRANSACTION`, because PostgreSQL does
+not support preparing transactions that emit notifications. Schemas that have
+not opted in retain their existing transaction behavior.
+
+PostgreSQL serializes transactions that emit notifications through a
+server-wide lock held until commit completes. Slow WAL flushes or synchronous
+replication waits can therefore delay other notification writers, even in
+other schemas or databases on that server. Benchmark concurrent writers with
+representative commit latency before activating notifications; idle-query
+savings alone do not establish loaded throughput.
+
+Detected connection failures reconnect automatically, but silent network
+partitions are not actively probed. Until the transport reports a failure,
+work relies on the polling and refresh fallbacks instead of prompt
+notifications. SQLx listener cleanup can also wait indefinitely on a wedged
+socket, so provider drop does not guarantee bounded connection cleanup and
+`pool.close()` has no hard shutdown deadline in that situation.
+
+Recreate providers if their queue tables are dropped and recreated: notification
+channels identify the original tables. Runtime session-capacity decisions are
+also made once per fetch; a slot that started polling without session capacity
+may need another fetch after its poll timeout before it can claim session work.
+
+This feature does **not** convert a `duroxide-pg-opt` database into a
+`duroxide-pg` database. Their migration histories remain incompatible.
+
 ## Features
 
 - Automatic schema migration on startup
+- Optional notification-driven long-polling for orchestration and activity work
 - Connection pooling via sqlx
 - Custom schema support for multi-tenant isolation
 - Full implementation of the Duroxide `Provider` and `ProviderAdmin` traits
