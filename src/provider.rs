@@ -21,6 +21,7 @@ use tracing::{debug, error, instrument, warn};
 
 use crate::entra::{EntraAuthOptions, TokenSource};
 use crate::migrations::MigrationRunner;
+use crate::notifier::{fetch_with_poll, LongPollConfig, LongPoller};
 
 /// PostgreSQL-based provider for Duroxide durable orchestrations.
 ///
@@ -166,6 +167,7 @@ pub struct PostgresProvider {
     /// preserving FR-006 byte-equivalent behavior on the password path.
     is_entra: bool,
     _refresh_task: Option<AbortOnDropHandle>,
+    long_poll: Option<LongPoller>,
 }
 
 /// Migration policy applied at [`PostgresProvider`] construction.
@@ -217,6 +219,10 @@ pub struct ProviderConfig {
     pub schema_name: Option<String>,
     /// Policy for handling embedded migrations at startup.
     pub migration_policy: MigrationPolicy,
+    /// Notification-driven waiting for work. Disabled by default.
+    /// `ApplyAll` also activates schema-wide notification triggers;
+    /// `VerifyOnly` requires prior activation.
+    pub long_poll: LongPollConfig,
 }
 
 impl ProviderConfig {
@@ -228,6 +234,7 @@ impl ProviderConfig {
             connection: ConnectionConfig::Url(database_url.into()),
             schema_name: None,
             migration_policy: MigrationPolicy::default(),
+            long_poll: LongPollConfig::default(),
         }
     }
 
@@ -252,6 +259,7 @@ impl ProviderConfig {
             },
             schema_name: None,
             migration_policy: MigrationPolicy::default(),
+            long_poll: LongPollConfig::default(),
         }
     }
 }
@@ -337,7 +345,7 @@ impl PostgresProvider {
 
     /// Create a provider from a [`ProviderConfig`]. This is the single
     /// constructor that fully exposes the configuration surface:
-    /// connection variant (URL or Entra), schema, and migration policy.
+    /// connection variant (URL or Entra), schema, migration policy, and long-polling.
     ///
     /// All other public constructors delegate to this one.
     pub async fn new_with_config(config: ProviderConfig) -> Result<Self> {
@@ -345,6 +353,7 @@ impl PostgresProvider {
             connection,
             schema_name,
             migration_policy,
+            long_poll,
         } = config;
 
         if let Some(ref s) = schema_name {
@@ -353,7 +362,13 @@ impl PostgresProvider {
 
         match connection {
             ConnectionConfig::Url(database_url) => {
-                Self::new_from_url(&database_url, schema_name.as_deref(), migration_policy).await
+                Self::new_from_url(
+                    &database_url,
+                    schema_name.as_deref(),
+                    migration_policy,
+                    long_poll,
+                )
+                .await
             }
             ConnectionConfig::Entra {
                 host,
@@ -362,6 +377,7 @@ impl PostgresProvider {
                 user,
                 options,
             } => {
+                long_poll.validate(options.max_connections_value())?;
                 let token_source = options.default_token_source().context(
                     "Entra credential resolution failed: could not build the default credential chain",
                 )?;
@@ -375,6 +391,7 @@ impl PostgresProvider {
                     token_source,
                     PgSslMode::VerifyFull,
                     migration_policy,
+                    long_poll,
                 )
                 .await
             }
@@ -385,11 +402,13 @@ impl PostgresProvider {
         database_url: &str,
         schema_name: Option<&str>,
         migration_policy: MigrationPolicy,
+        long_poll: LongPollConfig,
     ) -> Result<Self> {
         let max_connections = std::env::var("DUROXIDE_PG_POOL_MAX")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(10);
+        long_poll.validate(max_connections)?;
 
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
@@ -400,18 +419,29 @@ impl PostgresProvider {
 
         let schema_name = schema_name.unwrap_or("public").to_string();
 
-        let provider = Self {
+        let mut provider = Self {
             pool: Arc::new(pool),
             schema_name: schema_name.clone(),
             is_entra: false,
             _refresh_task: None,
+            long_poll: None,
         };
 
         let migration_runner = MigrationRunner::new(provider.pool.clone(), schema_name);
         match migration_policy {
-            MigrationPolicy::ApplyAll => migration_runner.migrate().await?,
-            MigrationPolicy::VerifyOnly => migration_runner.verify().await?,
+            MigrationPolicy::ApplyAll => {
+                migration_runner
+                    .migrate_with_notifications(long_poll.enabled)
+                    .await?
+            }
+            MigrationPolicy::VerifyOnly => {
+                migration_runner
+                    .verify_with_notifications(long_poll.enabled)
+                    .await?
+            }
         }
+        provider.long_poll =
+            LongPoller::start((*provider.pool).clone(), &provider.schema_name, long_poll).await?;
 
         Ok(provider)
     }
@@ -500,7 +530,9 @@ impl PostgresProvider {
         token_source: Arc<dyn TokenSource>,
         ssl_mode: PgSslMode,
         migration_policy: MigrationPolicy,
+        long_poll: LongPollConfig,
     ) -> Result<Self> {
+        long_poll.validate(options.max_connections_value())?;
         let audience = options.audience_str().to_string();
         let token = token_source
             .fetch_token(&[audience.as_str()])
@@ -523,9 +555,18 @@ impl PostgresProvider {
 
         let migration_runner = MigrationRunner::new(pool.clone(), schema_name.clone());
         match migration_policy {
-            MigrationPolicy::ApplyAll => migration_runner.migrate().await?,
-            MigrationPolicy::VerifyOnly => migration_runner.verify().await?,
+            MigrationPolicy::ApplyAll => {
+                migration_runner
+                    .migrate_with_notifications(long_poll.enabled)
+                    .await?
+            }
+            MigrationPolicy::VerifyOnly => {
+                migration_runner
+                    .verify_with_notifications(long_poll.enabled)
+                    .await?
+            }
         }
+        let long_poll = LongPoller::start((*pool).clone(), &schema_name, long_poll).await?;
 
         let refresh_handle = spawn_token_refresh_task(
             pool.clone(),
@@ -541,6 +582,7 @@ impl PostgresProvider {
             schema_name,
             is_entra: true,
             _refresh_task: Some(AbortOnDropHandle(refresh_handle)),
+            long_poll,
         })
     }
 
@@ -556,7 +598,7 @@ impl PostgresProvider {
     }
 
     /// Get current timestamp in milliseconds (Unix epoch)
-    fn now_millis() -> i64 {
+    pub(crate) fn now_millis() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -646,6 +688,9 @@ impl PostgresProvider {
     /// **SAFETY**: Never drops the "public" schema itself, only tables within it.
     /// Only drops the schema if it's a custom schema (not "public").
     pub async fn cleanup_schema(&self) -> Result<()> {
+        if let Some(long_poll) = &self.long_poll {
+            long_poll.stop();
+        }
         const MAX_RETRIES: u32 = 5;
         const BASE_RETRY_DELAY_MS: u64 = 50;
 
@@ -952,21 +997,10 @@ fn compute_next_refresh_sleep(
     ceiling.min(expiry_driven).max(ENTRA_REFRESH_MIN_INTERVAL)
 }
 
-#[async_trait::async_trait]
-impl Provider for PostgresProvider {
-    fn name(&self) -> &str {
-        "duroxide-pg"
-    }
-
-    fn version(&self) -> &str {
-        env!("CARGO_PKG_VERSION")
-    }
-
-    #[instrument(skip(self), target = "duroxide::providers::postgres")]
-    async fn fetch_orchestration_item(
+impl PostgresProvider {
+    async fn fetch_orchestration_item_once(
         &self,
         lock_timeout: Duration,
-        _poll_timeout: Duration,
         filter: Option<&DispatcherCapabilityFilter>,
     ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
         let start = std::time::Instant::now();
@@ -999,6 +1033,7 @@ impl Provider for PostgresProvider {
         for attempt in 0..=MAX_RETRIES {
             let now_ms = Self::now_millis();
 
+            #[allow(clippy::type_complexity)]
             let result: Result<
                 Option<(
                     String,
@@ -1158,6 +1193,10 @@ impl Provider for PostgresProvider {
                         vec![],
                     )
                     .await?;
+                    // Consuming an orphan does not mean the queue is empty.
+                    if let Some(poller) = &self.long_poll {
+                        poller.orch_notify.notify_waiters();
+                    }
                     return Ok(None);
                 }
 
@@ -1184,6 +1223,126 @@ impl Provider for PostgresProvider {
 
         Ok(None)
     }
+
+    async fn fetch_work_item_once(
+        &self,
+        lock_timeout: Duration,
+        session: Option<&SessionFetchConfig>,
+        tag_filter: &TagFilter,
+    ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
+        let start = std::time::Instant::now();
+
+        // Convert Duration to milliseconds
+        let lock_timeout_ms = lock_timeout.as_millis() as i64;
+
+        // Extract session parameters
+        let (owner_id, session_lock_timeout_ms): (Option<&str>, Option<i64>) = match session {
+            Some(config) => (
+                Some(&config.owner_id),
+                Some(config.lock_timeout.as_millis() as i64),
+            ),
+            None => (None, None),
+        };
+
+        // Convert TagFilter to SQL parameters
+        let (tag_mode, tag_names) = Self::tag_filter_to_sql(tag_filter);
+
+        let row = match sqlx::query_as::<_, (String, String, i32)>(&format!(
+            "SELECT * FROM {}.fetch_work_item($1, $2, $3, $4, $5, $6)",
+            self.schema_name
+        ))
+        .bind(Self::now_millis())
+        .bind(lock_timeout_ms)
+        .bind(owner_id)
+        .bind(session_lock_timeout_ms)
+        .bind(&tag_names)
+        .bind(tag_mode)
+        .fetch_optional(&*self.pool)
+        .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                return Err(self.sqlx_to_provider_error("fetch_work_item", e));
+            }
+        };
+
+        let (work_item_json, lock_token, attempt_count) = match row {
+            Some(row) => row,
+            None => return Ok(None),
+        };
+
+        let work_item: WorkItem = serde_json::from_str(&work_item_json).map_err(|e| {
+            ProviderError::permanent(
+                "fetch_work_item",
+                format!("Failed to deserialize worker item: {e}"),
+            )
+        })?;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Extract instance for logging - different work item types have different structures
+        let instance_id = match &work_item {
+            WorkItem::ActivityExecute { instance, .. } => instance.as_str(),
+            WorkItem::ActivityCompleted { instance, .. } => instance.as_str(),
+            WorkItem::ActivityFailed { instance, .. } => instance.as_str(),
+            WorkItem::StartOrchestration { instance, .. } => instance.as_str(),
+            WorkItem::TimerFired { instance, .. } => instance.as_str(),
+            WorkItem::ExternalRaised { instance, .. } => instance.as_str(),
+            WorkItem::CancelInstance { instance, .. } => instance.as_str(),
+            WorkItem::ContinueAsNew { instance, .. } => instance.as_str(),
+            WorkItem::SubOrchCompleted {
+                parent_instance, ..
+            } => parent_instance.as_str(),
+            WorkItem::SubOrchFailed {
+                parent_instance, ..
+            } => parent_instance.as_str(),
+            WorkItem::QueueMessage { instance, .. } => instance.as_str(),
+        };
+
+        debug!(
+            target = "duroxide::providers::postgres",
+            operation = "fetch_work_item",
+            instance_id = %instance_id,
+            attempt_count = attempt_count,
+            duration_ms = duration_ms,
+            "Fetched activity work item via stored procedure"
+        );
+
+        Ok(Some((work_item, lock_token, attempt_count as u32)))
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for PostgresProvider {
+    fn name(&self) -> &str {
+        "duroxide-pg"
+    }
+
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
+    #[instrument(skip(self), target = "duroxide::providers::postgres")]
+    async fn fetch_orchestration_item(
+        &self,
+        lock_timeout: Duration,
+        poll_timeout: Duration,
+        filter: Option<&DispatcherCapabilityFilter>,
+    ) -> Result<Option<(OrchestrationItem, String, u32)>, ProviderError> {
+        if filter.is_some_and(|filter| filter.supported_duroxide_versions.is_empty()) {
+            return Ok(None);
+        }
+        fetch_with_poll(
+            self.long_poll
+                .as_ref()
+                .map(|poller| poller.orch_notify.as_ref()),
+            poll_timeout,
+            "fetch_orchestration_item",
+            || self.fetch_orchestration_item_once(lock_timeout, filter),
+        )
+        .await
+    }
+
     #[instrument(skip(self), fields(lock_token = %lock_token, execution_id = execution_id), target = "duroxide::providers::postgres")]
     async fn ack_orchestration_item(
         &self,
@@ -1601,7 +1760,7 @@ impl Provider for PostgresProvider {
     async fn fetch_work_item(
         &self,
         lock_timeout: Duration,
-        _poll_timeout: Duration,
+        poll_timeout: Duration,
         session: Option<&SessionFetchConfig>,
         tag_filter: &TagFilter,
     ) -> Result<Option<(WorkItem, String, u32)>, ProviderError> {
@@ -1610,85 +1769,15 @@ impl Provider for PostgresProvider {
             return Ok(None);
         }
 
-        let start = std::time::Instant::now();
-
-        // Convert Duration to milliseconds
-        let lock_timeout_ms = lock_timeout.as_millis() as i64;
-
-        // Extract session parameters
-        let (owner_id, session_lock_timeout_ms): (Option<&str>, Option<i64>) = match session {
-            Some(config) => (
-                Some(&config.owner_id),
-                Some(config.lock_timeout.as_millis() as i64),
-            ),
-            None => (None, None),
-        };
-
-        // Convert TagFilter to SQL parameters
-        let (tag_mode, tag_names) = Self::tag_filter_to_sql(tag_filter);
-
-        let row = match sqlx::query_as::<_, (String, String, i32)>(&format!(
-            "SELECT * FROM {}.fetch_work_item($1, $2, $3, $4, $5, $6)",
-            self.schema_name
-        ))
-        .bind(Self::now_millis())
-        .bind(lock_timeout_ms)
-        .bind(owner_id)
-        .bind(session_lock_timeout_ms)
-        .bind(&tag_names)
-        .bind(tag_mode)
-        .fetch_optional(&*self.pool)
+        fetch_with_poll(
+            self.long_poll
+                .as_ref()
+                .map(|poller| poller.worker_notify.as_ref()),
+            poll_timeout,
+            "fetch_work_item",
+            || self.fetch_work_item_once(lock_timeout, session, tag_filter),
+        )
         .await
-        {
-            Ok(row) => row,
-            Err(e) => {
-                return Err(self.sqlx_to_provider_error("fetch_work_item", e));
-            }
-        };
-
-        let (work_item_json, lock_token, attempt_count) = match row {
-            Some(row) => row,
-            None => return Ok(None),
-        };
-
-        let work_item: WorkItem = serde_json::from_str(&work_item_json).map_err(|e| {
-            ProviderError::permanent(
-                "fetch_work_item",
-                format!("Failed to deserialize worker item: {e}"),
-            )
-        })?;
-
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        // Extract instance for logging - different work item types have different structures
-        let instance_id = match &work_item {
-            WorkItem::ActivityExecute { instance, .. } => instance.as_str(),
-            WorkItem::ActivityCompleted { instance, .. } => instance.as_str(),
-            WorkItem::ActivityFailed { instance, .. } => instance.as_str(),
-            WorkItem::StartOrchestration { instance, .. } => instance.as_str(),
-            WorkItem::TimerFired { instance, .. } => instance.as_str(),
-            WorkItem::ExternalRaised { instance, .. } => instance.as_str(),
-            WorkItem::CancelInstance { instance, .. } => instance.as_str(),
-            WorkItem::ContinueAsNew { instance, .. } => instance.as_str(),
-            WorkItem::SubOrchCompleted {
-                parent_instance, ..
-            } => parent_instance.as_str(),
-            WorkItem::SubOrchFailed {
-                parent_instance, ..
-            } => parent_instance.as_str(),
-            WorkItem::QueueMessage { instance, .. } => instance.as_str(),
-        };
-
-        debug!(
-            target = "duroxide::providers::postgres",
-            operation = "fetch_work_item",
-            instance_id = %instance_id,
-            attempt_count = attempt_count,
-            duration_ms = duration_ms,
-            "Fetched activity work item via stored procedure"
-        );
-
-        Ok(Some((work_item, lock_token, attempt_count as u32)))
     }
 
     #[instrument(skip(self), fields(token = %token), target = "duroxide::providers::postgres")]
@@ -3428,6 +3517,7 @@ mod entra_pipeline_tests {
             token_source,
             PgSslMode::Disable,
             MigrationPolicy::ApplyAll,
+            LongPollConfig::default(),
         )
         .await
         .expect("Entra pipeline must succeed against local PG with correct token");
@@ -3448,6 +3538,90 @@ mod entra_pipeline_tests {
         );
 
         drop_schema(provider.pool(), &schema).await;
+    }
+
+    #[tokio::test]
+    async fn long_poll_rejects_single_connection_before_fetching_a_token() {
+        let source = RecordingFakeTokenSource::with_tokens(vec![token("unused", 3600)]);
+        let result = PostgresProvider::new_with_entra_with_token_source(
+            "localhost",
+            1,
+            "unused",
+            "unused",
+            Some("unused"),
+            EntraAuthOptions::new().max_connections(1),
+            source.clone(),
+            PgSslMode::Disable,
+            MigrationPolicy::ApplyAll,
+            LongPollConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("a long-poll listener cannot share a one-connection pool"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("two pool connections"));
+        assert_eq!(source.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn pipeline_long_poll_with_two_connections() {
+        let Some((host, port, db, user, password)) = pg_connection_or_skip() else {
+            return;
+        };
+        let schema = unique_schema();
+        let source = RecordingFakeTokenSource::with_tokens(vec![token(&password, 3600)]);
+        let provider = PostgresProvider::new_with_entra_with_token_source(
+            &host,
+            port,
+            &db,
+            &user,
+            Some(&schema),
+            EntraAuthOptions::new().max_connections(2),
+            source,
+            PgSslMode::Disable,
+            MigrationPolicy::ApplyAll,
+            LongPollConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Entra long-poll construction should work with two connections");
+        let fetch = provider.fetch_work_item(
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            None,
+            &TagFilter::Any,
+        );
+        let enqueue = async {
+            sleep(Duration::from_millis(100)).await;
+            provider
+                .enqueue_for_worker(WorkItem::ActivityExecute {
+                    instance: schema.clone(),
+                    execution_id: 1,
+                    id: 1,
+                    name: "test".to_string(),
+                    input: String::new(),
+                    session_id: None,
+                    tag: None,
+                })
+                .await
+                .unwrap();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(fetch, enqueue)
+        })
+        .await
+        .expect("notification must wake the two-connection Entra provider");
+        assert!(result.unwrap().is_some());
+        provider.cleanup_schema().await.unwrap();
+        let pool = provider.pool().clone();
+        drop(provider);
+        pool.close().await;
     }
 
     #[tokio::test]
@@ -3477,6 +3651,7 @@ mod entra_pipeline_tests {
             token_source,
             PgSslMode::Disable,
             MigrationPolicy::ApplyAll,
+            LongPollConfig::default(),
         )
         .await;
 
@@ -3526,6 +3701,7 @@ mod entra_pipeline_tests {
             token_source,
             PgSslMode::Disable,
             MigrationPolicy::ApplyAll,
+            LongPollConfig::default(),
         )
         .await
         .expect("default-constructor variant must succeed");

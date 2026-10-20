@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in long-polling through `ProviderConfig::long_poll`, for both URL and
+  Entra connections. It uses LISTEN/NOTIFY, bounded timer tracking for both
+  queues, periodic recovery of missed notifications, and reconnect handling.
+  Existing constructors remain short-polling by default.
+- Follow-up empty fetches and timer catch-up scans are coalesced at 100 ms
+  intervals; the first notification wake remains immediate. The configuration
+  type is non-exhaustive to permit compatible additions.
+- Migration `0027` adds disabled notification triggers. An `ApplyAll` provider
+  with long-polling enabled explicitly activates them for its schema;
+  `VerifyOnly` requires prior activation and performs no DDL. Once activated,
+  queue-writing transactions cannot use PostgreSQL `PREPARE TRANSACTION`.
+  Schemas that have not opted in retain their previous transaction behavior.
+- Long-polling reserves one connection within the configured pool and requires
+  at least two connections. Client-only providers can leave it disabled.
+  Notification channels support long and mixed-case schema names. This does
+  not convert the incompatible `duroxide-pg-opt` migration history.
+
+### Changed
+
+- Require SQLx 0.8.3 or later within the 0.8 series for explicit listener
+  reconnect handling. The existing native-TLS feature selection is unchanged.
+
 ## [0.1.38] - 2026-10-26
 
 ### Fixed

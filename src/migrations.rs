@@ -8,6 +8,7 @@ use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+// Touch this module when adding embedded files so incremental builds see them. Latest: 0027.
 static MIGRATIONS: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations");
 
 const BASE_TABLES: &[&str] = &[
@@ -91,6 +92,10 @@ impl MigrationRunner {
 
     /// Run all pending migrations
     pub async fn migrate(&self) -> Result<()> {
+        self.migrate_with_notifications(false).await
+    }
+
+    pub(crate) async fn migrate_with_notifications(&self, notifications: bool) -> Result<()> {
         let mut conn = self.pool.acquire().await?;
         let conn = &mut *conn;
         self.lock_for_migrations(conn).await?;
@@ -99,10 +104,15 @@ impl MigrationRunner {
         // older binary cannot rewrite a schema that is ahead of its code.
         // Short-circuit: do NOT run migrate_inner if unknown migrations are
         // detected.
-        let result = match self.check_no_unknown_migrations(conn).await {
-            Ok(()) => self.migrate_inner(conn).await,
-            Err(e) => Err(e),
-        };
+        let result = async {
+            self.check_no_unknown_migrations(conn).await?;
+            self.migrate_inner(conn).await?;
+            if notifications {
+                self.enable_notifications(conn).await?;
+            }
+            Ok(())
+        }
+        .await;
         self.unlock_for_migrations(conn).await;
 
         result
@@ -119,6 +129,10 @@ impl MigrationRunner {
     /// backends, where a separately privileged worker is responsible for
     /// applying schema changes).
     pub async fn verify(&self) -> Result<()> {
+        self.verify_with_notifications(false).await
+    }
+
+    pub(crate) async fn verify_with_notifications(&self, notifications: bool) -> Result<()> {
         let mut conn = self.pool.acquire().await?;
         let conn = &mut *conn;
 
@@ -164,7 +178,100 @@ impl MigrationRunner {
             );
         }
 
+        if notifications && self.notification_trigger_counts(conn).await?.1 != 4 {
+            anyhow::bail!(
+                "long-poll notifications are not enabled in schema {:?}. \
+                 Construct a provider with MigrationPolicy::ApplyAll and \
+                 long_poll.enabled = true from a process with DDL privileges first.",
+                self.schema_name,
+            );
+        }
+
         Ok(())
+    }
+
+    async fn notification_trigger_counts(
+        &self,
+        conn: &mut sqlx::postgres::PgConnection,
+    ) -> Result<(i64, i64)> {
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE tgenabled IN ('O', 'A')) \
+             FROM pg_catalog.pg_trigger \
+             WHERE (tgrelid = $1::TEXT::REGCLASS AND tgname IN \
+                    ('trg_notify_orch_work', 'trg_notify_orch_work_released')) \
+                OR (tgrelid = $2::TEXT::REGCLASS AND tgname IN \
+                    ('trg_notify_worker_work', 'trg_notify_worker_work_released'))",
+        )
+        .bind(format!("{}.orchestrator_queue", self.schema_name))
+        .bind(format!("{}.worker_queue", self.schema_name))
+        .fetch_one(conn)
+        .await?;
+        anyhow::ensure!(
+            counts.0 == 4,
+            "long-poll notification triggers are missing in schema {:?}; repair the schema before enabling long-polling",
+            self.schema_name,
+        );
+        Ok(counts)
+    }
+
+    async fn enable_notifications(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<()> {
+        if self.notification_trigger_counts(conn).await?.1 == 4 {
+            return Ok(());
+        }
+
+        let mut retries = 0;
+        loop {
+            let result: Result<(), sqlx::Error> = async {
+                // Match normal acknowledgments. Other administrative operations
+                // can reverse this order, so never wait while holding both up.
+                let mut tx = conn.begin().await?;
+                sqlx::query(&format!(
+                    "LOCK TABLE {}.worker_queue IN SHARE ROW EXCLUSIVE MODE",
+                    self.schema_name,
+                ))
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(&format!(
+                    "LOCK TABLE {}.orchestrator_queue IN SHARE ROW EXCLUSIVE MODE NOWAIT",
+                    self.schema_name,
+                ))
+                .execute(&mut *tx)
+                .await?;
+                for (table, trigger) in [
+                    ("worker_queue", "trg_notify_worker_work"),
+                    ("orchestrator_queue", "trg_notify_orch_work"),
+                ] {
+                    sqlx::query(&format!(
+                        "ALTER TABLE {}.{table} ENABLE TRIGGER {trigger}, \
+                         ENABLE TRIGGER {trigger}_released",
+                        self.schema_name,
+                    ))
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await
+            }
+            .await;
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if retries < 3
+                        && error.as_database_error().is_some_and(|error| {
+                            matches!(error.code().as_deref(), Some("40P01" | "55P03"))
+                        }) =>
+                {
+                    retries += 1;
+                    tracing::warn!(
+                        schema = %self.schema_name,
+                        attempt = retries,
+                        error = %error,
+                        "Queue lock contention activating long-poll notifications; retrying the transaction"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * retries)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     /// Check that the database has no migrations the running binary does not
