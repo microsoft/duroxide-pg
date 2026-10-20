@@ -94,6 +94,13 @@ ProviderError::retryable(operation, message)
 ProviderError::permanent(operation, message)
 ```
 
+Database, catalog, and deserialization errors must fail closed. Before reviewing
+code that turns a database result into a boolean, empty collection, zero count,
+or missing value, use
+[`.agents/skills/fail-closed-database-state-review/SKILL.md`](../.agents/skills/fail-closed-database-state-review/SKILL.md).
+The review must prove that an error cannot become an absent-state signal that
+permits writes or successful replay.
+
 ### Schema Naming for Tests
 Tests create unique schemas with GUID suffix to allow parallel execution:
 ```rust

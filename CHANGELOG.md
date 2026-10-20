@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Migration startup now fails closed on catalog errors or inconsistent
+  migration history.** Database errors from schema checks are propagated.
+  Applied migrations must be an ordered prefix of the bundled migrations, and
+  schemas with missing, unexpected, or non-table Duroxide relations are rejected
+  without deleting ledger rows or re-applying old SQL.
+- **Malformed KV snapshots now return a permanent provider error.** Legacy or
+  otherwise invalid `out_kv_snapshot` entries identify the affected key and no
+  longer become a successful empty snapshot that can cause nondeterministic
+  replay.
+- **Malformed durable history can no longer enter orphan-message cleanup.**
+  History decode failures remain attached to the fetched item for runtime
+  poison/backoff handling and do not acknowledge its queue messages.
+
 ## [0.1.36] - 2026-10-12
 
 ### Fixed
