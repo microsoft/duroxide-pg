@@ -417,6 +417,139 @@ async fn inserts_wake_already_waiting_fetches_for_both_queues() {
 }
 
 #[tokio::test]
+async fn acknowledgment_wakes_another_provider_after_it_consumed_a_locked_instances_notification() {
+    let owner = Fixture::new(LongPollConfig::default()).await;
+    Queue::Orchestration
+        .enqueue(&owner, "same-instance", None)
+        .await;
+    let first = Queue::Orchestration
+        .fetch(&owner.provider, Duration::ZERO)
+        .await
+        .unwrap();
+    let waiter = Fixture::with_schema(polling_config(true), owner.schema.clone()).await;
+    let waiting = waiter.waiting_fetch(Queue::Orchestration).await;
+    let inserted_after = waiter.stamp().await;
+    owner
+        .provider
+        .enqueue_for_orchestrator(
+            WorkItem::ExternalRaised {
+                instance: "same-instance".to_string(),
+                name: "event".to_string(),
+                data: "arrived during the turn".to_string(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    waiter
+        .wait_for_query(
+            &format!("{}.fetch_orchestration_item", waiter.schema),
+            Some(inserted_after),
+        )
+        .await;
+    assert!(!waiting.is_finished(), "the instance is still locked");
+    owner
+        .provider
+        .ack_orchestration_item(
+            &first.token,
+            1,
+            vec![],
+            vec![],
+            vec![],
+            ExecutionMetadata {
+                orchestration_name: Some("Test".to_string()),
+                orchestration_version: Some("1.0.0".to_string()),
+                ..Default::default()
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+    let next = claimed(waiting).await;
+    assert_eq!(next.attempt, 1);
+    Queue::Orchestration
+        .ack(&waiter.provider, &next.token)
+        .await;
+    waiter.cleanup().await;
+    owner.cleanup().await;
+}
+
+#[tokio::test]
+async fn orchestration_claims_stay_silent_but_acknowledgments_notify() {
+    let fixture = Fixture::enabled().await;
+    let mut listener = sqlx::postgres::PgListener::connect_with(&fixture.control)
+        .await
+        .unwrap();
+    listener
+        .listen(&fixture.channel(Queue::Orchestration).await)
+        .await
+        .unwrap();
+    Queue::Orchestration
+        .enqueue(&fixture, "claim-and-ack", None)
+        .await;
+    tokio::time::timeout(Duration::from_secs(3), listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let claim = Queue::Orchestration
+        .fetch(&fixture.provider, Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.recv())
+            .await
+            .is_err(),
+        "claiming work must not emit an availability notification",
+    );
+    Queue::Orchestration
+        .ack(&fixture.provider, &claim.token)
+        .await;
+    let notification = tokio::time::timeout(Duration::from_secs(3), listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(notification.payload(), "0");
+    drop(listener);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn closely_spaced_timers_do_not_disappear_between_paced_scans() {
+    for queue in [Queue::Orchestration, Queue::Worker] {
+        let mut config = polling_config(true);
+        config.timer_grace_period = Duration::ZERO;
+        let fixture = Fixture::new(config).await;
+        let first = fixture.waiting_fetch(queue).await;
+        queue
+            .enqueue(
+                &fixture,
+                "first-close-timer",
+                Some(Duration::from_millis(20)),
+            )
+            .await;
+        queue
+            .enqueue(
+                &fixture,
+                "second-close-timer",
+                Some(Duration::from_millis(40)),
+            )
+            .await;
+        let first = claimed(first).await;
+        // Keep the first item claimed so its acknowledgment cannot supply a
+        // notification that would hide a missed timer wake.
+        let second =
+            tokio::time::timeout(Duration::from_secs(3), queue.fetch(&fixture.provider, POLL))
+                .await
+                .expect("the paced scan must wake work that matured since the first timer")
+                .expect("second timer");
+        assert_ne!(first.token, second.token);
+        queue.ack(&fixture.provider, &first.token).await;
+        queue.ack(&fixture.provider, &second.token).await;
+        fixture.cleanup().await;
+    }
+}
+
+#[tokio::test]
 async fn delayed_inserts_and_successive_timers_wake_both_queues() {
     for queue in [Queue::Orchestration, Queue::Worker] {
         let fixture = Fixture::enabled().await;
@@ -1134,11 +1267,13 @@ async fn notification_installation_and_activation_follow_writer_lock_order() {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 let waiting: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
-                     WHERE application_name = $1 AND wait_event_type = 'Lock' \
-                     AND strpos(query, 'worker_queue') > 0)",
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a \
+                     JOIN pg_locks l ON l.pid = a.pid \
+                     WHERE a.application_name = $1 AND a.wait_event_type = 'Lock' \
+                     AND NOT l.granted AND l.relation = $2::TEXT::REGCLASS)",
                 )
                 .bind(&application)
+                .bind(format!("{}.worker_queue", fixture.schema))
                 .fetch_one(&fixture.control)
                 .await
                 .unwrap();

@@ -249,8 +249,10 @@ async fn run_connected(
     let refresh = refresh_timers(pool, timer_query);
     tokio::pin!(refresh);
     let mut refreshing = true;
-    // A timer can expire after the in-flight query took its snapshot.
-    let mut refresh_again = false;
+    // A paced scan must recheck work that matured since a queue's timer wake.
+    // Keep events during an in-flight scan pending for the following scan.
+    let mut pending_catchup = [false; 2];
+    let mut refreshing_catchup = [false; 2];
 
     loop {
         let next_timer = timers.iter().flatten().copied().min();
@@ -274,30 +276,35 @@ async fn run_connected(
                         for (index, timestamp) in [orch, worker].into_iter().enumerate() {
                             // Recovery must also find ready work whose notification
                             // was lost. Timer-only scans need not wake the other queue.
-                            if recover {
+                            if recover || refreshing_catchup[index] {
                                 notifications[index].notify_waiters();
                             }
                             if let Some(timestamp) = timestamp {
-                                refresh_again |= timestamp <= PostgresProvider::now_millis();
+                                pending_catchup[index] |= timestamp <= PostgresProvider::now_millis();
                                 schedule(timestamp, &notifications[index], &mut timers[index], config);
                             }
                         }
-                        if refresh_again {
+                        if pending_catchup.iter().any(|pending| *pending) {
                             next_refresh = next_refresh.min(
                                 (refresh_started + MIN_RETRY_INTERVAL).max(Instant::now())
                             );
                         }
                     }
-                    Err(error) => warn!(
-                        target: "duroxide::providers::postgres::notifier",
-                        error = %error,
-                        "Long-poll timer refresh failed; fetch timeouts retain polling fallback"
-                    ),
+                    Err(error) => {
+                        for (pending, attempted) in pending_catchup.iter_mut().zip(refreshing_catchup) {
+                            *pending |= attempted;
+                        }
+                        warn!(
+                            target: "duroxide::providers::postgres::notifier",
+                            error = %error,
+                            "Long-poll timer refresh failed; fetch timeouts retain polling fallback"
+                        );
+                    }
                 }
-                refresh_again = false;
             }
             _ = sleep_until(next_refresh), if !refreshing => {
                 refresh_started = Instant::now();
+                refreshing_catchup = std::mem::take(&mut pending_catchup);
                 refresh.set(refresh_timers(pool, timer_query));
                 refreshing = true;
             }
@@ -306,12 +313,12 @@ async fn run_connected(
                 for (index, timer) in timers.iter_mut().enumerate() {
                     if timer.is_some_and(|deadline| deadline <= now) {
                         *timer = None;
+                        pending_catchup[index] = true;
                         notifications[index].notify_waiters();
                     }
                 }
                 // Only the earliest timer per queue is retained. Rescan after it
                 // fires to discover the next one without an unbounded timer heap.
-                refresh_again |= refreshing;
                 next_refresh = next_refresh.min(
                     (refresh_started + MIN_RETRY_INTERVAL).max(now)
                 );

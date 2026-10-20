@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Follow-up empty fetches and timer catch-up scans are coalesced at 100 ms
   intervals; the first notification wake remains immediate. The configuration
   type is non-exhaustive to permit compatible additions.
+- Acknowledgments notify other orchestration waiters after releasing a claim,
+  and per-queue catch-up scans wake work that became due between timer wakes.
 - Migration `0027` adds disabled notification triggers. An `ApplyAll` provider
   with long-polling enabled explicitly activates them for its schema;
   `VerifyOnly` requires prior activation and performs no DDL. Once activated,
