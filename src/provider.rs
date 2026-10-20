@@ -1080,7 +1080,40 @@ impl Provider for PostgresProvider {
                             format!("Failed to deserialize messages: {e}"),
                         )
                     })?;
-                let kv_snapshot = deserialize_kv_snapshot(kv_snapshot_json)?;
+                let (kv_snapshot, history_error) = match deserialize_kv_snapshot(kv_snapshot_json) {
+                    Ok(snapshot) => (snapshot, history_error),
+                    Err(e) => {
+                        // This binary cannot decode the snapshot, so no retry can
+                        // succeed: the error is unrecoverable for this item.
+                        //
+                        // Returning Err here would hide the item from the
+                        // dispatcher's poison check. The fetch has already charged
+                        // an attempt, the lock would sit until it expires, and the
+                        // next fetch would charge another one, with nobody reading
+                        // the count. The instance would retry forever and be
+                        // poisoned only after the schema is repaired.
+                        //
+                        // Report it through history_error instead, the path the
+                        // core prescribes for undecodable history. The dispatcher
+                        // abandons with backoff, keeps the attempt counted, and
+                        // fails the orchestration as poison after max_attempts
+                        // with this message. The runtime never replays an item
+                        // that carries history_error, so the empty snapshot below
+                        // cannot reach orchestration code.
+                        warn!(
+                            target = "duroxide::providers::postgres",
+                            instance = %instance_id,
+                            execution_id = execution_id,
+                            error = %e,
+                            "KV snapshot deserialization failed, returning item with history_error"
+                        );
+                        let error_msg = match history_error {
+                            Some(existing) => format!("{existing}; {}", e.message),
+                            None => e.message,
+                        };
+                        (std::collections::HashMap::new(), Some(error_msg))
+                    }
+                };
 
                 let duration_ms = start.elapsed().as_millis() as u64;
                 debug!(

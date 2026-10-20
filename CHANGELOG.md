@@ -14,10 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Applied migrations must be an ordered prefix of the bundled migrations, and
   schemas with missing, unexpected, or non-table Duroxide relations are rejected
   without deleting ledger rows or re-applying old SQL.
-- **Malformed KV snapshots now return a permanent provider error.** Legacy or
-  otherwise invalid `out_kv_snapshot` entries identify the affected key and no
-  longer become a successful empty snapshot that can cause nondeterministic
-  replay.
+- **Malformed KV snapshots are reported through `history_error` and poison the
+  instance after `max_attempts`.** Legacy or otherwise invalid
+  `out_kv_snapshot` entries no longer become a successful empty snapshot that
+  can cause nondeterministic replay. The fetched item carries an error that
+  names the affected key and field, the runtime counts each attempt, and the
+  orchestration fails as poison with that message instead of retrying forever.
 - **Malformed durable history can no longer enter orphan-message cleanup.**
   History decode failures remain attached to the fetched item for runtime
   poison/backoff handling and do not acknowledge its queue messages.

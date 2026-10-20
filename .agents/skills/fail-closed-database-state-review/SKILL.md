@@ -24,6 +24,13 @@ Return the original error with operation and state context. If the database
 result is structurally invalid, return a permanent provider error that
 identifies the invalid field or key.
 
+One exception: in `fetch_orchestration_item`, an undecodable durable payload
+(history or KV snapshot) is returned as `Ok(Some(item))` with `history_error`
+set, so the runtime counts the attempt and poisons the instance after
+`max_attempts`. Returning `Err` there hides the item from the poison check:
+the attempt count climbs on every lock expiry but is never read, so the
+instance retries forever.
+
 ## Review Procedure
 
 1. Search production Rust and SQL for success-shaped fallbacks:

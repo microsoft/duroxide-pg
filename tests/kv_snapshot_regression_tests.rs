@@ -1,11 +1,26 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+//! Regression tests for issue #39: a KV snapshot this binary cannot decode
+//! must never become a successful empty snapshot. It is reported through
+//! `history_error`, the same path the core prescribes for undecodable
+//! history, so the runtime counts each attempt and poisons the instance
+//! after `max_attempts` instead of retrying it forever.
+
 mod common;
 
-use duroxide::providers::{Provider, WorkItem};
+use duroxide::providers::{OrchestrationItem, Provider, WorkItem};
+use duroxide::runtime::registry::ActivityRegistry;
+use duroxide::runtime::{self, RuntimeOptions};
+use duroxide::{
+    Client, ErrorDetails, OrchestrationContext, OrchestrationRegistry, PoisonMessageType,
+};
 use duroxide_pg::PostgresProvider;
+use std::sync::Arc;
 use std::time::Duration;
+
+/// Small on purpose: the poison test waits for this many 1 s backoffs.
+const MAX_ATTEMPTS: u32 = 3;
 
 fn get_database_url() -> String {
     dotenvy::dotenv().ok();
@@ -54,44 +69,14 @@ async fn insert_kv_row(provider: &PostgresProvider, instance: &str, key: &str, v
     .expect("insert KV row");
 }
 
-#[tokio::test]
-async fn valid_kv_snapshot_is_preserved() {
-    let schema = next_schema_name();
-    let provider = PostgresProvider::new_with_schema(&get_database_url(), Some(&schema))
-        .await
-        .expect("create provider");
-    let instance = "valid-kv-snapshot";
-
-    insert_kv_row(&provider, instance, "counter", "325").await;
-    enqueue_start(&provider, instance).await;
-
-    let (item, _, _) = provider
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::ZERO, None)
-        .await
-        .expect("fetch should succeed")
-        .expect("queued orchestration item");
-    let entry = item
-        .kv_snapshot
-        .get("counter")
-        .expect("counter must remain in the snapshot");
-    assert_eq!(entry.value, "325");
-    assert_eq!(entry.last_updated_at_ms, 123);
-
-    common::cleanup_schema(&schema).await;
-}
-
-#[tokio::test]
-async fn legacy_kv_snapshot_shape_returns_a_permanent_error() {
-    let schema = next_schema_name();
-    let provider = PostgresProvider::new_with_schema(&get_database_url(), Some(&schema))
-        .await
-        .expect("create provider");
-    let instance = "legacy-kv-snapshot";
-
-    insert_kv_row(&provider, instance, "counter", "325").await;
-    enqueue_start(&provider, instance).await;
-
-    let signature = format!("{schema}.fetch_orchestration_item(bigint,bigint,bigint,bigint)");
+/// Replace the fetch function with one that returns the migration-18 KV
+/// snapshot shape (`{key: value}`). This is the state issue #39 left behind.
+/// Returns the current definition so the caller can restore it.
+async fn install_legacy_fetch_function(provider: &PostgresProvider) -> String {
+    let signature = format!(
+        "{}.fetch_orchestration_item(bigint,bigint,bigint,bigint)",
+        provider.schema_name()
+    );
     let current_definition: String =
         sqlx::query_scalar("SELECT pg_get_functiondef(to_regprocedure($1)::oid)")
             .bind(&signature)
@@ -110,28 +95,248 @@ async fn legacy_kv_snapshot_shape_returns_a_permanent_error() {
         .execute(provider.pool())
         .await
         .expect("install legacy fetch function");
+    current_definition
+}
 
-    let result = provider
+async fn fetch_item(provider: &PostgresProvider) -> (OrchestrationItem, String, u32) {
+    provider
         .fetch_orchestration_item(Duration::from_secs(30), Duration::ZERO, None)
-        .await;
-    let err = match result {
-        Ok(Some((item, _, _))) => panic!(
-            "legacy snapshot must not become successful empty state: {:?}",
-            item.kv_snapshot
-        ),
-        Ok(None) => panic!("queued item unexpectedly disappeared"),
-        Err(e) => e,
-    };
+        .await
+        .expect("fetch must not fail: an undecodable snapshot is reported on the item")
+        .expect("queued orchestration item")
+}
+
+async fn queue_count(provider: &PostgresProvider, instance: &str) -> i64 {
+    sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {}.orchestrator_queue WHERE instance_id = $1",
+        provider.schema_name()
+    ))
+    .bind(instance)
+    .fetch_one(provider.pool())
+    .await
+    .expect("count queue rows")
+}
+
+fn assert_kv_error(error: &str) {
     assert!(
-        !err.is_retryable(),
-        "schema/data shape errors must be permanent: {err:?}"
+        error.contains("KV snapshot") && error.contains("counter") && error.contains("value"),
+        "error must identify the malformed snapshot entry: {error}"
     );
-    assert_eq!(err.operation, "fetch_orchestration_item");
+}
+
+#[tokio::test]
+async fn valid_kv_snapshot_is_preserved() {
+    let schema = next_schema_name();
+    let provider = PostgresProvider::new_with_schema(&get_database_url(), Some(&schema))
+        .await
+        .expect("create provider");
+    let instance = "valid-kv-snapshot";
+
+    insert_kv_row(&provider, instance, "counter", "325").await;
+    enqueue_start(&provider, instance).await;
+
+    let (item, _, _) = fetch_item(&provider).await;
+    assert!(item.history_error.is_none());
+    let entry = item
+        .kv_snapshot
+        .get("counter")
+        .expect("counter must remain in the snapshot");
+    assert_eq!(entry.value, "325");
+    assert_eq!(entry.last_updated_at_ms, 123);
+
+    common::cleanup_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn legacy_kv_snapshot_shape_is_reported_as_history_error() {
+    let schema = next_schema_name();
+    let provider = PostgresProvider::new_with_schema(&get_database_url(), Some(&schema))
+        .await
+        .expect("create provider");
+    let instance = "legacy-kv-snapshot";
+
+    insert_kv_row(&provider, instance, "counter", "325").await;
+    enqueue_start(&provider, instance).await;
+    install_legacy_fetch_function(&provider).await;
+
+    let (item, _, attempt_count) = fetch_item(&provider).await;
+    let error = item
+        .history_error
+        .as_deref()
+        .expect("legacy snapshot must not become successful empty state");
+    assert_kv_error(error);
     assert!(
-        err.message.contains("KV snapshot")
-            && err.message.contains("counter")
-            && err.message.contains("value"),
-        "error must identify the malformed snapshot entry: {err:?}"
+        item.kv_snapshot.is_empty(),
+        "no partial snapshot may be handed out: {:?}",
+        item.kv_snapshot
+    );
+    assert_eq!(attempt_count, 1, "the fetch counts as the first attempt");
+    assert_eq!(
+        queue_count(&provider, instance).await,
+        1,
+        "nothing may be acknowledged: the runtime needs the item to count and poison"
+    );
+
+    common::cleanup_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn kv_snapshot_error_keeps_each_attempt_counted() {
+    let schema = next_schema_name();
+    let provider = PostgresProvider::new_with_schema(&get_database_url(), Some(&schema))
+        .await
+        .expect("create provider");
+    let instance = "kv-snapshot-attempts";
+
+    insert_kv_row(&provider, instance, "counter", "325").await;
+    enqueue_start(&provider, instance).await;
+    let current_definition = install_legacy_fetch_function(&provider).await;
+
+    // An undecodable snapshot is unrecoverable for this binary, so every
+    // fetch must count toward max_attempts. Each round does what the
+    // dispatcher does with a history_error item, minus the backoff.
+    for round in 1..=3u32 {
+        let (item, lock_token, attempt_count) = fetch_item(&provider).await;
+        assert_kv_error(
+            item.history_error
+                .as_deref()
+                .unwrap_or_else(|| panic!("round {round}: error must be reported")),
+        );
+        assert_eq!(
+            attempt_count, round,
+            "round {round}: the attempt must stay counted"
+        );
+        provider
+            .abandon_orchestration_item(&lock_token, None, false)
+            .await
+            .expect("abandon like the dispatcher does");
+    }
+
+    // Repair the schema. The attempts spent on the broken snapshot stay
+    // counted, and the real snapshot comes back intact.
+    sqlx::query(&current_definition)
+        .execute(provider.pool())
+        .await
+        .expect("restore fetch function");
+    let (item, _, attempt_count) = fetch_item(&provider).await;
+    assert!(item.history_error.is_none(), "{:?}", item.history_error);
+    assert_eq!(attempt_count, 4);
+    assert_eq!(item.kv_snapshot["counter"].value, "325");
+
+    common::cleanup_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn kv_snapshot_error_poisons_the_orchestration_after_max_attempts() {
+    let schema = next_schema_name();
+    let provider = Arc::new(
+        PostgresProvider::new_with_schema(&get_database_url(), Some(&schema))
+            .await
+            .expect("create provider"),
+    );
+    let instance = "kv-snapshot-poison";
+
+    // The state issue #39 left behind: a KV row this instance wrote earlier,
+    // and a fetch function rolled back to the migration-18 snapshot shape.
+    insert_kv_row(&provider, instance, "counter", "325").await;
+    install_legacy_fetch_function(&provider).await;
+
+    let orchestration_registry = OrchestrationRegistry::builder()
+        .register(
+            "KvSnapshotPoison",
+            |_ctx: OrchestrationContext, _input: String| async move {
+                Ok("must never run on a broken snapshot".to_string())
+            },
+        )
+        .build();
+    let store: Arc<dyn Provider> = provider.clone();
+    let rt = runtime::Runtime::start_with_options(
+        store.clone(),
+        ActivityRegistry::builder().build(),
+        orchestration_registry,
+        RuntimeOptions {
+            max_attempts: MAX_ATTEMPTS,
+            dispatcher_min_poll_interval: Duration::from_millis(10),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let client = Client::new(store.clone());
+    client
+        .start_orchestration(instance, "KvSnapshotPoison", "")
+        .await
+        .expect("start orchestration");
+
+    let status = client
+        .wait_for_orchestration(instance, Duration::from_secs(60))
+        .await
+        .expect("orchestration must reach a terminal status");
+    match status {
+        runtime::OrchestrationStatus::Failed {
+            details:
+                ErrorDetails::Poison {
+                    attempt_count,
+                    max_attempts,
+                    message_type: PoisonMessageType::FailedDeserialization { error, .. },
+                    message,
+                },
+            ..
+        } => {
+            assert_eq!(max_attempts, MAX_ATTEMPTS);
+            assert!(
+                attempt_count > MAX_ATTEMPTS,
+                "poison must wait for max_attempts, got attempt_count {attempt_count}"
+            );
+            assert_kv_error(&error);
+            assert_kv_error(&message);
+        }
+        other => panic!("expected a FailedDeserialization poison failure, got: {other:?}"),
+    }
+    assert_eq!(
+        queue_count(&provider, instance).await,
+        0,
+        "the poison ack must remove the queued work"
+    );
+
+    rt.shutdown(None).await;
+    common::cleanup_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn malformed_kv_snapshot_is_not_acknowledged_as_an_orphan_message() {
+    let schema = next_schema_name();
+    let provider = PostgresProvider::new_with_schema(&get_database_url(), Some(&schema))
+        .await
+        .expect("create provider");
+    let instance = "malformed-kv-orphan";
+
+    // No instance, no history, only a QueueMessage: the orphan-message shape.
+    // With an undecodable snapshot the provider must not treat it as orphan.
+    insert_kv_row(&provider, instance, "counter", "325").await;
+    install_legacy_fetch_function(&provider).await;
+    provider
+        .enqueue_for_orchestrator(
+            WorkItem::QueueMessage {
+                instance: instance.to_string(),
+                name: "Signal".to_string(),
+                data: "payload".to_string(),
+            },
+            None,
+        )
+        .await
+        .expect("enqueue orphan-shaped message");
+
+    let (item, _, _) = fetch_item(&provider).await;
+    assert_kv_error(
+        item.history_error
+            .as_deref()
+            .expect("malformed KV snapshot must be reported"),
+    );
+    assert_eq!(
+        queue_count(&provider, instance).await,
+        1,
+        "KV decode failure must not acknowledge the queue item"
     );
 
     common::cleanup_schema(&schema).await;
@@ -171,26 +376,15 @@ async fn malformed_history_is_not_acknowledged_as_an_orphan_message() {
         .await
         .expect("enqueue orphan-shaped message");
 
-    let (item, _, _) = provider
-        .fetch_orchestration_item(Duration::from_secs(30), Duration::ZERO, None)
-        .await
-        .expect("fetch should preserve the error-bearing item")
-        .expect("queued orchestration item");
+    let (item, _, _) = fetch_item(&provider).await;
     assert!(
         item.history_error.is_some(),
         "malformed durable history must be reported"
     );
     assert!(item.history.is_empty());
-
-    let queue_count: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM {schema}.orchestrator_queue WHERE instance_id = $1"
-    ))
-    .bind(instance)
-    .fetch_one(provider.pool())
-    .await
-    .expect("count queue rows after fetch");
     assert_eq!(
-        queue_count, 1,
+        queue_count(&provider, instance).await,
+        1,
         "history decode failure must not acknowledge the queue item"
     );
 
