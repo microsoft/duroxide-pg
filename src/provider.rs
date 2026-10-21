@@ -99,6 +99,64 @@ pub(crate) fn classify_pg_sqlstate(code: Option<&str>, is_entra: bool) -> SqlSta
     }
 }
 
+fn deserialize_kv_snapshot(
+    snapshot: serde_json::Value,
+) -> Result<std::collections::HashMap<String, duroxide::providers::KvEntry>, ProviderError> {
+    let entries = snapshot.as_object().ok_or_else(|| {
+        ProviderError::permanent(
+            "fetch_orchestration_item",
+            "Failed to deserialize KV snapshot: expected a JSON object",
+        )
+    })?;
+
+    let mut parsed = std::collections::HashMap::with_capacity(entries.len());
+    for (key, entry) in entries {
+        let fields = entry.as_object().ok_or_else(|| {
+            ProviderError::permanent(
+                "fetch_orchestration_item",
+                format!(
+                    "Failed to deserialize KV snapshot entry {key:?}: expected an object \
+                     containing string field \"value\" and unsigned integer field \
+                     \"last_updated_at_ms\""
+                ),
+            )
+        })?;
+        let value = fields
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                ProviderError::permanent(
+                    "fetch_orchestration_item",
+                    format!(
+                        "Failed to deserialize KV snapshot entry {key:?}: field \
+                         \"value\" is missing or is not a string"
+                    ),
+                )
+            })?;
+        let last_updated_at_ms = fields
+            .get("last_updated_at_ms")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                ProviderError::permanent(
+                    "fetch_orchestration_item",
+                    format!(
+                        "Failed to deserialize KV snapshot entry {key:?}: field \
+                         \"last_updated_at_ms\" is missing or is not an unsigned integer"
+                    ),
+                )
+            })?;
+        parsed.insert(
+            key.clone(),
+            duroxide::providers::KvEntry {
+                value: value.to_string(),
+                last_updated_at_ms,
+            },
+        );
+    }
+
+    Ok(parsed)
+}
+
 pub struct PostgresProvider {
     pool: Arc<PgPool>,
     schema_name: String,
@@ -1022,23 +1080,39 @@ impl Provider for PostgresProvider {
                             format!("Failed to deserialize messages: {e}"),
                         )
                     })?;
-                let kv_snapshot: std::collections::HashMap<String, duroxide::providers::KvEntry> = {
-                    let raw: std::collections::HashMap<String, serde_json::Value> =
-                        serde_json::from_value(kv_snapshot_json).unwrap_or_default();
-                    raw.into_iter()
-                        .filter_map(|(k, v)| {
-                            let value = v.get("value")?.as_str()?.to_string();
-                            let last_updated_at_ms =
-                                v.get("last_updated_at_ms")?.as_u64().unwrap_or(0);
-                            Some((
-                                k,
-                                duroxide::providers::KvEntry {
-                                    value,
-                                    last_updated_at_ms,
-                                },
-                            ))
-                        })
-                        .collect()
+                let (kv_snapshot, history_error) = match deserialize_kv_snapshot(kv_snapshot_json) {
+                    Ok(snapshot) => (snapshot, history_error),
+                    Err(e) => {
+                        // This binary cannot decode the snapshot, so no retry can
+                        // succeed: the error is unrecoverable for this item.
+                        //
+                        // Returning Err here would hide the item from the
+                        // dispatcher's poison check. The fetch has already charged
+                        // an attempt, the lock would sit until it expires, and the
+                        // next fetch would charge another one, with nobody reading
+                        // the count. The instance would retry forever and be
+                        // poisoned only after the schema is repaired.
+                        //
+                        // Report it through history_error instead, the path the
+                        // core prescribes for undecodable history. The dispatcher
+                        // abandons with backoff, keeps the attempt counted, and
+                        // fails the orchestration as poison after max_attempts
+                        // with this message. The runtime never replays an item
+                        // that carries history_error, so the empty snapshot below
+                        // cannot reach orchestration code.
+                        warn!(
+                            target = "duroxide::providers::postgres",
+                            instance = %instance_id,
+                            execution_id = execution_id,
+                            error = %e,
+                            "KV snapshot deserialization failed, returning item with history_error"
+                        );
+                        let error_msg = match history_error {
+                            Some(existing) => format!("{existing}; {}", e.message),
+                            None => e.message,
+                        };
+                        (std::collections::HashMap::new(), Some(error_msg))
+                    }
                 };
 
                 let duration_ms = start.elapsed().as_millis() as u64;
@@ -1060,7 +1134,8 @@ impl Provider for PostgresProvider {
                 // events enqueued before the orchestration started. Drop them by acking
                 // with empty deltas. Other work items (CancelInstance, etc.) may
                 // legitimately race with StartOrchestration and must not be dropped.
-                if orchestration_name == "Unknown"
+                if history_error.is_none()
+                    && orchestration_name == "Unknown"
                     && history.is_empty()
                     && messages
                         .iter()
@@ -2774,6 +2849,110 @@ impl ProviderAdmin for PostgresProvider {
 mod tests {
     use super::*;
     use crate::entra::test_support::{token, RecordingFakeTokenSource};
+
+    #[test]
+    fn deserialize_kv_snapshot_accepts_the_current_shape() {
+        let snapshot = serde_json::json!({
+            "counter": {
+                "value": "325",
+                "last_updated_at_ms": 123
+            }
+        });
+
+        let parsed = deserialize_kv_snapshot(snapshot).expect("valid snapshot");
+        let counter = parsed.get("counter").expect("counter entry");
+        assert_eq!(counter.value, "325");
+        assert_eq!(counter.last_updated_at_ms, 123);
+    }
+
+    #[test]
+    fn deserialize_kv_snapshot_accepts_empty_and_forward_compatible_entries() {
+        let empty = deserialize_kv_snapshot(serde_json::json!({})).expect("empty snapshot");
+        assert!(empty.is_empty());
+
+        let snapshot = serde_json::json!({
+            "counter": {
+                "value": "325",
+                "last_updated_at_ms": 123,
+                "future_metadata": {"source": "newer-provider"}
+            }
+        });
+        let parsed = deserialize_kv_snapshot(snapshot).expect("entry with extra metadata");
+        assert_eq!(parsed["counter"].value, "325");
+        assert_eq!(parsed["counter"].last_updated_at_ms, 123);
+    }
+
+    #[test]
+    fn deserialize_kv_snapshot_rejects_every_malformed_entry_shape() {
+        let cases = [
+            (
+                "legacy scalar",
+                serde_json::json!({"counter": "325"}),
+                "counter",
+            ),
+            (
+                "missing value",
+                serde_json::json!({"counter": {"last_updated_at_ms": 123}}),
+                "value",
+            ),
+            (
+                "missing timestamp",
+                serde_json::json!({"counter": {"value": "325"}}),
+                "last_updated_at_ms",
+            ),
+            (
+                "negative timestamp",
+                serde_json::json!({
+                    "counter": {"value": "325", "last_updated_at_ms": -1}
+                }),
+                "last_updated_at_ms",
+            ),
+            (
+                "non-string value",
+                serde_json::json!({
+                    "counter": {"value": 325, "last_updated_at_ms": 123}
+                }),
+                "value",
+            ),
+        ];
+
+        for (name, snapshot, expected) in cases {
+            let error = deserialize_kv_snapshot(snapshot).expect_err(name);
+            assert!(!error.is_retryable(), "{name}: {error:?}");
+            assert!(
+                error.message.contains("KV snapshot")
+                    && error.message.contains("counter")
+                    && error.message.contains(expected),
+                "{name}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deserialize_kv_snapshot_rejects_a_non_object_root() {
+        let error =
+            deserialize_kv_snapshot(serde_json::json!([])).expect_err("array root must fail");
+        assert!(!error.is_retryable());
+        assert!(error.message.contains("expected a JSON object"));
+    }
+
+    #[test]
+    fn deserialize_kv_snapshot_rejects_the_whole_snapshot_if_one_entry_is_bad() {
+        let snapshot = serde_json::json!({
+            "valid": {
+                "value": "preserve-me",
+                "last_updated_at_ms": 123
+            },
+            "invalid": {
+                "value": "missing timestamp"
+            }
+        });
+
+        let error = deserialize_kv_snapshot(snapshot).expect_err("one invalid entry must fail all");
+        assert!(!error.is_retryable());
+        assert!(error.message.contains("invalid"));
+        assert!(error.message.contains("last_updated_at_ms"));
+    }
 
     #[test]
     fn build_entra_connect_options_uses_verify_full() {

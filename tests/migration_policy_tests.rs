@@ -419,6 +419,484 @@ async fn verify_only_errors_when_core_tables_are_missing() {
 }
 
 #[tokio::test]
+async fn apply_all_refuses_to_reapply_when_core_tables_are_missing() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("bootstrap apply");
+
+    let before_versions: Vec<i64> = sqlx::query_scalar(&format!(
+        "SELECT version FROM {schema}._duroxide_migrations ORDER BY version"
+    ))
+    .fetch_all(bootstrap.pool())
+    .await
+    .expect("read migration ledger before corruption");
+    let signature = format!("{schema}.fetch_orchestration_item(bigint,bigint,bigint,bigint)");
+    let before_function: String =
+        sqlx::query_scalar("SELECT pg_get_functiondef(to_regprocedure($1)::oid)")
+            .bind(&signature)
+            .fetch_one(bootstrap.pool())
+            .await
+            .expect("read fetch function before corruption");
+
+    sqlx::query(&format!("DROP TABLE {schema}.instances CASCADE"))
+        .execute(bootstrap.pool())
+        .await
+        .expect("drop instances table");
+    drop(bootstrap);
+
+    let result = PostgresProvider::new_with_schema(&database_url, Some(&schema)).await;
+    let msg = match result {
+        Ok(_) => panic!("ApplyAll must not re-apply recorded migrations"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        msg.contains("instances")
+            && msg.contains("missing")
+            && msg.contains("refusing to apply migrations"),
+        "expected a fail-closed corruption error, got: {msg}"
+    );
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect for post-failure verification");
+    let after_versions: Vec<i64> = sqlx::query_scalar(&format!(
+        "SELECT version FROM {schema}._duroxide_migrations ORDER BY version"
+    ))
+    .fetch_all(&pool)
+    .await
+    .expect("read migration ledger after rejection");
+    let after_function: String =
+        sqlx::query_scalar("SELECT pg_get_functiondef(to_regprocedure($1)::oid)")
+            .bind(&signature)
+            .fetch_one(&pool)
+            .await
+            .expect("read fetch function after rejection");
+
+    assert_eq!(
+        after_versions, before_versions,
+        "ApplyAll must not delete or rewrite migration ledger rows"
+    );
+    assert_eq!(
+        after_function, before_function,
+        "ApplyAll must not roll stored procedures back to older definitions"
+    );
+
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn apply_all_rejects_a_hole_in_migration_history_before_ddl() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("bootstrap apply");
+
+    sqlx::query(&format!(
+        "DELETE FROM {schema}._duroxide_migrations WHERE version = 19"
+    ))
+    .execute(bootstrap.pool())
+    .await
+    .expect("remove migration 19 from the ledger");
+    drop(bootstrap);
+
+    let result = PostgresProvider::new_with_schema(&database_url, Some(&schema)).await;
+    let msg = match result {
+        Ok(_) => panic!("ApplyAll must reject a non-prefix migration history"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        msg.contains("migration history is inconsistent")
+            && msg.contains("19")
+            && msg.contains("refusing to apply migrations"),
+        "expected a no-DDL migration-history error, got: {msg}"
+    );
+    assert!(
+        !msg.contains("Failed to execute statement"),
+        "the runner attempted migration DDL before rejecting the ledger: {msg}"
+    );
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect for post-failure verification");
+    let version_19_count: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {schema}._duroxide_migrations WHERE version = 19"
+    ))
+    .fetch_one(&pool)
+    .await
+    .expect("check migration 19 after rejection");
+    assert_eq!(
+        version_19_count, 0,
+        "the runner must not repair migration history implicitly"
+    );
+
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn apply_all_rejects_missing_tracking_table_without_creating_a_new_ledger() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("bootstrap apply");
+    sqlx::query(&format!("DROP TABLE {schema}._duroxide_migrations"))
+        .execute(bootstrap.pool())
+        .await
+        .expect("drop migration tracking table");
+    drop(bootstrap);
+
+    let result = PostgresProvider::new_with_schema(&database_url, Some(&schema)).await;
+    let msg = match result {
+        Ok(_) => panic!("ApplyAll must reject live tables without a migration ledger"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        msg.contains("instances")
+            && msg.contains("tracking table is missing")
+            && msg.contains("refusing"),
+        "expected missing-ledger corruption error, got: {msg}"
+    );
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect for post-failure verification");
+    let tracking_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
+         WHERE table_schema = $1 AND table_name = '_duroxide_migrations')",
+    )
+    .bind(&schema)
+    .fetch_one(&pool)
+    .await
+    .expect("check tracking table after rejection");
+    assert!(
+        !tracking_exists,
+        "the runner must not create a replacement ledger beside live tables"
+    );
+
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn apply_all_rejects_an_empty_ledger_beside_live_tables() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("bootstrap apply");
+    let signature = format!("{schema}.fetch_orchestration_item(bigint,bigint,bigint,bigint)");
+    let before_function: String =
+        sqlx::query_scalar("SELECT pg_get_functiondef(to_regprocedure($1)::oid)")
+            .bind(&signature)
+            .fetch_one(bootstrap.pool())
+            .await
+            .expect("read fetch function before corruption");
+
+    sqlx::query(&format!("TRUNCATE TABLE {schema}._duroxide_migrations"))
+        .execute(bootstrap.pool())
+        .await
+        .expect("empty migration ledger");
+    drop(bootstrap);
+
+    let result = PostgresProvider::new_with_schema(&database_url, Some(&schema)).await;
+    let msg = match result {
+        Ok(_) => panic!("ApplyAll must reject an empty ledger beside live tables"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        msg.contains("not represented by its migration ledger") && msg.contains("refusing"),
+        "expected empty-ledger corruption error, got: {msg}"
+    );
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect for post-failure verification");
+    let ledger_count: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {schema}._duroxide_migrations"
+    ))
+    .fetch_one(&pool)
+    .await
+    .expect("count ledger rows after rejection");
+    let after_function: String =
+        sqlx::query_scalar("SELECT pg_get_functiondef(to_regprocedure($1)::oid)")
+            .bind(&signature)
+            .fetch_one(&pool)
+            .await
+            .expect("read fetch function after rejection");
+
+    assert_eq!(ledger_count, 0, "the empty ledger must remain untouched");
+    assert_eq!(
+        after_function, before_function,
+        "stored procedures must not be rolled back"
+    );
+
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn apply_all_rejects_residual_tables_when_ledger_and_instances_are_missing() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("bootstrap apply");
+    sqlx::query(&format!(
+        "DROP TABLE {schema}._duroxide_migrations, {schema}.instances CASCADE"
+    ))
+    .execute(bootstrap.pool())
+    .await
+    .expect("drop ledger and instances while leaving other provider tables");
+    drop(bootstrap);
+
+    let result = PostgresProvider::new_with_schema(&database_url, Some(&schema)).await;
+    let msg = match result {
+        Ok(_) => panic!("ApplyAll must reject residual provider tables"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        msg.contains("executions")
+            && msg.contains("tracking table is missing")
+            && msg.contains("refusing"),
+        "expected residual-table corruption error, got: {msg}"
+    );
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect for post-failure verification");
+    let tracking_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
+         WHERE table_schema = $1 AND table_name = '_duroxide_migrations')",
+    )
+    .bind(&schema)
+    .fetch_one(&pool)
+    .await
+    .expect("check tracking table after rejection");
+    assert!(!tracking_exists);
+
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn apply_all_rejects_each_missing_required_table() {
+    let database_url = get_database_url();
+    let required_tables = [
+        "instances",
+        "executions",
+        "history",
+        "orchestrator_queue",
+        "worker_queue",
+        "instance_locks",
+        "sessions",
+        "kv_store",
+        "kv_delta",
+    ];
+
+    for table in required_tables {
+        let schema = get_test_schema();
+        let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+            .await
+            .expect("bootstrap apply");
+        let before_versions: Vec<i64> = sqlx::query_scalar(&format!(
+            "SELECT version FROM {schema}._duroxide_migrations ORDER BY version"
+        ))
+        .fetch_all(bootstrap.pool())
+        .await
+        .expect("read migration ledger before corruption");
+        sqlx::query(&format!("DROP TABLE {schema}.{table} CASCADE"))
+            .execute(bootstrap.pool())
+            .await
+            .unwrap_or_else(|e| panic!("drop {table}: {e}"));
+        drop(bootstrap);
+
+        let result = PostgresProvider::new_with_schema(&database_url, Some(&schema)).await;
+        let msg = match result {
+            Ok(_) => panic!("ApplyAll must reject missing table {table}"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            msg.contains(table) && msg.contains("missing") && msg.contains("refusing"),
+            "{table}: expected required-table corruption error, got: {msg}"
+        );
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("connect for post-failure verification");
+        let after_versions: Vec<i64> = sqlx::query_scalar(&format!(
+            "SELECT version FROM {schema}._duroxide_migrations ORDER BY version"
+        ))
+        .fetch_all(&pool)
+        .await
+        .expect("read migration ledger after rejection");
+        assert_eq!(
+            after_versions, before_versions,
+            "{table}: migration ledger changed after rejection"
+        );
+
+        drop_schema(&schema).await;
+    }
+}
+
+#[tokio::test]
+async fn migration_policies_reject_a_view_substituted_for_a_required_table() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("bootstrap apply");
+    sqlx::query(&format!("DROP TABLE {schema}.history"))
+        .execute(bootstrap.pool())
+        .await
+        .expect("drop history table");
+    sqlx::query(&format!(
+        "CREATE VIEW {schema}.history AS SELECT 1::BIGINT AS event_id"
+    ))
+    .execute(bootstrap.pool())
+    .await
+    .expect("substitute history view");
+    drop(bootstrap);
+
+    let apply_result = PostgresProvider::new_with_schema(&database_url, Some(&schema)).await;
+    let apply_msg = match apply_result {
+        Ok(_) => panic!("ApplyAll must reject a view substituted for history"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        apply_msg.contains("history")
+            && apply_msg.contains("\"v\"")
+            && apply_msg.contains("non-table"),
+        "expected relation-kind error from ApplyAll, got: {apply_msg}"
+    );
+
+    let mut config = ProviderConfig::url(&database_url);
+    config.schema_name = Some(schema.clone());
+    config.migration_policy = MigrationPolicy::VerifyOnly;
+    let verify_result = PostgresProvider::new_with_config(config).await;
+    let verify_msg = match verify_result {
+        Ok(_) => panic!("VerifyOnly must reject a view substituted for history"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        verify_msg.contains("history")
+            && verify_msg.contains("\"v\"")
+            && verify_msg.contains("non-table"),
+        "expected relation-kind error from VerifyOnly, got: {verify_msg}"
+    );
+
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn migration_policies_reject_a_view_substituted_for_the_ledger() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("bootstrap apply");
+    sqlx::query(&format!("DROP TABLE {schema}._duroxide_migrations"))
+        .execute(bootstrap.pool())
+        .await
+        .expect("drop migration ledger");
+    sqlx::query(&format!(
+        "CREATE VIEW {schema}._duroxide_migrations AS \
+         SELECT 1::BIGINT AS version, 'substitute'::TEXT AS name, \
+         CURRENT_TIMESTAMP AS applied_at"
+    ))
+    .execute(bootstrap.pool())
+    .await
+    .expect("substitute migration ledger view");
+    drop(bootstrap);
+
+    let apply_result = PostgresProvider::new_with_schema(&database_url, Some(&schema)).await;
+    let apply_msg = match apply_result {
+        Ok(_) => panic!("ApplyAll must reject a view substituted for the ledger"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        apply_msg.contains("tracking object")
+            && apply_msg.contains("\"v\"")
+            && apply_msg.contains("not a base table"),
+        "expected tracking relation-kind error from ApplyAll, got: {apply_msg}"
+    );
+
+    let mut config = ProviderConfig::url(&database_url);
+    config.schema_name = Some(schema.clone());
+    config.migration_policy = MigrationPolicy::VerifyOnly;
+    let verify_result = PostgresProvider::new_with_config(config).await;
+    let verify_msg = match verify_result {
+        Ok(_) => panic!("VerifyOnly must reject a view substituted for the ledger"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        verify_msg.contains("tracking object")
+            && verify_msg.contains("\"v\"")
+            && verify_msg.contains("not a base table"),
+        "expected tracking relation-kind error from VerifyOnly, got: {verify_msg}"
+    );
+
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
+async fn apply_all_still_applies_a_missing_suffix_migration() {
+    let database_url = get_database_url();
+    let schema = get_test_schema();
+
+    let bootstrap = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("bootstrap apply");
+    let latest_version: i64 = sqlx::query_scalar(&format!(
+        "SELECT MAX(version) FROM {schema}._duroxide_migrations"
+    ))
+    .fetch_one(bootstrap.pool())
+    .await
+    .expect("read latest migration version");
+    sqlx::query(&format!(
+        "DELETE FROM {schema}._duroxide_migrations WHERE version = $1"
+    ))
+    .bind(latest_version)
+    .execute(bootstrap.pool())
+    .await
+    .expect("remove latest migration row");
+    drop(bootstrap);
+
+    let provider = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("ApplyAll should apply a missing suffix migration");
+    let restored_count: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {schema}._duroxide_migrations WHERE version = $1"
+    ))
+    .bind(latest_version)
+    .fetch_one(provider.pool())
+    .await
+    .expect("check restored suffix migration");
+    assert_eq!(restored_count, 1);
+
+    drop(provider);
+    drop_schema(&schema).await;
+}
+
+#[tokio::test]
 async fn concurrent_apply_all_is_serialized() {
     let database_url = get_database_url();
     let schema = get_test_schema();

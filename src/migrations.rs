@@ -5,9 +5,30 @@ use anyhow::Result;
 use include_dir::{include_dir, Dir};
 use sqlx::Connection;
 use sqlx::PgPool;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 static MIGRATIONS: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations");
+
+const BASE_TABLES: &[&str] = &[
+    "instances",
+    "executions",
+    "history",
+    "orchestrator_queue",
+    "worker_queue",
+    "instance_locks",
+];
+const ALL_CORE_TABLES: &[&str] = &[
+    "instances",
+    "executions",
+    "history",
+    "orchestrator_queue",
+    "worker_queue",
+    "instance_locks",
+    "sessions",
+    "kv_store",
+    "kv_delta",
+];
 
 /// Migration metadata
 #[derive(Debug)]
@@ -102,13 +123,7 @@ impl MigrationRunner {
         let conn = &mut *conn;
 
         // Check that the tracking table exists in the target schema.
-        let table_exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
-             WHERE table_schema = $1 AND table_name = '_duroxide_migrations')",
-        )
-        .bind(&self.schema_name)
-        .fetch_one(&mut *conn)
-        .await?;
+        let table_exists = self.check_migration_table_exists(conn).await?;
 
         if !table_exists {
             anyhow::bail!(
@@ -125,8 +140,11 @@ impl MigrationRunner {
         self.check_no_unknown_migrations(conn).await?;
 
         let migrations = self.load_migrations()?;
-        let applied: std::collections::HashSet<i64> =
-            self.get_applied_versions(conn).await?.into_iter().collect();
+        let applied = self.get_applied_versions(conn).await?;
+        self.validate_applied_prefix(&migrations, &applied)?;
+        let existing_tables = self.get_existing_core_relations(conn).await?;
+        self.validate_core_table_state(&applied, &existing_tables)?;
+        let applied: std::collections::HashSet<i64> = applied.into_iter().collect();
 
         let mut missing: Vec<i64> = migrations
             .iter()
@@ -146,17 +164,6 @@ impl MigrationRunner {
             );
         }
 
-        if !self.check_tables_exist(conn).await.unwrap_or(false) {
-            anyhow::bail!(
-                "duroxide migrations recorded as complete in schema {:?}, but \
-                 core tables are missing. The schema may be corrupted; run \
-                 migrations from a provider configured with \
-                 MigrationPolicy::ApplyAll before constructing VerifyOnly \
-                 providers.",
-                self.schema_name,
-            );
-        }
-
         Ok(())
     }
 
@@ -173,15 +180,7 @@ impl MigrationRunner {
         &self,
         conn: &mut sqlx::postgres::PgConnection,
     ) -> Result<()> {
-        let tracking_exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
-             WHERE table_schema = $1 AND table_name = '_duroxide_migrations')",
-        )
-        .bind(&self.schema_name)
-        .fetch_one(&mut *conn)
-        .await?;
-
-        if !tracking_exists {
+        if !self.check_migration_table_exists(conn).await? {
             return Ok(());
         }
 
@@ -211,9 +210,151 @@ impl MigrationRunner {
         Ok(())
     }
 
+    async fn check_migration_table_exists(
+        &self,
+        conn: &mut sqlx::postgres::PgConnection,
+    ) -> Result<bool> {
+        let relation_kind: Option<String> = sqlx::query_scalar(
+            "SELECT c.relkind::text \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = '_duroxide_migrations'",
+        )
+        .bind(&self.schema_name)
+        .fetch_optional(&mut *conn)
+        .await?;
+
+        match relation_kind.as_deref() {
+            None => Ok(false),
+            Some("r" | "p") => Ok(true),
+            Some(kind) => anyhow::bail!(
+                "duroxide migration tracking object in schema {:?} has PostgreSQL \
+                 relation kind {:?}, not a base table; refusing to read or replace it",
+                self.schema_name,
+                kind,
+            ),
+        }
+    }
+
+    fn validate_applied_prefix(
+        &self,
+        migrations: &[Migration],
+        applied_versions: &[i64],
+    ) -> Result<()> {
+        for (index, (migration, applied)) in
+            migrations.iter().zip(applied_versions.iter()).enumerate()
+        {
+            if migration.version != *applied {
+                anyhow::bail!(
+                    "duroxide migration history is inconsistent in schema {:?}: \
+                     expected version {} at ledger position {}, but found version {}. \
+                     Applied migrations must be an ordered prefix of the bundled \
+                     migrations; refusing to apply migrations or modify the ledger.",
+                    self.schema_name,
+                    migration.version,
+                    index + 1,
+                    applied,
+                );
+            }
+        }
+
+        if applied_versions.len() > migrations.len() {
+            anyhow::bail!(
+                "duroxide migration history is inconsistent in schema {:?}: \
+                 the ledger contains {} entries, but this binary bundles only {}. \
+                 Refusing to apply migrations or modify the ledger.",
+                self.schema_name,
+                applied_versions.len(),
+                migrations.len(),
+            );
+        }
+
+        Ok(())
+    }
+
+    fn expected_core_tables(applied_versions: &[i64]) -> HashSet<String> {
+        let Some(latest) = applied_versions.last().copied() else {
+            return HashSet::new();
+        };
+
+        let mut expected: HashSet<String> =
+            BASE_TABLES.iter().map(|name| (*name).to_string()).collect();
+        if latest >= 14 {
+            expected.insert("sessions".to_string());
+        }
+        if latest >= 18 {
+            expected.insert("kv_store".to_string());
+        }
+        if latest >= 20 {
+            expected.insert("kv_delta".to_string());
+        }
+        expected
+    }
+
+    fn validate_core_table_state(
+        &self,
+        applied_versions: &[i64],
+        existing_relations: &HashMap<String, String>,
+    ) -> Result<()> {
+        let expected_tables = Self::expected_core_tables(applied_versions);
+        let mut missing: Vec<&str> = expected_tables
+            .iter()
+            .filter(|name| !existing_relations.contains_key(*name))
+            .map(String::as_str)
+            .collect();
+        let mut wrong_kind: Vec<(&str, &str)> = expected_tables
+            .iter()
+            .filter_map(|name| {
+                existing_relations.get(name).and_then(|kind| {
+                    (!matches!(kind.as_str(), "r" | "p")).then_some((name.as_str(), kind.as_str()))
+                })
+            })
+            .collect();
+        let mut unexpected: Vec<&str> = existing_relations
+            .keys()
+            .filter(|name| !expected_tables.contains(*name))
+            .map(String::as_str)
+            .collect();
+        missing.sort_unstable();
+        wrong_kind.sort_unstable();
+        unexpected.sort_unstable();
+
+        if !wrong_kind.is_empty() {
+            anyhow::bail!(
+                "duroxide schema {:?} has required relations {:?} with non-table \
+                 PostgreSQL relation kinds. The schema may be corrupted; refusing \
+                 to apply migrations or modify the ledger automatically.",
+                self.schema_name,
+                wrong_kind,
+            );
+        }
+
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "duroxide migration history in schema {:?} requires tables {:?}, \
+                 but they are missing. The schema may be corrupted; refusing to \
+                 apply migrations or modify the ledger automatically.",
+                self.schema_name,
+                missing,
+            );
+        }
+
+        if !unexpected.is_empty() {
+            anyhow::bail!(
+                "duroxide schema {:?} contains tables {:?} that are not represented \
+                 by its migration ledger. The schema may be corrupted; refusing to \
+                 apply migrations or modify the ledger automatically.",
+                self.schema_name,
+                unexpected,
+            );
+        }
+
+        Ok(())
+    }
+
     async fn migrate_inner(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<()> {
-        // Ensure schema exists
-        if self.schema_name != "public" {
+        let schema_exists = self.check_schema_exists(conn).await?;
+        if !schema_exists && self.schema_name != "public" {
             sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", self.schema_name))
                 .execute(&mut *conn)
                 .await?;
@@ -228,55 +369,40 @@ impl MigrationRunner {
             self.schema_name
         );
 
-        // Ensure migration tracking table exists (in the schema)
-        self.ensure_migration_table(conn).await?;
+        let tracking_exists = self.check_migration_table_exists(conn).await?;
+        let existing_tables = self.get_existing_core_relations(conn).await?;
 
-        // Get applied migrations
+        if !tracking_exists && !existing_tables.is_empty() {
+            let mut relations: Vec<(&str, &str)> = existing_tables
+                .iter()
+                .map(|(name, kind)| (name.as_str(), kind.as_str()))
+                .collect();
+            relations.sort_unstable();
+            anyhow::bail!(
+                "duroxide relations {:?} exist in schema {:?}, but the migration \
+                 tracking table is missing. The schema may be corrupted; refusing \
+                 to create a new ledger or apply migrations automatically.",
+                relations,
+                self.schema_name,
+            );
+        }
+
+        if !tracking_exists {
+            self.ensure_migration_table(conn).await?;
+        }
+
         let applied_versions = self.get_applied_versions(conn).await?;
-
+        self.validate_applied_prefix(&migrations, &applied_versions)?;
+        self.validate_core_table_state(&applied_versions, &existing_tables)?;
         tracing::debug!("Applied migrations: {:?}", applied_versions);
 
-        // Check if key tables exist - if not, we need to re-run migrations even if marked as applied
-        // This handles the case where cleanup dropped tables but not the migration tracking table
-        let tables_exist = self.check_tables_exist(conn).await.unwrap_or(false);
-
-        // Apply pending migrations (or re-apply if tables don't exist)
-        for migration in migrations {
-            let should_apply = if !applied_versions.contains(&migration.version) {
-                true // New migration
-            } else if !tables_exist {
-                // Migration was applied but tables don't exist - re-apply
-                tracing::warn!(
-                    "Migration {} is marked as applied but tables don't exist, re-applying",
-                    migration.version
-                );
-                // Remove the old migration record so we can re-apply
-                sqlx::query(&format!(
-                    "DELETE FROM {}._duroxide_migrations WHERE version = $1",
-                    self.schema_name
-                ))
-                .bind(migration.version)
-                .execute(&mut *conn)
-                .await?;
-                true
-            } else {
-                false // Already applied and tables exist
-            };
-
-            if should_apply {
-                tracing::debug!(
-                    "Applying migration {}: {}",
-                    migration.version,
-                    migration.name
-                );
-                self.apply_migration(conn, &migration).await?;
-            } else {
-                tracing::debug!(
-                    "Skipping migration {}: {} (already applied)",
-                    migration.version,
-                    migration.name
-                );
-            }
+        for migration in migrations.into_iter().skip(applied_versions.len()) {
+            tracing::debug!(
+                "Applying migration {}: {}",
+                migration.version,
+                migration.name
+            );
+            self.apply_migration(conn, &migration).await?;
         }
 
         Ok(())
@@ -347,17 +473,37 @@ impl MigrationRunner {
         Ok(())
     }
 
-    /// Check if key tables exist
-    async fn check_tables_exist(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<bool> {
-        // Check if instances table exists (as a proxy for all tables)
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'instances')",
+    async fn check_schema_exists(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<bool> {
+        let exists = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)",
         )
         .bind(&self.schema_name)
         .fetch_one(&mut *conn)
         .await?;
 
         Ok(exists)
+    }
+
+    async fn get_existing_core_relations(
+        &self,
+        conn: &mut sqlx::postgres::PgConnection,
+    ) -> Result<HashMap<String, String>> {
+        let known_tables: Vec<String> = ALL_CORE_TABLES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        let relations: Vec<(String, String)> = sqlx::query_as(
+            "SELECT c.relname::text, c.relkind::text \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = ANY($2::text[])",
+        )
+        .bind(&self.schema_name)
+        .bind(&known_tables)
+        .fetch_all(&mut *conn)
+        .await?;
+
+        Ok(relations.into_iter().collect())
     }
 
     /// Get list of applied migration versions
