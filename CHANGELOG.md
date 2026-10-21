@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.37] - 2026-10-21
+
 ### Fixed
 
 - **Migration startup now fails closed on catalog errors or inconsistent
