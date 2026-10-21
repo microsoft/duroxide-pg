@@ -186,19 +186,21 @@ Two test layers cover the Entra integration:
 - Orchestration stats introspection via `Client::get_orchestration_stats()`
 - Microsoft Entra ID authentication for Azure Database for PostgreSQL (managed identity, Workload Identity, az CLI)
 
-## Latest Release (0.1.36)
+## Latest Release (0.1.37)
 
-- Fixes `fetch_orchestration_item` returning a lock lease that had already expired when connection-pool or instance-lock waits were longer than the lock timeout (migration `0025`). Every ack, including the poison ack, failed with `Invalid lock token`, so the message was retried for as long as the contention lasted.
-- Updates the provider and `pg-stress` companion crate to Duroxide 0.1.32, which fixes queue, signal and continue-as-new races and makes `Runtime::shutdown` stop every runtime task.
-- Runs the new upstream race-replay and continue-as-new provider validations against PostgreSQL.
+- Fails startup on catalog errors, inconsistent migration history, or missing, unexpected, or non-table Duroxide relations without deleting migration records or re-applying old SQL.
+- Reports malformed KV snapshots through `history_error`, allowing the runtime to poison the instance after `max_attempts` instead of replaying an empty snapshot or retrying forever.
+- Keeps malformed durable history out of orphan-message cleanup so its queue messages are not acknowledged before runtime poison/backoff handling.
 - See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
 > **Releases are published by Microsoft's internal OSS infrastructure.** See
 > [RELEASE_POLICY.md](RELEASE_POLICY.md) for details.
 
-## Previous Release (0.1.35)
+## Previous Release (0.1.36)
 
-- Reduces write overhead and index size for mostly-NULL queue columns with migration `0023`, hardens future migrations against temporary-object shadowing, and updates to Duroxide 0.1.30.
+- Fixes `fetch_orchestration_item` returning a lock lease that had already expired when connection-pool or instance-lock waits were longer than the lock timeout (migration `0025`). Every ack, including the poison ack, failed with `Invalid lock token`, so the message was retried for as long as the contention lasted.
+- Updates the provider and `pg-stress` companion crate to Duroxide 0.1.32, which fixes queue, signal and continue-as-new races and makes `Runtime::shutdown` stop every runtime task.
+- Runs the new upstream race-replay and continue-as-new provider validations against PostgreSQL.
 
 ## Support
 
