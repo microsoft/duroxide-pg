@@ -56,9 +56,9 @@ async fn drop_schema(pool: &PgPool, schema: &str) {
         .expect("failed to drop test schema");
 }
 
-fn sqlstate(error: &sqlx::Error) -> Option<&str> {
+fn sqlstate(error: &sqlx::Error) -> Option<String> {
     match error {
-        sqlx::Error::Database(database_error) => database_error.code().as_deref(),
+        sqlx::Error::Database(database_error) => database_error.code().map(|code| code.into()),
         _ => None,
     }
 }
@@ -173,11 +173,11 @@ async fn fetch_and_renew_form_a_deadlock_when_they_lock_rows_in_opposite_orders(
     let fetch_deadlocked = fetch_result
         .as_ref()
         .err()
-        .is_some_and(|error| sqlstate(error) == Some("40P01"));
+        .is_some_and(|error| sqlstate(error).as_deref() == Some("40P01"));
     let renewal_deadlocked = renewal_result
         .as_ref()
         .err()
-        .is_some_and(|error| sqlstate(error) == Some("40P01"));
+        .is_some_and(|error| sqlstate(error).as_deref() == Some("40P01"));
 
     drop_schema(&pool, &schema).await;
 
