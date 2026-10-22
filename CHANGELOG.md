@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Serialize orchestration lock renewal with fetches (migration `0026`).**
+  Renewal now takes the same per-instance transaction advisory lock as
+  `fetch_orchestration_item` before either procedure acquires conflicting row
+  locks. This prevents the fetch/renew `40P01` cycle under concurrent
+  dispatchers. The PostgreSQL regression test uses a per-run, gate-controlled
+  interleaving and requires both operations to complete.
+
 ## [0.1.37] - 2026-10-21
 
 ### Fixed
