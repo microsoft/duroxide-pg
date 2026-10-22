@@ -13,7 +13,7 @@
 use duroxide::providers::{Provider, WorkItem};
 use duroxide_pg::PostgresProvider;
 use sqlx::postgres::{PgConnection, PgPoolOptions};
-use sqlx::{Connection, Executor, PgPool};
+use sqlx::{Connection, PgPool};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
 
@@ -132,7 +132,10 @@ async fn fetch_and_renew_serialize_before_taking_conflicting_row_locks() {
     let mut gate_connection = PgConnection::connect(&database_url)
         .await
         .expect("failed to connect gate session");
-    let mut gate = gate_connection.begin().await.expect("failed to begin gate transaction");
+    let mut gate = gate_connection
+        .begin()
+        .await
+        .expect("failed to begin gate transaction");
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(gate_key)
         .execute(&mut *gate)
@@ -209,7 +212,9 @@ async fn fetch_and_renew_serialize_before_taking_conflicting_row_locks() {
         .await
     });
 
-    let fetch_pid = fetch_pid_rx.await.expect("fetch task did not report its backend PID");
+    let fetch_pid = fetch_pid_rx
+        .await
+        .expect("fetch task did not report its backend PID");
     wait_for_lock_waiter(&pool, fetch_pid).await;
 
     gate.commit().await.expect("failed to release renewal gate");
