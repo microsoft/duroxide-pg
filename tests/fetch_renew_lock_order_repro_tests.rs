@@ -1,27 +1,23 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! PostgreSQL reproduction for the orchestration fetch/renew lock-order cycle.
+//! Regression test for the orchestration fetch/renew lock-order deadlock.
 //!
-//! `fetch_orchestration_item` locks `orchestrator_queue` before it upserts
-//! `instance_locks`. `renew_orchestration_item_lock` updates `instance_locks`
-//! before it updates `orchestrator_queue`. This test uses a test-local trigger
-//! to pause renewal after it owns the instance-lock row, then advances the
-//! fetch clock beyond the old lease. Fetch owns the queue row and waits on the
-//! instance-lock row; renewal then waits on the queue row. PostgreSQL must
-//! abort one transaction with SQLSTATE 40P01.
-//!
-//! When the production functions acquire their shared rows in one order, this
-//! test should be inverted to require both operations to complete successfully.
+//! Before migration 0026, fetch locked a queue row then waited for
+//! `instance_locks`, while renewal held `instance_locks` then waited for the
+//! queue row. This test pauses renewal after its first row update and waits
+//! until fetch is blocked. Releasing renewal must let both operations finish:
+//! migration 0026 makes renewal acquire fetch's per-instance advisory lock
+//! before either procedure takes a conflicting row lock.
 
 use duroxide::providers::{Provider, WorkItem};
 use duroxide_pg::PostgresProvider;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+use sqlx::postgres::{PgConnection, PgPoolOptions};
+use sqlx::{Connection, Executor, PgPool};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::oneshot;
 
 const ORCHESTRATION: &str = "FetchRenewLockOrder";
-const PAUSE_LOCK_KEY: i64 = 8_341_924_991;
 
 fn database_url() -> String {
     dotenvy::dotenv().ok();
@@ -32,6 +28,11 @@ fn unique_schema_name() -> String {
     let guid = uuid::Uuid::new_v4().to_string();
     let suffix = &guid[guid.len() - 8..];
     format!("fetch_renew_lock_order_{suffix}")
+}
+
+fn advisory_key() -> i64 {
+    let bytes = *uuid::Uuid::new_v4().as_bytes();
+    i64::from_be_bytes(bytes[..8].try_into().expect("UUID prefix has eight bytes"))
 }
 
 fn now_ms() -> i64 {
@@ -56,31 +57,45 @@ async fn drop_schema(pool: &PgPool, schema: &str) {
         .expect("failed to drop test schema");
 }
 
-fn sqlstate(error: &sqlx::Error) -> Option<String> {
-    match error {
-        sqlx::Error::Database(database_error) => database_error.code().map(|code| code.into()),
-        _ => None,
-    }
-}
-
-async fn wait_until_renewal_holds_pause_lock(pool: &PgPool) {
+async fn wait_for_advisory_holder(pool: &PgPool, key: i64) {
     for _ in 0..100 {
         let held: bool = sqlx::query_scalar("SELECT NOT pg_try_advisory_xact_lock($1)")
-            .bind(PAUSE_LOCK_KEY)
+            .bind(key)
             .fetch_one(pool)
             .await
-            .expect("failed to probe renewal pause lock");
+            .expect("failed to probe renewal readiness lock");
         if held {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    panic!("renewal never reached the lock-order pause trigger");
+    panic!("renewal never reached the lock-order gate");
+}
+
+async fn wait_for_lock_waiter(pool: &PgPool, pid: i32) {
+    for _ in 0..100 {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT COALESCE(wait_event_type = 'Lock', false)
+               FROM pg_stat_activity
+              WHERE pid = $1",
+        )
+        .bind(pid)
+        .fetch_optional(pool)
+        .await
+        .expect("failed to inspect fetch backend state")
+        .unwrap_or(false);
+        if waiting {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    panic!("fetch did not wait for renewal's transaction");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn fetch_and_renew_form_a_deadlock_when_they_lock_rows_in_opposite_orders() {
+async fn fetch_and_renew_serialize_before_taking_conflicting_row_locks() {
     let schema = unique_schema_name();
     let database_url = database_url();
     let provider = PostgresProvider::new_with_schema(&database_url, Some(&schema))
@@ -112,6 +127,18 @@ async fn fetch_and_renew_form_a_deadlock_when_they_lock_rows_in_opposite_orders(
         .expect("initial fetch failed")
         .expect("initial fetch did not return work");
 
+    let ready_key = advisory_key();
+    let gate_key = advisory_key();
+    let mut gate_connection = PgConnection::connect(&database_url)
+        .await
+        .expect("failed to connect gate session");
+    let mut gate = gate_connection.begin().await.expect("failed to begin gate transaction");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(gate_key)
+        .execute(&mut *gate)
+        .await
+        .expect("failed to take gate advisory lock");
+
     // The token is generated by the provider as `lock_<uuid>`, so it cannot
     // contain this dollar-quote delimiter.
     let pause_function = format!(
@@ -121,8 +148,8 @@ async fn fetch_and_renew_form_a_deadlock_when_they_lock_rows_in_opposite_orders(
          AS $function$
          BEGIN
              IF NEW.lock_token = $token${token}$token$ THEN
-                 PERFORM pg_advisory_xact_lock({PAUSE_LOCK_KEY});
-                 PERFORM pg_sleep(5);
+                 PERFORM pg_advisory_xact_lock({ready_key});
+                 PERFORM pg_advisory_xact_lock({gate_key});
              END IF;
              RETURN NEW;
          END;
@@ -142,47 +169,55 @@ async fn fetch_and_renew_form_a_deadlock_when_they_lock_rows_in_opposite_orders(
     .expect("failed to create renewal pause trigger");
 
     let renew_now_ms = now_ms();
-    let renewal_pool = pool.clone();
     let renewal_schema = schema.clone();
     let renewal_token = token.clone();
+    let renewal_database_url = database_url.clone();
     let renewal = tokio::spawn(async move {
+        let mut connection = PgConnection::connect(&renewal_database_url)
+            .await
+            .expect("failed to connect renewal session");
         sqlx::query(&format!(
             "SELECT {renewal_schema}.renew_orchestration_item_lock($1, $2, $3)"
         ))
         .bind(renewal_token)
         .bind(renew_now_ms)
         .bind(60_i64)
-        .execute(&renewal_pool)
+        .execute(&mut connection)
         .await
     });
 
-    wait_until_renewal_holds_pause_lock(&pool).await;
+    wait_for_advisory_holder(&pool, ready_key).await;
 
-    // The fetch timestamp is later than both leases held before and during
-    // renewal. It therefore locks the queue row, then blocks trying to update
-    // the instance-lock row that renewal still owns.
-    let fetch_result = sqlx::query(&format!(
-        "SELECT * FROM {schema}.fetch_orchestration_item($1, $2, NULL, NULL)"
-    ))
-    .bind(renew_now_ms + 120_000)
-    .bind(30_000_i64)
-    .fetch_optional(&pool)
-    .await;
+    let fetch_schema = schema.clone();
+    let fetch_database_url = database_url.clone();
+    let (fetch_pid_tx, fetch_pid_rx) = oneshot::channel();
+    let fetch = tokio::spawn(async move {
+        let mut connection = PgConnection::connect(&fetch_database_url)
+            .await
+            .expect("failed to connect fetch session");
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut connection)
+            .await
+            .expect("failed to read fetch backend PID");
+        let _ = fetch_pid_tx.send(pid);
+        sqlx::query(&format!(
+            "SELECT * FROM {fetch_schema}.fetch_orchestration_item($1, $2, NULL, NULL)"
+        ))
+        .bind(renew_now_ms + 120_000)
+        .bind(30_000_i64)
+        .fetch_optional(&mut connection)
+        .await
+    });
+
+    let fetch_pid = fetch_pid_rx.await.expect("fetch task did not report its backend PID");
+    wait_for_lock_waiter(&pool, fetch_pid).await;
+
+    gate.commit().await.expect("failed to release renewal gate");
     let renewal_result = renewal.await.expect("renewal task panicked");
-
-    let fetch_deadlocked = fetch_result
-        .as_ref()
-        .err()
-        .is_some_and(|error| sqlstate(error).as_deref() == Some("40P01"));
-    let renewal_deadlocked = renewal_result
-        .as_ref()
-        .err()
-        .is_some_and(|error| sqlstate(error).as_deref() == Some("40P01"));
+    let fetch_result = fetch.await.expect("fetch task panicked");
 
     drop_schema(&pool, &schema).await;
 
-    assert!(
-        fetch_deadlocked || renewal_deadlocked,
-        "expected PostgreSQL lock-order deadlock (40P01), fetch={fetch_result:?}, renewal={renewal_result:?}"
-    );
+    renewal_result.expect("renewal must complete without a deadlock");
+    fetch_result.expect("fetch must complete without a deadlock");
 }
