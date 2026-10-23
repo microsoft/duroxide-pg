@@ -13,7 +13,7 @@ This is a **PostgreSQL provider** for [Duroxide](https://github.com/microsoft/du
 
 ### Key Design Decisions
 1. **Stored Procedures over inline SQL** - All database operations use schema-qualified stored procedures in `0002_create_stored_procedures.sql` for atomic transactions and deadlock prevention
-2. **Rust-provided timestamps** - All procedures receive `p_now_ms` from Rust (not database `NOW()`) to avoid clock skew (see migration `0006`). Exception: `fetch_orchestration_item` computes the lease as `GREATEST(p_now_ms + time spent in the call, clock_timestamp()) + timeout`, so a lease is never already expired when it is returned (migration `0025`)
+2. **Rust-provided timestamps** - All procedures receive `p_now_ms` from Rust (not database `NOW()`) to avoid clock skew (see migration `0006`). Exceptions: `fetch_orchestration_item` computes the lease as `GREATEST(p_now_ms + time spent in the call, clock_timestamp()) + timeout`, so a lease is never already expired when it is returned (migration `0025`); `renew_orchestration_item_lock` uses the same clock after its advisory-lock wait to check expiry and compute the new deadline, and never moves a deadline earlier (migration `0026`)
 3. **Schema isolation** - Multi-tenant support via custom PostgreSQL schemas (`new_with_schema()`)
 4. **Two-phase locking in fetch operations** - Prevents B-tree index deadlocks (peek query → advisory lock → FOR UPDATE verification)
 

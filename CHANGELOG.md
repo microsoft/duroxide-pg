@@ -9,12 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Serialize orchestration lock renewal with fetches (migration `0026`).**
-  Renewal now takes the same per-instance transaction advisory lock as
-  `fetch_orchestration_item` before either procedure acquires conflicting row
-  locks. This prevents the fetch/renew `40P01` cycle under concurrent
-  dispatchers. The PostgreSQL regression test uses a per-run, gate-controlled
-  interleaving and requires both operations to complete.
+- **Orchestration lock renewal no longer deadlocks with fetch or with
+  acknowledge and abandon, and no longer reports success for an expired lease
+  (migration `0026`).** Renewal takes the same per-instance transaction
+  advisory lock as `fetch_orchestration_item` before it locks any row, so the
+  two can no longer deadlock (SQLSTATE `40P01`). It then updates queue rows
+  before the instance lock, the order that acknowledge and abandon use. After
+  the advisory-lock wait, renewal reads the time again: it fails if the lease
+  expired during the wait, and it never moves a lease deadline earlier.
+  PostgreSQL regression tests cover the fetch deadlock, the acknowledge lock
+  order, and each change that can happen between renewal's token lookup and
+  its update: time passing, lease expiry, a fetch takeover, acknowledge,
+  abandon, and another renewal.
 
 ## [0.1.37] - 2026-10-21
 
