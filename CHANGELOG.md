@@ -17,10 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the instance lock, the order that acknowledge and abandon use. After
   the advisory-lock wait, renewal reads the time again: it fails if the lease
   expired during the wait, and it never moves a lease deadline earlier.
+  Because renewal can now be aborted as a deadlock victim while it waits for
+  that lock, the provider retries transient renewal errors up to three times,
+  as fetch and acknowledge already do.
   PostgreSQL regression tests cover the fetch deadlock, the acknowledge lock
   order, and each change that can happen between renewal's token lookup and
   its update: time passing, lease expiry, a fetch takeover, acknowledge,
-  abandon, and another renewal.
+  abandon, and another renewal. Another test checks that a renewal aborted as
+  a deadlock victim is retried.
 
 ## [0.1.37] - 2026-10-21
 

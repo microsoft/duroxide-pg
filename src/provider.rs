@@ -1921,58 +1921,88 @@ impl Provider for PostgresProvider {
     ) -> Result<(), ProviderError> {
         let start = std::time::Instant::now();
 
-        // Get current time from application for consistent time reference
-        let now_ms = Self::now_millis();
+        // Renewal waits for the instance's advisory lock (migration 0026). If
+        // fetches deadlock each other on that lock, PostgreSQL can abort the
+        // waiting renewal instead (40P01). The runtime stops renewing a turn
+        // after any renewal error, so retry transient errors here, as fetch and
+        // acknowledge do. Renewing again is safe: it never shortens a lease.
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY_MS: u64 = 50;
 
         // Convert Duration to seconds for the stored procedure
         let extend_secs = extend_for.as_secs() as i64;
 
-        match sqlx::query(&format!(
-            "SELECT {}.renew_orchestration_item_lock($1, $2, $3)",
-            self.schema_name
-        ))
-        .bind(token)
-        .bind(now_ms)
-        .bind(extend_secs)
-        .execute(&*self.pool)
-        .await
-        {
-            Ok(_) => {
-                let duration_ms = start.elapsed().as_millis() as u64;
-                debug!(
-                    target = "duroxide::providers::postgres",
-                    operation = "renew_orchestration_item_lock",
-                    token = %token,
-                    extend_for_secs = extend_secs,
-                    duration_ms = duration_ms,
-                    "Orchestration item lock renewed successfully"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                if let SqlxError::Database(db_err) = &e {
-                    if db_err.message().contains("Lock token invalid")
-                        || db_err.message().contains("expired")
-                        || db_err.message().contains("already released")
+        for attempt in 0..=MAX_RETRIES {
+            // Get current time from application for consistent time reference
+            let now_ms = Self::now_millis();
+
+            let result = sqlx::query(&format!(
+                "SELECT {}.renew_orchestration_item_lock($1, $2, $3)",
+                self.schema_name
+            ))
+            .bind(token)
+            .bind(now_ms)
+            .bind(extend_secs)
+            .execute(&*self.pool)
+            .await;
+
+            match result {
+                Ok(_) => {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    debug!(
+                        target = "duroxide::providers::postgres",
+                        operation = "renew_orchestration_item_lock",
+                        token = %token,
+                        extend_for_secs = extend_secs,
+                        duration_ms = duration_ms,
+                        attempts = attempt + 1,
+                        "Orchestration item lock renewed successfully"
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    if let SqlxError::Database(db_err) = &e {
+                        if db_err.message().contains("Lock token invalid")
+                            || db_err.message().contains("expired")
+                            || db_err.message().contains("already released")
+                        {
+                            return Err(ProviderError::permanent(
+                                "renew_orchestration_item_lock",
+                                "Lock token invalid, expired, or already released",
+                            ));
+                        }
+                    } else if e.to_string().contains("Lock token invalid")
+                        || e.to_string().contains("expired")
+                        || e.to_string().contains("already released")
                     {
                         return Err(ProviderError::permanent(
                             "renew_orchestration_item_lock",
                             "Lock token invalid, expired, or already released",
                         ));
                     }
-                } else if e.to_string().contains("Lock token invalid")
-                    || e.to_string().contains("expired")
-                    || e.to_string().contains("already released")
-                {
-                    return Err(ProviderError::permanent(
-                        "renew_orchestration_item_lock",
-                        "Lock token invalid, expired, or already released",
-                    ));
-                }
 
-                Err(self.sqlx_to_provider_error("renew_orchestration_item_lock", e))
+                    let provider_err =
+                        self.sqlx_to_provider_error("renew_orchestration_item_lock", e);
+                    if provider_err.is_retryable() && attempt < MAX_RETRIES {
+                        warn!(
+                            target = "duroxide::providers::postgres",
+                            operation = "renew_orchestration_item_lock",
+                            attempt = attempt + 1,
+                            error = %provider_err,
+                            "Retryable error, will retry"
+                        );
+                        sleep(std::time::Duration::from_millis(
+                            RETRY_DELAY_MS * (attempt as u64 + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(provider_err);
+                }
             }
         }
+
+        unreachable!("the last attempt always returns")
     }
 
     #[instrument(skip(self), target = "duroxide::providers::postgres")]
