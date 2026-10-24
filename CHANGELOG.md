@@ -24,7 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   order, and each change that can happen between renewal's token lookup and
   its update: time passing, lease expiry, a fetch takeover, acknowledge,
   abandon, and another renewal. Another test checks that a renewal aborted as
-  a deadlock victim is retried.
+  a deadlock victim is retried. Two more race renewal against a fetch from a
+  node that sees the lease as expired (clock ahead, or renewal stalled), with
+  no instrumentation, and require no deadlock and no revived expired lease.
 
 ## [0.1.37] - 2026-10-21
 
