@@ -21,6 +21,9 @@
 //! renewal stalled on the way to the database. Each round sends the same two
 //! statements `PostgresProvider` sends, on two connections, released together
 //! with staggered start times.
+//!
+//! The last test checks the unique index on `instance_locks(lock_token)` that
+//! renewal, acknowledge and abandon use to find an instance by its token.
 
 use duroxide::providers::{ExecutionMetadata, Provider, ProviderError, WorkItem};
 use duroxide_pg::PostgresProvider;
@@ -1149,4 +1152,80 @@ async fn race_renewal_against_fetch_from_node_with_clock_ahead() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn race_stalled_renewal_against_fetch_after_expiry() {
     race_renewal_against_expired_view(ExpiredView::RenewalStalled).await;
+}
+
+/// Renewal, acknowledge and abandon find an instance by its lock token.
+/// Migration 0026 adds a unique index on `instance_locks(lock_token)` so these
+/// lookups do not scan the table, and so a token can name only one instance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lock_token_lookups_use_a_unique_index() {
+    with_schema(|schema| async move {
+        let database_url = database_url();
+        let _provider = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+            .await
+            .expect("failed to create provider");
+        let pool = raw_pool(&database_url).await;
+
+        let (unique, column): (bool, String) = sqlx::query_as(
+            "SELECT ix.indisunique, pg_get_indexdef(ix.indexrelid, 1, true)
+               FROM pg_index ix
+               JOIN pg_class i ON i.oid = ix.indexrelid
+               JOIN pg_namespace n ON n.oid = i.relnamespace
+              WHERE n.nspname = $1
+                AND i.relname = 'idx_instance_locks_lock_token'
+                AND ix.indnatts = 1",
+        )
+        .bind(&schema)
+        .fetch_one(&pool)
+        .await
+        .expect("idx_instance_locks_lock_token must exist");
+        assert!(unique, "the lock_token index must be unique");
+        assert_eq!(column, "lock_token");
+
+        // Enough live leases that the planner prefers an index to a table scan.
+        sqlx::query(&format!(
+            "INSERT INTO {schema}.instance_locks (instance_id, lock_token, locked_until, locked_at)
+             SELECT 'instance-' || g, 'lock_' || gen_random_uuid(),
+                    (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT + 600000, 0
+               FROM generate_series(1, 5000) AS g"
+        ))
+        .execute(&pool)
+        .await
+        .expect("failed to fill instance_locks");
+        sqlx::query(&format!("ANALYZE {schema}.instance_locks"))
+            .execute(&pool)
+            .await
+            .expect("failed to analyze instance_locks");
+
+        // The lookups of abandon, and of renewal and acknowledge.
+        for predicate in [
+            "lock_token = 'lock_unknown'",
+            "lock_token = 'lock_unknown'
+               AND locked_until > (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT",
+        ] {
+            let plan: Vec<String> = sqlx::query_scalar(&format!(
+                "EXPLAIN SELECT instance_id FROM {schema}.instance_locks WHERE {predicate}"
+            ))
+            .fetch_all(&pool)
+            .await
+            .expect("failed to explain the token lookup");
+            let plan = plan.join("\n");
+            assert!(
+                plan.contains("idx_instance_locks_lock_token") && !plan.contains("Seq Scan"),
+                "the token lookup must use the index:\n{plan}"
+            );
+        }
+
+        let duplicate = sqlx::query(&format!(
+            "INSERT INTO {schema}.instance_locks (instance_id, lock_token, locked_until, locked_at)
+             SELECT 'instance-duplicate', lock_token, 0, 0
+               FROM {schema}.instance_locks
+              LIMIT 1"
+        ))
+        .execute(&pool)
+        .await
+        .expect_err("a lock token must not name two instances");
+        assert_eq!(sqlstate(&duplicate).as_deref(), Some("23505"));
+    })
+    .await;
 }

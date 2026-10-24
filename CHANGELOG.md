@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expired during the wait, and it never moves a lease deadline earlier.
   Because renewal can now be aborted as a deadlock victim while it waits for
   that lock, the provider retries transient renewal errors up to three times,
-  as fetch and acknowledge already do.
+  as fetch and acknowledge already do. The migration also adds a unique index
+  on `instance_locks(lock_token)`, so renewal, acknowledge and abandon find an
+  instance by its lock token without scanning the table.
   PostgreSQL regression tests cover the fetch deadlock, the acknowledge lock
   order, and each change that can happen between renewal's token lookup and
   its update: time passing, lease expiry, a fetch takeover, acknowledge,

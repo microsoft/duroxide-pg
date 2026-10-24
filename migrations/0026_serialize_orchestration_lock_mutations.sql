@@ -26,6 +26,12 @@
 --      them. The advisory lock keeps fetch out whatever the row order.
 -- If acknowledge or abandon releases the lock first, the final update matches
 -- no row and the function raises, which rolls back the queue update.
+--
+-- The migration also adds a unique index on instance_locks(lock_token).
+-- Renewal, acknowledge and abandon find the instance by its lock token, and
+-- without an index each lookup scans the table. The index is unique because a
+-- token must name exactly one instance, which renewal relies on: only fetch
+-- writes lock_token, and it creates each token once from gen_random_uuid().
 
 DO $$
 DECLARE
@@ -88,4 +94,9 @@ BEGIN
         END;
         $renew_orch_lock$ LANGUAGE plpgsql;
 $fmt$, v_schema_name);
+
+    EXECUTE format(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_instance_locks_lock_token ON %1$I.instance_locks (lock_token)',
+        v_schema_name
+    );
 END $$;
