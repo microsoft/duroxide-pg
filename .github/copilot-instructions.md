@@ -177,3 +177,4 @@ Use [.agents/skills/release-preparation/SKILL.md](../.agents/skills/release-prep
 - Enable tracing: `RUST_LOG=duroxide::providers::postgres=debug cargo test`
 - Check schema cleanup: Run `scripts/cleanup_test_schemas.sh` after failed tests
 - Deadlock issues: Review two-phase locking in `fetch_orchestration_item` stored procedure
+- Deadlock tests live in `tests/deadlocks` (`cargo test --test deadlocks`). They run in every default `cargo test` and must not be `#[ignore]`d. Every lock-ordering change adds a test there.

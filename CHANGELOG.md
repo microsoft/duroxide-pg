@@ -22,13 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as fetch and acknowledge already do. The migration also adds a unique index
   on `instance_locks(lock_token)`, so renewal, acknowledge and abandon find an
   instance by its lock token without scanning the table.
-  PostgreSQL regression tests cover the fetch deadlock, the acknowledge lock
-  order, and each change that can happen between renewal's token lookup and
-  its update: time passing, lease expiry, a fetch takeover, acknowledge,
-  abandon, and another renewal. Another test checks that a renewal aborted as
-  a deadlock victim is retried. Two more race renewal against a fetch from a
-  node that sees the lease as expired (clock ahead, or renewal stalled), with
-  no instrumentation, and require no deadlock and no revived expired lease.
+  A new deadlock suite, `tests/deadlocks` (`cargo test --test deadlocks`),
+  covers the fetch deadlock and the acknowledge and abandon lock orders, and
+  checks that a renewal aborted as a deadlock victim is retried. Two of its
+  tests race renewal against a fetch from a node that sees the lease as
+  expired (clock ahead, or renewal stalled), with no instrumentation, and
+  require no deadlock and no revived expired lease. The suite runs in every
+  default `cargo test`. `tests/orchestration_lock_renewal_tests.rs` covers
+  each change that can happen between renewal's token lookup and its update:
+  time passing, lease expiry, a fetch takeover, acknowledge, abandon, and
+  another renewal, and checks the `lock_token` index.
 
 ## [0.1.37] - 2026-10-21
 
