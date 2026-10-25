@@ -32,6 +32,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each change that can happen between renewal's token lookup and its update:
   time passing, lease expiry, a fetch takeover, acknowledge, abandon, and
   another renewal, and checks the `lock_token` index.
+- **An orchestration acknowledge can no longer commit after another worker
+  has taken the instance over, which processed messages twice (migration
+  `0026`).** Acknowledge checked its lock token once, without a lock. A
+  fetch from a worker whose clock runs ahead, or after a stalled acknowledge,
+  could take the instance over between that check and the commit. The
+  acknowledge then committed its history and new work, but its deletes,
+  which match on the old token, removed nothing, so the processed messages
+  stayed queued and were delivered again. Duroxide does not de-duplicate
+  queue messages or external events, so they were processed twice: one
+  enqueued event could run an activity twice. Acknowledge now takes the
+  per-instance advisory lock right after its token check, checks the token
+  again, and fails if its instance lock is gone when it deletes it.
+  `tests/deadlocks/ack_fetch.rs` checks that a fetch waits for an
+  acknowledge in progress. `tests/orchestration_ack_lease_tests.rs` checks a
+  takeover while acknowledge waits for the lock, a lock deleted during the
+  acknowledge, and, end to end with the duroxide runtime, that an order is
+  charged once when another worker fetches during the acknowledge.
 
 ## [0.1.37] - 2026-10-21
 

@@ -166,6 +166,157 @@ pub fn spawn_sql_renewal(
     })
 }
 
+/// One history event in the JSON shape the provider sends to acknowledge. Its
+/// data is never decoded by these tests.
+pub fn opaque_history(event_id: i64) -> serde_json::Value {
+    serde_json::json!([{
+        "event_id": event_id,
+        "event_type": "TestEvent",
+        "event_data": "{}",
+    }])
+}
+
+/// Sends the statement the provider sends to acknowledge, once, on
+/// `connection`: `history` as the history delta, no new work and no metadata
+/// change. Nothing retries, so a test sees any error directly.
+pub async fn sql_ack(
+    connection: &mut PgConnection,
+    schema: &str,
+    token: &str,
+    history: serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(&format!(
+        "SELECT {schema}.ack_orchestration_item($1, $2, $3, $4, $5, $6, $7, $8)"
+    ))
+    .bind(token)
+    .bind(now_ms())
+    .bind(1_i64)
+    .bind(history)
+    .bind(serde_json::json!([]))
+    .bind(serde_json::json!([]))
+    .bind(serde_json::json!({
+        "orchestration_name": null,
+        "orchestration_version": null,
+        "status": null,
+        "output": null,
+        "parent_instance_id": null,
+        "pinned_duroxide_version": null,
+        "custom_status_action": null,
+        "custom_status_value": null,
+        "kv_mutations": [],
+    }))
+    .bind(serde_json::json!([]))
+    .execute(connection)
+    .await
+    .map(|_| ())
+}
+
+/// `sql_ack` on its own connection.
+pub fn spawn_sql_ack(
+    database_url: String,
+    schema: String,
+    token: String,
+    history: serde_json::Value,
+) -> JoinHandle<Result<(), sqlx::Error>> {
+    tokio::spawn(async move {
+        let mut connection = PgConnection::connect(&database_url).await?;
+        sql_ack(&mut connection, &schema, &token, history).await
+    })
+}
+
+/// Sends the statement the provider sends to fetch, once, on `connection`,
+/// with the caller clock `now_ms`. Returns the instance and its new token.
+pub async fn sql_fetch(
+    connection: &mut PgConnection,
+    schema: &str,
+    now_ms: i64,
+    lock_timeout_ms: i64,
+) -> Result<Option<(String, String)>, sqlx::Error> {
+    sqlx::query_as(&format!(
+        "SELECT out_instance_id, out_lock_token
+           FROM {schema}.fetch_orchestration_item($1, $2, NULL, NULL)"
+    ))
+    .bind(now_ms)
+    .bind(lock_timeout_ms)
+    .fetch_optional(connection)
+    .await
+}
+
+/// `sql_fetch` on its own connection.
+pub fn spawn_sql_fetch(
+    database_url: String,
+    schema: String,
+    now_ms: i64,
+    lock_timeout_ms: i64,
+) -> JoinHandle<Result<Option<(String, String)>, sqlx::Error>> {
+    tokio::spawn(async move {
+        let mut connection = PgConnection::connect(&database_url).await?;
+        sql_fetch(&mut connection, &schema, now_ms, lock_timeout_ms).await
+    })
+}
+
+/// Pauses every transaction that inserts a history row for `instance`, from
+/// the first such row until the returned gate transaction ends. The paused
+/// transaction holds the returned ready key, which `wait_for_advisory_holder`
+/// detects. Acknowledge inserts history after its token check, so this
+/// pauses an acknowledge in the middle.
+pub async fn pause_history_inserts(
+    pool: &PgPool,
+    database_url: &str,
+    schema: &str,
+    instance: &str,
+) -> (i64, sqlx::Transaction<'static, sqlx::Postgres>) {
+    let ready_key = advisory_key();
+    let gate_key = advisory_key();
+    let gate_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .expect("failed to connect gate session");
+    let mut gate = gate_pool
+        .begin()
+        .await
+        .expect("failed to begin gate transaction");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(gate_key)
+        .execute(&mut *gate)
+        .await
+        .expect("failed to take gate advisory lock");
+    install_pause_trigger_when(
+        pool,
+        schema,
+        "history",
+        "INSERT",
+        &format!("NEW.instance_id = $instance${instance}$instance$"),
+        ready_key,
+        gate_key,
+    )
+    .await;
+    (ready_key, gate)
+}
+
+/// Number of committed history rows of the instance.
+pub async fn history_len(pool: &PgPool, schema: &str, instance: &str) -> i64 {
+    sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {schema}.history WHERE instance_id = $1"
+    ))
+    .bind(instance)
+    .fetch_one(pool)
+    .await
+    .expect("failed to count history rows")
+}
+
+/// Number of worker_queue rows of the instance.
+pub async fn worker_queue_len(pool: &PgPool, schema: &str, instance: &str) -> i64 {
+    sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {schema}.worker_queue WHERE instance_id = $1"
+    ))
+    .bind(instance)
+    .fetch_one(pool)
+    .await
+    .expect("failed to count worker_queue rows")
+}
+
 /// The instance lease and the lease on each of the instance's queue rows.
 #[derive(Debug)]
 pub struct Lease {

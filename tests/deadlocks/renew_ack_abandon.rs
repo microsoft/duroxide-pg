@@ -4,17 +4,21 @@
 //! Orchestration lock renewal against acknowledge and abandon (migration 0026).
 //!
 //! Acknowledge and abandon change the instance's queue rows and then delete
-//! its `instance_locks` row. They do not take fetch's advisory lock. Before
-//! migration 0026, renewal updated `instance_locks` first and the queue rows
-//! second, the opposite order, so it could deadlock with either of them
-//! (SQLSTATE 40P01). Renewal now updates the queue rows first.
+//! its `instance_locks` row. Before migration 0026, renewal updated
+//! `instance_locks` first and the queue rows second, the opposite order, so it
+//! could deadlock with either of them (SQLSTATE 40P01). Renewal now updates
+//! the queue rows first. Since migration 0026, acknowledge also takes fetch's
+//! advisory lock, which renewal takes too, so renewal waits for an
+//! acknowledge on that lock before it touches any row. Abandon takes no
+//! advisory lock, so against abandon the row order is what prevents the
+//! deadlock.
 //!
 //! Each test pauses acknowledge or abandon after its queue change and starts
-//! a renewal. Renewal must wait for the queue rows without holding the
-//! `instance_locks` row, and must fail as released once the other call
-//! commits. Both calls send the provider's statement once, on their own
-//! connections, so a deadlock shows as SQLSTATE 40P01 instead of being
-//! retried away.
+//! a renewal. Renewal must wait (on the advisory lock for acknowledge, on the
+//! queue rows for abandon) without holding the `instance_locks` row, and must
+//! fail as released once the other call commits. Both calls send the
+//! provider's statement once, on their own connections, so a deadlock shows
+//! as SQLSTATE 40P01 instead of being retried away.
 
 use crate::harness::*;
 use sqlx::postgres::PgConnection;
@@ -53,6 +57,12 @@ impl Release {
         }
     }
 
+    /// Whether renewal waits for this call on the advisory lock (acknowledge
+    /// takes it) or on the queue rows (abandon does not).
+    fn renewal_waits_on_advisory_lock(self) -> bool {
+        self == Release::Acknowledge
+    }
+
     /// Sends the statement `PostgresProvider` sends for this call once, on its
     /// own connection.
     fn spawn(
@@ -65,30 +75,9 @@ impl Release {
             let mut connection = PgConnection::connect(&database_url).await?;
             match self {
                 // A turn with no history, no new work and default metadata.
-                Release::Acknowledge => sqlx::query(&format!(
-                    "SELECT {schema}.ack_orchestration_item($1, $2, $3, $4, $5, $6, $7, $8)"
-                ))
-                .bind(&token)
-                .bind(now_ms())
-                .bind(1_i64)
-                .bind(serde_json::json!([]))
-                .bind(serde_json::json!([]))
-                .bind(serde_json::json!([]))
-                .bind(serde_json::json!({
-                    "orchestration_name": null,
-                    "orchestration_version": null,
-                    "status": null,
-                    "output": null,
-                    "parent_instance_id": null,
-                    "pinned_duroxide_version": null,
-                    "custom_status_action": null,
-                    "custom_status_value": null,
-                    "kv_mutations": [],
-                }))
-                .bind(serde_json::json!([]))
-                .execute(&mut connection)
-                .await
-                .map(|_| ()),
+                Release::Acknowledge => {
+                    sql_ack(&mut connection, &schema, &token, serde_json::json!([])).await
+                }
                 Release::Abandon => sqlx::query(&format!(
                     "SELECT {schema}.abandon_orchestration_item($1, $2, NULL, false)"
                 ))
@@ -142,7 +131,13 @@ async fn renew_while_releasing(release: Release) {
         wait_for_advisory_holder(&pool, ready_key).await;
 
         let renewal = spawn_sql_renewal(database_url.clone(), schema.clone(), token.clone(), 60);
-        wait_for_call_to_wait(&pool, &schema, "renew_orchestration_item_lock", false).await;
+        wait_for_call_to_wait(
+            &pool,
+            &schema,
+            "renew_orchestration_item_lock",
+            release.renewal_waits_on_advisory_lock(),
+        )
+        .await;
         // The paused call has not reached instance_locks yet, so only renewal
         // can hold that row now.
         let renewal_held_instance_row = instance_lock_row_is_held(&pool, &schema, &instance).await;
@@ -190,9 +185,10 @@ async fn renew_while_releasing(release: Release) {
 }
 
 /// Acknowledge pauses after it deletes the instance's queue rows and before it
-/// deletes the instance lock. Renewal must wait for the queue rows without
-/// holding the instance lock; once acknowledge commits, renewal must fail
-/// because the lock was released. Opposite row orders deadlock here.
+/// deletes the instance lock. Renewal must wait for acknowledge's advisory
+/// lock without holding the instance lock; once acknowledge commits, renewal
+/// must fail because the lock was released. Opposite row orders deadlock here
+/// when neither takes the advisory lock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn renewal_and_acknowledge_lock_rows_in_the_same_order() {
     renew_while_releasing(Release::Acknowledge).await;

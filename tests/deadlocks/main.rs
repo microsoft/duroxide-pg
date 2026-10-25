@@ -4,7 +4,8 @@
 //! Deadlock regression suite for the PostgreSQL provider.
 //!
 //! Each test here reproduces one way two provider calls can lock the same rows
-//! in opposite orders, and fails if PostgreSQL detects a deadlock. Run the
+//! in opposite orders, or interleave where they must serialize, and fails if
+//! PostgreSQL detects a deadlock or the calls do not serialize. Run the
 //! suite alone with `cargo test --test deadlocks`. It also runs in every
 //! default `cargo test`, which is what CI runs.
 //!
@@ -24,13 +25,17 @@
 //!
 //! Modules:
 //!
+//! - `ack_fetch`: acknowledge against a fetch that sees the lease as expired
+//!   (migration 0026).
 //! - `renew_fetch`: renewal against fetch, forced and raced (migration 0026).
 //! - `renew_ack_abandon`: renewal against acknowledge and abandon.
 //! - `victim_retry`: the provider retries a renewal aborted as a deadlock
 //!   victim.
 //! - `harness`: shared helpers, also used by
-//!   `tests/orchestration_lock_renewal_tests.rs`.
+//!   `tests/orchestration_lock_renewal_tests.rs` and
+//!   `tests/orchestration_ack_lease_tests.rs`.
 
+mod ack_fetch;
 mod harness;
 mod renew_ack_abandon;
 mod renew_fetch;
@@ -39,6 +44,7 @@ mod victim_retry;
 /// Every source file of the suite, checked by `suite_has_no_ignored_tests`.
 const SOURCES: &[(&str, &str)] = &[
     ("main.rs", include_str!("main.rs")),
+    ("ack_fetch.rs", include_str!("ack_fetch.rs")),
     ("harness.rs", include_str!("harness.rs")),
     ("renew_ack_abandon.rs", include_str!("renew_ack_abandon.rs")),
     ("renew_fetch.rs", include_str!("renew_fetch.rs")),

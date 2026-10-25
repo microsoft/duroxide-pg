@@ -18,7 +18,7 @@
 #[path = "deadlocks/harness.rs"]
 mod harness;
 
-use duroxide::providers::{ExecutionMetadata, Provider};
+use duroxide::providers::Provider;
 use duroxide_pg::PostgresProvider;
 use harness::*;
 use sqlx::postgres::PgConnection;
@@ -61,10 +61,11 @@ enum Expected {
 /// The test holds the advisory lock that fetch and renewal take for the
 /// instance. Renewal takes that lock only after its token lookup passed, so a
 /// renewal seen waiting on it is between its check and its use. The
-/// interleaving runs while renewal waits: fetch and renewal inside the
-/// transaction that holds the lock (PostgreSQL grants it again to the same
-/// session), acknowledge and abandon on their own connections (they do not
-/// take the advisory lock). Committing that transaction lets renewal continue.
+/// interleaving runs while renewal waits: fetch, acknowledge and renewal
+/// inside the transaction that holds the lock (they take it too, and
+/// PostgreSQL grants it again to the same session), abandon on its own
+/// connection (it does not take the advisory lock). Committing that
+/// transaction lets renewal continue.
 async fn renew_across(interleaving: Interleaving) {
     with_schema(move |schema| async move {
         let database_url = database_url();
@@ -144,15 +145,7 @@ async fn renew_across(interleaving: Interleaving) {
             Interleaving::Acknowledged => {
                 timed(
                     "acknowledge",
-                    provider.ack_orchestration_item(
-                        &token,
-                        1,
-                        vec![],
-                        vec![],
-                        vec![],
-                        ExecutionMetadata::default(),
-                        vec![],
-                    ),
+                    sql_ack(&mut *gate, &schema, &token, serde_json::json!([])),
                 )
                 .await
                 .expect("acknowledge must succeed while renewal waits");
