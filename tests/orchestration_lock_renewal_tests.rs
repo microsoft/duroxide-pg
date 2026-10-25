@@ -145,7 +145,7 @@ async fn renew_across(interleaving: Interleaving) {
             Interleaving::Acknowledged => {
                 timed(
                     "acknowledge",
-                    sql_ack(&mut *gate, &schema, &token, serde_json::json!([])),
+                    sql_ack(&mut gate, &schema, &token, serde_json::json!([])),
                 )
                 .await
                 .expect("acknowledge must succeed while renewal waits");

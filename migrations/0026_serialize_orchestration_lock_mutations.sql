@@ -21,9 +21,10 @@
 --   4. Revalidates the token and expiry at that time, and never moves the
 --      deadline earlier.
 --   5. Updates orchestrator_queue before instance_locks. This is the order of
---      ack_orchestration_item and abandon_orchestration_item, which do not
---      take the advisory lock; the opposite order lets renewal deadlock with
---      them. The advisory lock keeps fetch out whatever the row order.
+--      ack_orchestration_item and abandon_orchestration_item. Abandon does
+--      not take the advisory lock, and the opposite order lets renewal
+--      deadlock with it. Fetch, and acknowledge since this migration (below),
+--      take the advisory lock, which keeps them out whatever the row order.
 -- If acknowledge or abandon releases the lock first, the final update matches
 -- no row and the function raises, which rolls back the queue update.
 --

@@ -74,7 +74,7 @@ async fn toctou_fetch_takes_over_while_acknowledge_waits() {
         // PostgreSQL grants it again to the same session.
         let (fetched, new_token) = timed(
             "takeover fetch",
-            sql_fetch(&mut *gate, &schema, now_ms() + 120_000, 30_000),
+            sql_fetch(&mut gate, &schema, now_ms() + 120_000, 30_000),
         )
         .await
         .expect("takeover fetch failed")
@@ -162,7 +162,9 @@ async fn acknowledge_rolls_back_when_its_lock_disappears() {
         let queue = read_queue(&pool, &schema, &instance).await;
         assert!(!queue.is_empty(), "the processed messages must stay queued");
         assert!(
-            queue.iter().all(|(row_token, _)| row_token.as_deref() == Some(token.as_str())),
+            queue
+                .iter()
+                .all(|(row_token, _)| row_token.as_deref() == Some(token.as_str())),
             "the processed messages must not be deleted: {queue:?}"
         );
     })
@@ -247,32 +249,42 @@ async fn runtime_charges_an_order_once_when_another_worker_fetches_during_the_ac
             })
             .build();
         let orchestrations = OrchestrationRegistry::builder()
-            .register(ORDERS, |ctx: OrchestrationContext, _input: String| async move {
-                let mut charged = Vec::new();
-                for _ in 0..2 {
-                    let order = ctx.dequeue_event(QUEUE).await;
-                    charged.push(ctx.schedule_activity("Charge", order).await?);
-                }
-                Ok(charged.join(","))
-            })
+            .register(
+                ORDERS,
+                |ctx: OrchestrationContext, _input: String| async move {
+                    let mut charged = Vec::new();
+                    for _ in 0..2 {
+                        let order = ctx.dequeue_event(QUEUE).await;
+                        charged.push(ctx.schedule_activity("Charge", order).await?);
+                    }
+                    Ok(charged.join(","))
+                },
+            )
             .build();
         let options = RuntimeOptions {
             dispatcher_min_poll_interval: Duration::from_millis(10),
             orchestrator_lock_timeout: Duration::from_secs(2),
             ..Default::default()
         };
-        let rt =
-            runtime::Runtime::start_with_options(provider.clone(), activities, orchestrations, options)
-                .await;
+        let rt = runtime::Runtime::start_with_options(
+            provider.clone(),
+            activities,
+            orchestrations,
+            options,
+        )
+        .await;
         let client = Client::new(provider.clone());
         let instance = format!("orders-{}", uuid::Uuid::new_v4());
         client
             .start_orchestration(&instance, ORDERS, "")
             .await
             .expect("failed to start the orchestration");
-        wait_for_history(&*provider, &instance, "waiting for the first order", |kind| {
-            matches!(kind, EventKind::QueueSubscribed { .. })
-        })
+        wait_for_history(
+            &*provider,
+            &instance,
+            "waiting for the first order",
+            |kind| matches!(kind, EventKind::QueueSubscribed { .. }),
+        )
         .await;
 
         let (ready_key, gate) =
@@ -312,9 +324,12 @@ async fn runtime_charges_an_order_once_when_another_worker_fetches_during_the_ac
         assert_not_deadlock_victim("other worker's fetch", &other_result);
         other_result.expect("the other worker's fetch must succeed");
 
-        wait_for_history(&*provider, &instance, "the acknowledge of order 1", |kind| {
-            matches!(kind, EventKind::ActivityScheduled { .. })
-        })
+        wait_for_history(
+            &*provider,
+            &instance,
+            "the acknowledge of order 1",
+            |kind| matches!(kind, EventKind::ActivityScheduled { .. }),
+        )
         .await;
         let redelivered: i64 = sqlx::query_scalar(&format!(
             "SELECT count(*) FROM {schema}.orchestrator_queue
