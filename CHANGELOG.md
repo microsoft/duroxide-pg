@@ -49,6 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takeover while acknowledge waits for the lock, a lock deleted during the
   acknowledge, and, end to end with the duroxide runtime, that an order is
   charged once when another worker fetches during the acknowledge.
+  `docs/tla/orchestration-leases` contains a TLA+ model of fetch,
+  acknowledge, renew and abandon under worker clock skew. Its TLC
+  configurations and expected results run with `./run.sh`.
 
 ## [0.1.37] - 2026-10-21
 

@@ -1,0 +1,26 @@
+# config	module	heap	expected	distinct_states	depth
+MAIN-consumption	LeaseProtocol	4g	violates:ExactlyOnceConsumption	124568	20
+MAIN-deadline-publication	LeaseProtocol	512m	violates:RenewalDeadlineLiveAtCommit	87	9
+MAIN-deadlock-abandon	LeaseProtocol	512m	violates:NoDeadlock	319	9
+MAIN-deadlock-ack	LeaseProtocol	512m	violates:NoDeadlock	529	11
+MAIN-deadlock-fetch	LeaseProtocol	512m	violates:NoDeadlock	28431	11
+MAIN-redelivery	LeaseRedelivery	1g	violates:NoDuplicateConsumption	289108	45
+MAIN-release-race	LeaseReleaseRace	512m	violates:ExactlyOnceConsumption	1457	15
+MAIN-revival	LeaseProtocol	512m	violates:NoExpiredRenewalAtCheck	308	8
+MAIN-shortening	LeaseProtocol	512m	violates:NeverShorten	160	7
+MAIN-structure	LeaseProtocol	4g	holds	3094484	32
+MAIN-zero-skew-consumption	LeaseProtocol	512m	violates:ExactlyOnceConsumption	4671	22
+PR43-abandon	LeaseProtocol	4g	holds	4225603	38
+PR43-consumption	LeaseProtocol	4g	violates:ExactlyOnceConsumption	124568	20
+PR43-deadline-publication	LeaseProtocol	512m	violates:RenewalDeadlineLiveAtCommit	144	13
+PR43-redelivery	LeaseRedelivery	1g	violates:NoDuplicateConsumption	289108	45
+PR43-release-race	LeaseReleaseRace	512m	violates:ExactlyOnceConsumption	1457	15
+PR43-safety	LeaseProtocol	4g	holds	4960731	36
+PR43-strict-validation	LeaseProtocol	512m	violates:NoExpiredRenewalAtCheck	77	12
+FIXED-abandon	LeaseProtocol	4g	holds	4227695	40
+FIXED-deadline-publication	LeaseProtocol	512m	violates:RenewalDeadlineLiveAtCommit	144	13
+FIXED-redelivery	LeaseRedelivery	1g	holds	286344	45
+FIXED-release-race	LeaseReleaseRace	512m	holds	1894	18
+FIXED-safety	LeaseProtocol	4g	holds	3854292	39
+FIXED-strict-clock	LeaseProtocol	512m	violates:NoExpiredRenewalAtWrite	77	12
+FIXED-strict-validation	LeaseProtocol	512m	violates:NoExpiredRenewalAtCheck	77	12
