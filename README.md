@@ -186,21 +186,22 @@ Two test layers cover the Entra integration:
 - Orchestration stats introspection via `Client::get_orchestration_stats()`
 - Microsoft Entra ID authentication for Azure Database for PostgreSQL (managed identity, Workload Identity, az CLI)
 
-## Latest Release (0.1.37)
+## Latest Release (0.1.38)
 
-- Fails startup on catalog errors, inconsistent migration history, or missing, unexpected, or non-table Duroxide relations without deleting migration records or re-applying old SQL.
-- Reports malformed KV snapshots through `history_error`, allowing the runtime to poison the instance after `max_attempts` instead of replaying an empty snapshot or retrying forever.
-- Keeps malformed durable history out of orphan-message cleanup so its queue messages are not acknowledged before runtime poison/backoff handling.
+- Fixes an orchestration acknowledge that could commit after another worker had taken the instance over. The consumed messages stayed queued and were processed again, so one queue message or external event could run an activity twice (migration `0026`).
+- Fixes deadlocks between orchestration lock renewal and fetch, acknowledge or abandon, and stops renewal from reviving an expired lease or shortening a live one (migration `0026`).
+- Retries transient renewal errors, and finds leases by lock token through a new unique index instead of a table scan.
+- Adds a deadlock test suite that runs in every `cargo test`, and a TLA+ model of the lease procedures under worker clock skew (`docs/tla/orchestration-leases`).
 - See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
 > **Releases are published by Microsoft's internal OSS infrastructure.** See
 > [RELEASE_POLICY.md](RELEASE_POLICY.md) for details.
 
-## Previous Release (0.1.36)
+## Previous Release (0.1.37)
 
-- Fixes `fetch_orchestration_item` returning a lock lease that had already expired when connection-pool or instance-lock waits were longer than the lock timeout (migration `0025`). Every ack, including the poison ack, failed with `Invalid lock token`, so the message was retried for as long as the contention lasted.
-- Updates the provider and `pg-stress` companion crate to Duroxide 0.1.32, which fixes queue, signal and continue-as-new races and makes `Runtime::shutdown` stop every runtime task.
-- Runs the new upstream race-replay and continue-as-new provider validations against PostgreSQL.
+- Fails startup on catalog errors, inconsistent migration history, or missing, unexpected, or non-table Duroxide relations without deleting migration records or re-applying old SQL.
+- Reports malformed KV snapshots through `history_error`, allowing the runtime to poison the instance after `max_attempts` instead of replaying an empty snapshot or retrying forever.
+- Keeps malformed durable history out of orphan-message cleanup so its queue messages are not acknowledged before runtime poison/backoff handling.
 
 ## Support
 

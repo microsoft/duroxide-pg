@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.38] - 2026-10-26
+
 ### Fixed
 
 - **Orchestration lock renewal no longer deadlocks with fetch or with
@@ -31,7 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default `cargo test`. `tests/orchestration_lock_renewal_tests.rs` covers
   each change that can happen between renewal's token lookup and its update:
   time passing, lease expiry, a fetch takeover, acknowledge, abandon, and
-  another renewal, and checks the `lock_token` index.
+  another renewal, and checks the `lock_token` index. (#44, building on
+  #43 by @andrewkcchung)
 - **An orchestration acknowledge can no longer commit after another worker
   has taken the instance over, which processed messages twice (migration
   `0026`).** Acknowledge checked its lock token once, without a lock. A
@@ -51,7 +54,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   charged once when another worker fetches during the acknowledge.
   `docs/tla/orchestration-leases` contains a TLA+ model of fetch,
   acknowledge, renew and abandon under worker clock skew. Its TLC
-  configurations and expected results run with `./run.sh`.
+  configurations and expected results run with `./run.sh`. Fixes #29.
+  (#44)
+
+### Changed
+
+- **Upgrading applies migration `0026`.** It replaces
+  `renew_orchestration_item_lock` and `ack_orchestration_item` with
+  `CREATE OR REPLACE` (same signatures) and creates a unique index on
+  `instance_locks(lock_token)`. The index is built without `CONCURRENTLY`, so
+  it briefly blocks writes to `instance_locks`, which holds one row per
+  currently locked instance. There is no API change.
 
 ## [0.1.37] - 2026-10-21
 
