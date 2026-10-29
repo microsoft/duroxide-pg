@@ -131,6 +131,8 @@ Batches hold instance-row locks until their transaction ends and recheck
 execution eligibility after any lock wait. This serializes pruning with instance
 deletion/recreation and acknowledgement, protecting replacement instances and
 executions that become ineligible while the batch waits.
+Pruning and atomic deletion acquire their instance locks in ascending instance-ID
+order to avoid lock-order inversions during multi-instance operations.
 
 Use a maintenance connection with appropriate statement/lock timeouts. A failed
 call rolls back its entire batch. Applications that must progress past locked

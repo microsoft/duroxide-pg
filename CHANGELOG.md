@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows, allowing maintenance to make bounded progress without changing retention.
   Pruning serializes with instance deletion and execution updates, then rechecks
   eligibility to protect replacement instances.
+  Atomic deletion uses the same instance-ID lock order to prevent multi-instance
+  deadlocks with pruning.
 
 ## [0.1.38] - 2026-10-26
 

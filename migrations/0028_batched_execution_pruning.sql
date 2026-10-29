@@ -91,4 +91,102 @@ BEGIN
         END;
         $prune_batch$;
 $fmt$, v_schema_name);
+
+    -- Both procedures retain instance locks until commit, so they must acquire
+    -- them in the same order. The deletion body is otherwise unchanged from 0020.
+    EXECUTE format($fmt$
+        CREATE OR REPLACE FUNCTION %1$I.delete_instances_atomic(
+            p_instance_ids TEXT[],
+            p_force BOOLEAN
+        )
+        RETURNS TABLE(
+            instances_deleted BIGINT,
+            executions_deleted BIGINT,
+            events_deleted BIGINT,
+            queue_messages_deleted BIGINT
+        ) AS $delete_atomic$
+        DECLARE
+            v_instance_id TEXT;
+            v_orphan_id TEXT;
+            v_instances_deleted BIGINT := 0;
+            v_executions_deleted BIGINT := 0;
+            v_events_deleted BIGINT := 0;
+            v_queue_deleted BIGINT := 0;
+            v_count BIGINT;
+        BEGIN
+            -- Check for empty input
+            IF p_instance_ids IS NULL OR array_length(p_instance_ids, 1) IS NULL THEN
+                instances_deleted := 0;
+                executions_deleted := 0;
+                events_deleted := 0;
+                queue_messages_deleted := 0;
+                RETURN NEXT;
+                RETURN;
+            END IF;
+
+            -- Step 1: If not force, check all instances are terminal (single query, no loop)
+            IF NOT p_force THEN
+                SELECT i.instance_id INTO v_instance_id
+                FROM %1$I.instances i
+                JOIN %1$I.executions e ON i.instance_id = e.instance_id
+                  AND i.current_execution_id = e.execution_id
+                WHERE i.instance_id = ANY(p_instance_ids)
+                  AND e.status = 'Running'
+                LIMIT 1;
+
+                IF v_instance_id IS NOT NULL THEN
+                    RAISE EXCEPTION 'Instance %% is Running. Use force=true to delete.', v_instance_id;
+                END IF;
+            END IF;
+
+            -- Step 2: Lock parent rows to prevent concurrent child creation
+            PERFORM 1 FROM %1$I.instances
+            WHERE instance_id = ANY(p_instance_ids)
+            ORDER BY instance_id
+            FOR UPDATE;
+
+            -- Step 3: Check for orphans (children not in our delete list)
+            SELECT i.instance_id INTO v_orphan_id
+            FROM %1$I.instances i
+            WHERE i.parent_instance_id = ANY(p_instance_ids)
+              AND NOT (i.instance_id = ANY(p_instance_ids))
+            LIMIT 1;
+
+            IF v_orphan_id IS NOT NULL THEN
+                RAISE EXCEPTION 'Orphan detected: instance %% has parent in delete list but is not included', v_orphan_id;
+            END IF;
+
+            -- Step 4: Delete from all tables
+            DELETE FROM %1$I.history WHERE instance_id = ANY(p_instance_ids);
+            GET DIAGNOSTICS v_count = ROW_COUNT;
+            v_events_deleted := v_count;
+
+            DELETE FROM %1$I.executions WHERE instance_id = ANY(p_instance_ids);
+            GET DIAGNOSTICS v_count = ROW_COUNT;
+            v_executions_deleted := v_count;
+
+            DELETE FROM %1$I.orchestrator_queue WHERE instance_id = ANY(p_instance_ids);
+            GET DIAGNOSTICS v_count = ROW_COUNT;
+            v_queue_deleted := v_count;
+
+            DELETE FROM %1$I.worker_queue WHERE instance_id = ANY(p_instance_ids);
+            GET DIAGNOSTICS v_count = ROW_COUNT;
+            v_queue_deleted := v_queue_deleted + v_count;
+
+            DELETE FROM %1$I.instance_locks WHERE instance_id = ANY(p_instance_ids);
+            DELETE FROM %1$I.kv_delta WHERE instance_id = ANY(p_instance_ids);
+            DELETE FROM %1$I.kv_store WHERE instance_id = ANY(p_instance_ids);
+
+            DELETE FROM %1$I.instances WHERE instance_id = ANY(p_instance_ids);
+            GET DIAGNOSTICS v_count = ROW_COUNT;
+            v_instances_deleted := v_count;
+
+            instances_deleted := v_instances_deleted;
+            executions_deleted := v_executions_deleted;
+            events_deleted := v_events_deleted;
+            queue_messages_deleted := v_queue_deleted;
+            RETURN NEXT;
+        END;
+        $delete_atomic$ LANGUAGE plpgsql;
+$fmt$, v_schema_name);
 END $$;
