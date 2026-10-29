@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Migration `0028` adds the `prune_executions_batch` SQL API. It scans at most
   1,000 execution keys per call and returns a cursor even for protected or young
   rows, allowing maintenance to make bounded progress without changing retention.
+  Pruning serializes with instance deletion and execution updates, then rechecks
+  eligibility to protect replacement instances.
 
 ## [0.1.38] - 2026-10-26
 

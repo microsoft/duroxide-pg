@@ -42,7 +42,7 @@ BEGIN
             executions_deleted := 0;
             events_deleted := 0;
             FOR v_execution IN
-                SELECT e.instance_id, e.execution_id, e.status, e.completed_at
+                SELECT e.instance_id, e.execution_id
                 FROM %1$I.executions e
                 WHERE (e.instance_id, e.execution_id) >
                       (p_after_instance_id, p_after_execution_id)
@@ -52,28 +52,40 @@ BEGIN
                 last_instance_id := v_execution.instance_id;
                 last_execution_id := v_execution.execution_id;
                 executions_scanned := executions_scanned + 1;
-                IF v_execution.status <> 'Running'
-                   AND v_execution.completed_at < to_timestamp(p_completed_before_ms / 1000.0) THEN
-                    SELECT i.current_execution_id INTO v_current_execution_id
-                    FROM %1$I.instances i
-                    WHERE i.instance_id = v_execution.instance_id;
+                -- Lock before touching history, as deletion does. The page may
+                -- describe an earlier lifetime of the same instance/execution key.
+                SELECT i.current_execution_id INTO v_current_execution_id
+                FROM %1$I.instances i
+                WHERE i.instance_id = v_execution.instance_id
+                FOR NO KEY UPDATE;
 
-                    IF v_execution.execution_id < v_current_execution_id THEN
-                        -- Exact-key deletes avoid plans that scan the entire history
-                        -- table when joining a batch to its many history rows.
-                        DELETE FROM %1$I.history h
-                        WHERE h.instance_id = v_execution.instance_id
-                          AND h.execution_id = v_execution.execution_id;
-                        GET DIAGNOSTICS v_count = ROW_COUNT;
-                        events_deleted := events_deleted + v_count;
-
-                        DELETE FROM %1$I.executions e
-                        WHERE e.instance_id = v_execution.instance_id
-                          AND e.execution_id = v_execution.execution_id;
-                        GET DIAGNOSTICS v_count = ROW_COUNT;
-                        executions_deleted := executions_deleted + v_count;
-                    END IF;
+                IF NOT FOUND OR v_execution.execution_id >= v_current_execution_id THEN
+                    CONTINUE;
                 END IF;
+
+                -- Eligibility may have changed while waiting for the instance lock.
+                PERFORM 1 FROM %1$I.executions e
+                WHERE e.instance_id = v_execution.instance_id
+                  AND e.execution_id = v_execution.execution_id
+                  AND e.status <> 'Running'
+                  AND e.completed_at < to_timestamp(p_completed_before_ms / 1000.0);
+                IF NOT FOUND THEN
+                    CONTINUE;
+                END IF;
+
+                -- Exact-key deletes avoid plans that scan the entire history
+                -- table when joining a batch to its many history rows.
+                DELETE FROM %1$I.history h
+                WHERE h.instance_id = v_execution.instance_id
+                  AND h.execution_id = v_execution.execution_id;
+                GET DIAGNOSTICS v_count = ROW_COUNT;
+                events_deleted := events_deleted + v_count;
+
+                DELETE FROM %1$I.executions e
+                WHERE e.instance_id = v_execution.instance_id
+                  AND e.execution_id = v_execution.execution_id;
+                GET DIAGNOSTICS v_count = ROW_COUNT;
+                executions_deleted := executions_deleted + v_count;
             END LOOP;
             RETURN NEXT;
         END;

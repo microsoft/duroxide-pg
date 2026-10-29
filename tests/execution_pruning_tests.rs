@@ -154,6 +154,75 @@ async fn batch_pruning_bounds_scanned_keys_and_rolls_back_atomically() {
 }
 
 #[tokio::test]
+async fn batch_pruning_independently_protects_ineligible_executions() {
+    let (provider, schema) = provider().await;
+    sqlx::raw_sql(&format!(
+        "INSERT INTO {schema}.instances
+             (instance_id, orchestration_name, current_execution_id, created_at, updated_at)
+         VALUES ('eligibility', 'test', 6, to_timestamp(0), to_timestamp(0));
+         INSERT INTO {schema}.executions
+             (instance_id, execution_id, status, started_at, completed_at)
+         VALUES ('eligibility', 1, 'Running', to_timestamp(0), to_timestamp(1)),
+                ('eligibility', 2, 'ContinuedAsNew', to_timestamp(0), NULL),
+                ('eligibility', 3, 'Completed', to_timestamp(0), to_timestamp(2)),
+                ('eligibility', 4, 'Failed', to_timestamp(0), to_timestamp(3)),
+                ('eligibility', 5, 'ContinuedAsNew', to_timestamp(0), to_timestamp(1)),
+                ('eligibility', 6, 'Completed', to_timestamp(0), to_timestamp(1)),
+                ('eligibility', 7, 'Completed', to_timestamp(0), to_timestamp(1));
+         INSERT INTO {schema}.history
+             (instance_id, execution_id, event_id, event_type, event_data, created_at)
+         SELECT 'eligibility', n, 1, 'Event', '{{}}', to_timestamp(0)
+         FROM generate_series(1, 7) n;"
+    ))
+    .execute(provider.pool())
+    .await
+    .unwrap();
+    let protected_sql = format!(
+        "SELECT e.execution_id, to_jsonb(e), to_jsonb(h)
+         FROM {schema}.executions e JOIN {schema}.history h
+           USING (instance_id, execution_id)
+         WHERE e.execution_id <> 5 ORDER BY e.execution_id, h.event_id"
+    );
+    let before: Vec<(i64, serde_json::Value, serde_json::Value)> = sqlx::query_as(&protected_sql)
+        .fetch_all(provider.pool())
+        .await
+        .unwrap();
+    assert_eq!(before.len(), 6);
+    let sql = format!("SELECT * FROM {schema}.prune_executions_batch($1, $2, 2000, 1)");
+    let mut cursor = (String::new(), 0i64);
+    for expected_id in 1..=7 {
+        let result: BatchResult = sqlx::query_as(&sql)
+            .bind(&cursor.0)
+            .bind(cursor.1)
+            .fetch_one(provider.pool())
+            .await
+            .unwrap();
+        let deleted = if expected_id == 5 { 1 } else { 0 };
+        assert_eq!(
+            result,
+            (
+                Some("eligibility".into()),
+                Some(expected_id),
+                1,
+                deleted,
+                deleted
+            ),
+            "only the eligible historical execution may be pruned"
+        );
+        cursor = (result.0.unwrap(), result.1.unwrap());
+    }
+    let after: Vec<(i64, serde_json::Value, serde_json::Value)> = sqlx::query_as(&protected_sql)
+        .fetch_all(provider.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "protected executions and histories must not change"
+    );
+    cleanup(&provider, &schema).await;
+}
+
+#[tokio::test]
 async fn age_filtered_bulk_delete_preserves_queued_continuation() {
     let (provider, schema) = provider().await;
     let client = Client::new(provider.clone());

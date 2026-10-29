@@ -127,6 +127,11 @@ completion times are preserved, but still advance the cursor. Missing instance
 metadata is not permission to delete history. No instance, queue, lock, or KV
 records are removed. The number of history events per execution is not capped.
 
+Batches hold instance-row locks until their transaction ends and recheck
+execution eligibility after any lock wait. This serializes pruning with instance
+deletion/recreation and acknowledgement, protecting replacement instances and
+executions that become ineligible while the batch waits.
+
 Use a maintenance connection with appropriate statement/lock timeouts. A failed
 call rolls back its entire batch. Applications that must progress past locked
 pages may pre-read the bounded page's last key and retry that page on a later
