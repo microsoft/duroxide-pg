@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 // Touch this module when changing migrations so incremental builds re-embed them.
-// Latest change: 0028, ordered multi-instance locking.
+// Latest change: 0028, shared pruning locks and complete cleanup.
 static MIGRATIONS: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations");
 
 const BASE_TABLES: &[&str] = &[

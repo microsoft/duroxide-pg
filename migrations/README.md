@@ -127,10 +127,10 @@ completion times are preserved, but still advance the cursor. Missing instance
 metadata is not permission to delete history. No instance, queue, lock, or KV
 records are removed. The number of history events per execution is not capped.
 
-Batches hold instance-row locks until their transaction ends and recheck
-execution eligibility after any lock wait. This serializes pruning with instance
-deletion/recreation and acknowledgement, protecting replacement instances and
-executions that become ineligible while the batch waits.
+Both pruning APIs hold instance-row locks until their transactions end. They
+check execution eligibility after acquiring the lock, serializing with instance
+deletion/recreation and acknowledgement. This protects replacement instances and
+executions that become ineligible while a call waits.
 Pruning and atomic deletion acquire their instance locks in ascending instance-ID
 order to avoid lock-order inversions during multi-instance operations.
 
@@ -140,6 +140,9 @@ pages may pre-read the bounded page's last key and retry that page on a later
 scan; a successful call's cursor remains authoritative if concurrent work changes
 the page. Keep the original `prune_executions` API for callers that intentionally
 request a whole-instance historical cleanup.
+
+Public-schema cleanup also removes the batch-pruning function, while leaving the
+`public` schema itself intact.
 
 ## Migration Execution Context
 

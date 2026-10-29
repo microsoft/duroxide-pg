@@ -8,7 +8,16 @@ use sqlx::{PgConnection, PgPool};
 
 type BatchResult = (Option<String>, Option<i64>, i64, i64, i64);
 
-async fn seed_instances(schema: &str, instance_ids: &[&str]) -> PostgresProvider {
+const SEQUENTIAL_SCANS_ONLY: &str = "SET LOCAL enable_seqscan = on;
+    SET LOCAL enable_indexscan = off;
+    SET LOCAL enable_indexonlyscan = off;
+    SET LOCAL enable_bitmapscan = off;";
+
+async fn seed_instances(
+    schema: &str,
+    instance_ids: &[&str],
+    current_execution_id: i64,
+) -> PostgresProvider {
     let provider = PostgresProvider::new_with_schema(&database_url(), Some(schema))
         .await
         .expect("failed to create provider");
@@ -16,9 +25,10 @@ async fn seed_instances(schema: &str, instance_ids: &[&str]) -> PostgresProvider
         sqlx::query(&format!(
             "INSERT INTO {schema}.instances
                  (instance_id, orchestration_name, current_execution_id, created_at, updated_at)
-             VALUES ($1, 'test', 2, to_timestamp(0), to_timestamp(0))"
+             VALUES ($1, 'test', $2, to_timestamp(0), to_timestamp(0))"
         ))
         .bind(*instance_id)
+        .bind(current_execution_id)
         .execute(provider.pool())
         .await
         .expect("failed to seed instance");
@@ -28,9 +38,11 @@ async fn seed_instances(schema: &str, instance_ids: &[&str]) -> PostgresProvider
         format!(
             "INSERT INTO {schema}.executions
              (instance_id, execution_id, status, started_at, completed_at)
-         SELECT i.instance_id, n, CASE n WHEN 1 THEN 'ContinuedAsNew' ELSE 'Running' END,
-                to_timestamp(n - 1), CASE n WHEN 1 THEN to_timestamp(1) END
-         FROM {schema}.instances i CROSS JOIN generate_series(1, 2) n;
+         SELECT i.instance_id, n,
+                CASE WHEN n < i.current_execution_id THEN 'ContinuedAsNew' ELSE 'Running' END,
+                to_timestamp(n - 1),
+                CASE WHEN n < i.current_execution_id THEN to_timestamp(1) END
+         FROM {schema}.instances i CROSS JOIN generate_series(1, i.current_execution_id) n;
          INSERT INTO {schema}.history
              (instance_id, execution_id, event_id, event_type, event_data, created_at)
          SELECT instance_id, execution_id, 1, 'Event', 'original', to_timestamp(0)
@@ -72,10 +84,36 @@ async fn prune_batch(pool: PgPool, schema: String) -> Result<BatchResult, sqlx::
     Ok(result)
 }
 
+async fn pause_first_history_delete(
+    pool: &PgPool,
+    schema: &str,
+    instance: &str,
+) -> (i64, sqlx::Transaction<'static, sqlx::Postgres>) {
+    let ready_key = advisory_key();
+    let gate_key = advisory_key();
+    let mut gate = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(gate_key)
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    install_pause_trigger_when(
+        pool,
+        schema,
+        "history",
+        "DELETE",
+        &format!("OLD.instance_id = $instance${instance}$instance$ AND OLD.execution_id = 1"),
+        ready_key,
+        gate_key,
+    )
+    .await;
+    (ready_key, gate)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn batch_pruning_preserves_a_deleted_and_recreated_instance() {
     with_schema(|schema| async move {
-        let provider = seed_instances(&schema, &["pruning-race"]).await;
+        let provider = seed_instances(&schema, &["pruning-race"], 2).await;
         let mut replacement = provider.pool().begin().await.unwrap();
         let deleted: (i64, i64, i64, i64) = sqlx::query_as(&format!(
             "SELECT * FROM {schema}.delete_instances_atomic(ARRAY['pruning-race'], TRUE)"
@@ -127,7 +165,7 @@ async fn batch_pruning_preserves_a_deleted_and_recreated_instance() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn batch_pruning_rechecks_eligibility_after_an_instance_lock_wait() {
     with_schema(|schema| async move {
-        let provider = seed_instances(&schema, &["pruning-race"]).await;
+        let provider = seed_instances(&schema, &["pruning-race"], 2).await;
         let mut update = provider.pool().begin().await.unwrap();
         sqlx::Executor::execute(
             &mut *update,
@@ -167,25 +205,8 @@ async fn batch_pruning_rechecks_eligibility_after_an_instance_lock_wait() {
 async fn batch_pruning_and_multi_instance_deletion_lock_in_the_same_order() {
     with_schema(|schema| async move {
         // Heap order deliberately opposes the batch's instance-ID order.
-        let provider = seed_instances(&schema, &["b", "a"]).await;
-        let ready_key = advisory_key();
-        let gate_key = advisory_key();
-        let mut gate = provider.pool().begin().await.unwrap();
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(gate_key)
-            .execute(&mut *gate)
-            .await
-            .unwrap();
-        install_pause_trigger_when(
-            provider.pool(),
-            &schema,
-            "history",
-            "DELETE",
-            "OLD.instance_id = 'a' AND OLD.execution_id = 1",
-            ready_key,
-            gate_key,
-        )
-        .await;
+        let provider = seed_instances(&schema, &["b", "a"], 2).await;
+        let (ready_key, gate) = pause_first_history_delete(provider.pool(), &schema, "a").await;
 
         let prune = tokio::spawn(prune_batch(provider.pool().clone(), schema.clone()));
         wait_for_advisory_holder(provider.pool(), ready_key).await;
@@ -195,14 +216,7 @@ async fn batch_pruning_and_multi_instance_deletion_lock_in_the_same_order() {
         let delete = tokio::spawn(async move {
             let mut tx = delete_pool.begin().await?;
             // Without ORDER BY, this visits b before waiting for the batch's a lock.
-            sqlx::Executor::execute(
-                &mut *tx,
-                "SET LOCAL enable_seqscan = on;
-                 SET LOCAL enable_indexscan = off;
-                 SET LOCAL enable_indexonlyscan = off;
-                 SET LOCAL enable_bitmapscan = off;",
-            )
-            .await?;
+            sqlx::Executor::execute(&mut *tx, SEQUENTIAL_SCANS_ONLY).await?;
             let result: (i64, i64, i64, i64) = sqlx::query_as(&format!(
                 "SELECT * FROM {delete_schema}.delete_instances_atomic(ARRAY['b', 'a'], TRUE)"
             ))
@@ -231,6 +245,70 @@ async fn batch_pruning_and_multi_instance_deletion_lock_in_the_same_order() {
             durable_state(&mut connection, &schema).await,
             serde_json::json!({"instances": null, "executions": null, "history": null})
         );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_and_whole_instance_pruning_share_the_instance_lock() {
+    with_schema(|schema| async move {
+        let provider = seed_instances(&schema, &["pruning-race"], 3).await;
+        // Force the old whole-instance pruner to visit generation 2 before 1.
+        sqlx::Executor::execute(
+            provider.pool(),
+            format!(
+                "CREATE INDEX reverse_execution_order ON {schema}.executions (execution_id DESC);
+                 CLUSTER {schema}.executions USING reverse_execution_order;"
+            )
+            .as_str(),
+        )
+        .await
+        .expect("failed to arrange reverse generation heap order");
+        let mut connection = provider.pool().acquire().await.unwrap();
+        let mut expected = durable_state(&mut connection, &schema).await;
+        for table in ["executions", "history"] {
+            expected[table]
+                .as_array_mut()
+                .expect("seeded durable rows must exist")
+                .retain(|row| row["execution_id"] == 3);
+        }
+        drop(connection);
+
+        let (ready_key, gate) =
+            pause_first_history_delete(provider.pool(), &schema, "pruning-race").await;
+        let batch = tokio::spawn(prune_batch(provider.pool().clone(), schema.clone()));
+        wait_for_advisory_holder(provider.pool(), ready_key).await;
+
+        let whole_pool = provider.pool().clone();
+        let whole_schema = schema.clone();
+        let whole = tokio::spawn(async move {
+            let mut tx = whole_pool.begin().await?;
+            sqlx::Executor::execute(&mut *tx, SEQUENTIAL_SCANS_ONLY).await?;
+            let result: (i64, i64, i64) = sqlx::query_as(&format!(
+                "SELECT * FROM {whole_schema}.prune_executions('pruning-race', NULL, 2000)"
+            ))
+            .fetch_one(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            Ok::<_, sqlx::Error>(result)
+        });
+        wait_for_call_to_wait(provider.pool(), &schema, "prune_executions", false).await;
+
+        timed("pruning gate release", gate.commit()).await.unwrap();
+        let batch_result = timed("batch pruning", batch).await.unwrap();
+        let whole_result = timed("whole-instance pruning", whole).await.unwrap();
+        assert_not_deadlock_victim("batch pruning", &batch_result);
+        assert_not_deadlock_victim("whole-instance pruning", &whole_result);
+        assert_eq!(
+            batch_result.expect("batch pruning must succeed"),
+            (Some("pruning-race".into()), Some(3), 3, 2, 2)
+        );
+        assert_eq!(
+            whole_result.expect("whole-instance pruning must succeed"),
+            (1, 0, 0)
+        );
+        let mut connection = provider.pool().acquire().await.unwrap();
+        assert_eq!(durable_state(&mut connection, &schema).await, expected);
     })
     .await;
 }
