@@ -90,6 +90,53 @@ CREATE INDEX IF NOT EXISTS idx_worker_processed ON worker_queue(processed_at);
 
 Migrations are automatically applied when creating a `PostgresProvider`. Each test schema gets its own migration history, so you can test migrations in isolation.
 
+The `embedded_migration_versions_are_unique_and_increasing` unit test checks
+that bundled SQL files have distinct, increasing version numbers. Gaps are
+allowed; two migrations must never share a version.
+
+## Worker Queue Progress (Migration 0029)
+
+Migration `0029` orders eligible worker items by visibility time, then queue ID.
+Deferred work moves behind items that were already ready, even when its delay
+expires before the backlog drains. Session ownership, tag filtering, lock
+handling, and attempt accounting are unchanged.
+
+The migration adds `idx_worker_ready_order` on `worker_queue(visible_at, id)`.
+`CREATE INDEX IF NOT EXISTS` takes a `SHARE` lock on `worker_queue`, even when
+the index already exists, and holds it **until the migration transaction
+commits**, not just until index creation finishes. This blocks worker fetch,
+acknowledge, abandon, and lock renewal, as well as orchestration acknowledgements
+that write worker rows. The migration sets no `lock_timeout`, so acquiring the
+lock can also wait indefinitely. Plan a maintenance window or set an appropriate
+deployment-session `lock_timeout` through PostgreSQL connection options.
+
+For a busy or large queue, pre-build the index **before starting the migration**,
+outside any transaction, in each target schema. Replace `duroxide` below with
+the provider's schema:
+
+```sql
+CREATE INDEX CONCURRENTLY idx_worker_ready_order
+    ON duroxide.worker_queue (visible_at, id);
+
+SELECT i.indisvalid, pg_get_indexdef(i.indexrelid)
+FROM pg_catalog.pg_index i
+WHERE i.indexrelid = 'duroxide.idx_worker_ready_order'::regclass;
+```
+
+Wait for the build to finish and verify that `indisvalid` is true and the
+definition matches the index above. The migration's `CREATE INDEX IF NOT
+EXISTS` will then skip the expensive build, but still take the `SHARE` lock
+described above. A failed or cancelled concurrent build can leave an invalid
+index with the same name; `IF NOT EXISTS` does not repair it, and the migration
+rejects it without recording success. Inspect such an index, then drop it with
+`DROP INDEX CONCURRENTLY duroxide.idx_worker_ready_order` outside a transaction
+before retrying the concurrent build.
+
+The `fetch_work_item` signature is unchanged, so already-running older
+providers can keep using it. Older binaries cannot restart against the upgraded
+schema because they reject unknown migration versions. Coordinate migration
+and provider rollout accordingly.
+
 ## Migration Execution Context
 
 - Migrations run inside transactions

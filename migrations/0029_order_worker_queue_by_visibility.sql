@@ -12,6 +12,18 @@ BEGIN
         v_schema_name
     );
 
+    -- A failed concurrent prebuild leaves an invalid index that IF NOT EXISTS skips.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_index i
+        WHERE i.indexrelid = format('%I.idx_worker_ready_order', v_schema_name)::regclass
+          AND i.indrelid = format('%I.worker_queue', v_schema_name)::regclass
+          AND i.indisvalid
+    ) THEN
+        RAISE EXCEPTION
+            'Index %.idx_worker_ready_order is invalid or does not index worker_queue; repair it before retrying migration 0029',
+            v_schema_name;
+    END IF;
+
     EXECUTE format($ddl$
         CREATE OR REPLACE FUNCTION %1$I.fetch_work_item(
             p_now_ms BIGINT,
