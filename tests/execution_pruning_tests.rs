@@ -49,15 +49,28 @@ async fn batch_pruning_bounds_scanned_keys_and_rolls_back_atomically() {
     let sql = format!("SELECT * FROM {schema}.prune_executions_batch($1,$2,$3,$4)");
     let mut hostile = provider.pool().begin().await.unwrap();
     sqlx::raw_sql(&format!(
-        "CREATE FUNCTION {schema}.to_timestamp(double precision) RETURNS timestamptz
+        "UPDATE {schema}.instances SET current_execution_id=2 WHERE instance_id='a0001';
+         INSERT INTO {schema}.executions(instance_id,execution_id,status,started_at)
+         VALUES ('a0001',2,'Running',to_timestamp(1));
+         CREATE FUNCTION {schema}.to_timestamp(double precision) RETURNS timestamptz
              LANGUAGE plpgsql AS $fn$ BEGIN RAISE EXCEPTION 'pruning function trap'; END $fn$;
          SET LOCAL search_path={schema},pg_catalog;
          CREATE TEMP TABLE type_anchor(id int);
-         CREATE DOMAIN pg_temp.text AS pg_catalog.text CHECK (false);"
+         CREATE DOMAIN pg_temp.text AS pg_catalog.text CHECK (false);
+         SAVEPOINT trap_probe;"
     ))
     .execute(&mut *hostile)
     .await
     .unwrap();
+    let error = sqlx::query("SELECT to_timestamp(0::double precision)")
+        .execute(&mut *hostile)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("pruning function trap"));
+    sqlx::query("ROLLBACK TO SAVEPOINT trap_probe")
+        .execute(&mut *hostile)
+        .await
+        .unwrap();
     let first: BatchResult = sqlx::query_as(&sql)
         .bind("")
         .bind(0i64)
@@ -66,7 +79,7 @@ async fn batch_pruning_bounds_scanned_keys_and_rolls_back_atomically() {
         .fetch_one(&mut *hostile)
         .await
         .unwrap();
-    assert_eq!(first, (Some("a1000".into()), Some(1), 1000, 0, 0));
+    assert_eq!(first, (Some("a0999".into()), Some(1), 1000, 1, 1));
     hostile.rollback().await.unwrap();
 
     sqlx::raw_sql(&format!(

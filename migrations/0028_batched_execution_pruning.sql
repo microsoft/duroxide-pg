@@ -42,8 +42,12 @@ BEGIN
             executions_deleted := 0;
             events_deleted := 0;
             FOR v_execution IN
-                SELECT e.instance_id, e.execution_id
+                SELECT e.instance_id, e.execution_id,
+                       e.execution_id < i.current_execution_id
+                       AND e.status <> 'Running'
+                       AND e.completed_at < to_timestamp(p_completed_before_ms / 1000.0) AS eligible
                 FROM %1$I.executions e
+                LEFT JOIN %1$I.instances i ON i.instance_id = e.instance_id
                 WHERE (e.instance_id, e.execution_id) >
                       (p_after_instance_id, p_after_execution_id)
                 ORDER BY e.instance_id, e.execution_id
@@ -52,6 +56,10 @@ BEGIN
                 last_instance_id := v_execution.instance_id;
                 last_execution_id := v_execution.execution_id;
                 executions_scanned := executions_scanned + 1;
+                IF v_execution.eligible IS NOT TRUE THEN
+                    CONTINUE;
+                END IF;
+
                 -- Lock before touching history, as deletion does. The page may
                 -- describe an earlier lifetime of the same instance/execution key.
                 SELECT i.current_execution_id INTO v_current_execution_id

@@ -111,6 +111,76 @@ async fn pause_first_history_delete(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_pruning_does_not_lock_ineligible_instances() {
+    with_schema(|schema| async move {
+        let provider = seed_instances(
+            &schema,
+            &[
+                "a-current",
+                "b-future",
+                "c-running",
+                "d-null",
+                "e-cutoff",
+                "f-young",
+                "z-eligible",
+            ],
+            2,
+        )
+        .await;
+        sqlx::raw_sql(&format!(
+            "UPDATE {schema}.instances SET current_execution_id=1 WHERE instance_id='a-current';
+             UPDATE {schema}.instances SET current_execution_id=0 WHERE instance_id='b-future';
+             UPDATE {schema}.executions SET status='Running' WHERE instance_id='c-running';
+             UPDATE {schema}.executions SET completed_at=NULL WHERE instance_id='d-null';
+             UPDATE {schema}.executions SET completed_at=to_timestamp(2) WHERE instance_id='e-cutoff';
+             UPDATE {schema}.executions SET completed_at=to_timestamp(3) WHERE instance_id='f-young';"
+        ))
+        .execute(provider.pool())
+        .await
+        .unwrap();
+        let mut locked = provider.pool().begin().await.unwrap();
+        let mut expected = durable_state(&mut locked, &schema).await;
+        for table in ["executions", "history"] {
+            expected[table]
+                .as_array_mut()
+                .expect("seeded durable rows must exist")
+                .retain(|row| row["instance_id"] != "z-eligible" || row["execution_id"] != 1);
+        }
+        sqlx::query(&format!(
+            "SELECT 1 FROM {schema}.instances WHERE instance_id <> 'z-eligible'
+             ORDER BY instance_id FOR NO KEY UPDATE"
+        ))
+        .execute(&mut *locked)
+        .await
+        .unwrap();
+
+        let mut prune = provider.pool().begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '1s'")
+            .execute(&mut *prune)
+            .await
+            .unwrap();
+        let result: BatchResult = timed(
+            "pruning past locked ineligible instances",
+            sqlx::query_as(&format!(
+                "SELECT * FROM {schema}.prune_executions_batch('', 0, 2000, 1000)"
+            ))
+            .fetch_one(&mut *prune),
+        )
+        .await
+        .expect("protected instances must not require row locks");
+        assert_eq!(result, (Some("z-eligible".into()), Some(2), 14, 1, 1));
+        prune.commit().await.unwrap();
+        assert_eq!(
+            durable_state(&mut locked, &schema).await,
+            expected,
+            "only the eligible historical execution and its history may change"
+        );
+        locked.rollback().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn batch_pruning_preserves_a_deleted_and_recreated_instance() {
     with_schema(|schema| async move {
         let provider = seed_instances(&schema, &["pruning-race"], 2).await;

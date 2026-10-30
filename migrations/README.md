@@ -127,8 +127,10 @@ completion times are preserved, but still advance the cursor. Missing instance
 metadata is not permission to delete history. No instance, queue, lock, or KV
 records are removed. The number of history events per execution is not capped.
 
-Both pruning APIs hold instance-row locks until their transactions end. They
-check execution eligibility after acquiring the lock, serializing with instance
+Batched pruning checks eligibility without locking first, so an instance with no
+deletion candidates is not locked. Protected rows still count toward the page.
+Both pruning APIs hold acquired instance-row locks until their transactions end.
+They check execution eligibility after acquiring the lock, serializing with instance
 deletion/recreation and acknowledgement. This protects replacement instances and
 executions that become ineligible while a call waits.
 Pruning and atomic deletion acquire their instance locks in ascending instance-ID
