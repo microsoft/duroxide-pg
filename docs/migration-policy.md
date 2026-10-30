@@ -84,9 +84,16 @@ changing a process's configuration alone is not sufficient.
 
 Notification-emitting commits also participate in PostgreSQL's server-wide
 notification-writer serialization. WAL or synchronous-replication delays can
-block other notification senders, including in different databases. Evaluate
-the loaded-write cost before opting a schema in; activation affects all of
-its producers, not only processes using a listener.
+block other notification senders, including in different databases. Activation
+adds this cost to every successful queue claim, lease-changing orchestration
+and activity renewal, and session-lease write, not just enqueue and acknowledgment.
+A normal activity therefore has three notifying commits and an orchestration
+turn two; renewal transactions also notify. Empty fetches do not.
+Evaluate the loaded-write and renewal costs before opting a schema in;
+activation affects short-polling callers too. Disabling a process's listener
+does not remove the commit-lock cost of the schema's triggers. See the
+[synchronous-standby benchmark](../README.md#reproducing-long-poll-performance)
+for a higher-concurrency measurement that records notification-lock wait time.
 
 This is an additive migration within the `duroxide-pg` schema lineage, not a
 conversion of `duroxide-pg-opt` state. Older binaries still reject schemas with

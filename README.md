@@ -248,9 +248,17 @@ not opted in retain their existing transaction behavior.
 PostgreSQL serializes transactions that emit notifications through a
 server-wide lock held until commit completes. Slow WAL flushes or synchronous
 replication waits can therefore delay other notification writers, even in
-other schemas or databases on that server. Benchmark concurrent writers with
-representative commit latency before activating notifications; idle-query
-savings alone do not establish loaded throughput.
+other schemas or databases on that server. This cost includes **every successful
+activity and orchestration claim**, renewals that change their lease deadlines,
+and session-lease writes. Empty fetches do not notify. A normal completed
+activity has three notifying commits (enqueue, claim, completion acknowledgment);
+an orchestration turn has two (claim and acknowledgment). Each lease-renewal
+transaction also joins this serialization when it emits a hint. Multiple hints
+in one transaction still acquire the commit lock only once.
+
+These are schema-wide costs, including short-polling callers of an activated
+schema. Benchmark concurrent writers with representative commit latency before
+activation; idle-query savings alone do not establish loaded throughput.
 
 Detected connection failures reconnect automatically, but silent network
 partitions are not actively probed. Until the transport reports a failure,
@@ -279,6 +287,9 @@ DUROXIDE_PG_POOL_MAX=10 cargo nextest run --release --test long_poll_tests \
   -E 'test(workflow_latency_and_throughput_with_long_polling)'
 ```
 
+Use otherwise idle, controlled hosts for comparisons. Concurrent workloads can
+invalidate both throughput comparisons and wait-time measurements.
+
 The workflow driver uses two orchestration slots, two worker slots, a 100 ms
 minimum poll interval, and a 30 s long-poll timeout. It measures 20 sparse
 one-activity workflows with a 200 ms idle gap, then 20 concurrent clients running
@@ -288,12 +299,52 @@ is excluded. Latency includes enqueue and the client's completion-status polling
 throughput includes draining in-flight workflows after submissions stop.
 
 Each `BENCH` JSON line records the mode, pool limit, concurrency, duration,
-PostgreSQL version, and commit settings (`fsync`, `full_page_writes`,
-`synchronous_commit`, and `synchronous_standby_names`). Keep those settings and
-the source revision alongside results; the driver does not relax durability.
+PostgreSQL version, commit settings (`fsync`, `full_page_writes`,
+`synchronous_commit`, and `synchronous_standby_names`), and replication state.
+Loaded runs sample notification-commit lock waits and `SyncRep` waits every
+10 ms. The reported backend-seconds are estimates integrated across the
+provider's connections, not individual-query latency measurements, and can
+exceed wall-clock time. The notification measurement uses PostgreSQL's shared
+`pg_database` object-0 heavyweight lock, not the `NotifyQueue` LWLock.
+Keep the settings and source revision alongside results; the driver does not
+relax durability.
 The separate `idle_query_load_is_reduced_with_long_polling` benchmark requires
-`pg_stat_statements` and measures 65 seconds per mode. The `pg-stress` binary
-continues to use short polling.
+`pg_stat_statements` and measures 65 seconds per mode. Run it alone in an
+otherwise idle disposable database: it counts database-wide top-level statements
+except its statistics queries, including timer-scan transaction control.
+The `pg-stress` binary continues to use short polling.
+
+For commit-contention measurements, use a disposable primary with a physical
+synchronous standby. The higher-concurrency profile uses 16 orchestration
+slots, 16 worker slots, 64 clients, and a warmed pool; it also measures
+concurrent orchestration, activity, and session renewals with 60-second leases.
+Both workflow and renewal runs use three 10-second repetitions per mode.
+The renewal workload deliberately saturates renewal calls rather than using
+the runtime's normal renewal intervals.
+
+For a reproducible 10 ms apply-latency experiment, configure the standby's
+connection with `application_name=pr41_bench_standby` and set
+`recovery_min_apply_delay = '10ms'` there. On the primary, keep `fsync` and
+`full_page_writes` enabled and use:
+
+```conf
+synchronous_standby_names = 'FIRST 1 (pr41_bench_standby)'
+synchronous_commit = 'remote_apply'
+```
+
+Once that standby is streaming, run against the primary:
+
+```sh
+DUROXIDE_PG_POOL_MAX=100 cargo nextest run --release --test long_poll_tests \
+  --run-ignored only --nocapture \
+  -E 'test(notification_contention_with_synchronous_standby)'
+```
+
+The test rejects missing synchronous replication and insufficient pool capacity.
+It requires observed notification and replication waits in the enabled runs;
+disabled-schema controls must have no notification-lock waits. This experiment
+models a delayed synchronous apply acknowledgment, not a particular cloud
+service's replication topology.
 
 ## Features
 

@@ -48,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error context.
 - Add a reproducible sparse/loaded workflow benchmark alongside the idle-query
   benchmark, recording concurrency, duration, pool size, and commit settings.
+- Add a synchronous-standby contention profile with 16 orchestration and
+  16 worker slots, 64 clients, and concurrent lease-renewal measurements.
+  Benchmarks record sampled notification-commit and replication wait time;
+  documentation makes the per-claim and per-renewal notification costs explicit.
 
 ## [0.1.38] - 2026-10-26
 

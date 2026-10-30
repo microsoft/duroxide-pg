@@ -1869,15 +1869,185 @@ async fn two_phase_commit_is_preserved_until_explicit_notification_activation() 
     fixture.cleanup().await;
 }
 
+const COMMIT_WAIT_SAMPLE_INTERVAL: Duration = Duration::from_millis(10);
+
+#[derive(Default, serde::Serialize)]
+struct CommitWaits {
+    samples: u64,
+    elapsed_seconds: f64,
+    notification_lock_backend_seconds: f64,
+    synchronous_replication_backend_seconds: f64,
+    max_notification_waiters: i64,
+    max_synchronous_replication_waiters: i64,
+}
+
+async fn start_commit_wait_sampling(
+    fixture: &Fixture,
+) -> (tokio::sync::oneshot::Sender<()>, JoinHandle<CommitWaits>) {
+    let application: String = sqlx::query_scalar("SELECT current_setting('application_name')")
+        .fetch_one(fixture.provider.pool())
+        .await
+        .unwrap();
+    let control = fixture.control.clone();
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let start = Instant::now();
+        let mut previous = start;
+        let mut totals = CommitWaits::default();
+        let mut ticks = tokio::time::interval(COMMIT_WAIT_SAMPLE_INTERVAL);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = &mut stopped => break,
+                _ = ticks.tick() => {
+                    // PreCommit_Notify serializes commits on the shared pg_database/0
+                    // heavyweight object lock, not the short-lived NotifyQueue LWLock.
+                    let (notify, replication): (i64, i64) = sqlx::query_as(
+                        "WITH notification_waiters AS MATERIALIZED (
+                             SELECT DISTINCT l.pid FROM pg_locks l
+                             WHERE NOT l.granted AND l.locktype = 'object'
+                               AND l.classid = 'pg_catalog.pg_database'::regclass
+                               AND l.objid = 0 AND l.objsubid = 0 AND l.mode = 'AccessExclusiveLock')
+                         SELECT count(*) FILTER (WHERE n.pid IS NOT NULL),
+                         count(*) FILTER (WHERE a.wait_event = 'SyncRep')
+                         FROM pg_stat_activity a
+                         LEFT JOIN notification_waiters n ON n.pid = a.pid
+                         WHERE a.datname = current_database() AND a.application_name = $1
+                           AND a.backend_type = 'client backend'",
+                    ).bind(&application).fetch_one(&control).await.unwrap();
+                    let now = Instant::now();
+                    let elapsed = now.duration_since(previous).as_secs_f64();
+                    totals.samples += 1;
+                    totals.notification_lock_backend_seconds += notify as f64 * elapsed;
+                    totals.synchronous_replication_backend_seconds += replication as f64 * elapsed;
+                    totals.max_notification_waiters = totals.max_notification_waiters.max(notify);
+                    totals.max_synchronous_replication_waiters =
+                        totals.max_synchronous_replication_waiters.max(replication);
+                    previous = now;
+                }
+            }
+        }
+        totals.elapsed_seconds = start.elapsed().as_secs_f64();
+        totals
+    });
+    (stop, task)
+}
+
+async fn benchmark_renewals(
+    fixture: &Fixture,
+    clients: usize,
+    duration: Duration,
+    enabled: bool,
+    repetition: usize,
+) {
+    let lease = Duration::from_secs(60);
+    let mut claims = Vec::new();
+    for lane in 0..clients {
+        let owner = format!("bench-renew-{lane}");
+        Queue::Orchestration.enqueue(fixture, &owner, None).await;
+        let (item, orch_token, _) = fixture
+            .provider
+            .fetch_orchestration_item(lease, Duration::ZERO, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.instance, owner);
+        fixture
+            .provider
+            .enqueue_for_worker(activity(&owner, Some(&owner), None))
+            .await
+            .unwrap();
+        let (item, worker_token, _) = fixture
+            .provider
+            .fetch_work_item(
+                lease,
+                Duration::ZERO,
+                Some(&SessionFetchConfig {
+                    owner_id: owner.clone(),
+                    lock_timeout: lease,
+                }),
+                &TagFilter::Any,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(item, WorkItem::ActivityExecute { instance, .. } if instance == owner));
+        claims.push((owner, orch_token, worker_token));
+    }
+    let (stop_sampling, samples) = start_commit_wait_sampling(fixture).await;
+    let start = Instant::now();
+    let deadline = start + duration;
+    let mut tasks = tokio::task::JoinSet::new();
+    for (owner, orch, worker) in claims {
+        let provider = fixture.provider.clone();
+        tasks.spawn(async move {
+            let mut renewals = 0_u64;
+            while Instant::now() < deadline {
+                provider
+                    .renew_orchestration_item_lock(&orch, lease)
+                    .await
+                    .unwrap();
+                provider.renew_work_item_lock(&worker, lease).await.unwrap();
+                assert_eq!(
+                    provider
+                        .renew_session_lock(&[owner.as_str()], lease, lease)
+                        .await
+                        .unwrap(),
+                    1,
+                );
+                renewals += 3;
+            }
+            renewals
+        });
+    }
+    let mut renewals = 0;
+    while let Some(result) = tasks.join_next().await {
+        renewals += result.unwrap();
+    }
+    let elapsed = start.elapsed().as_secs_f64();
+    stop_sampling
+        .send(())
+        .expect("commit-wait sampler must remain active");
+    let waits = samples.await.unwrap();
+    assert!(renewals > 0);
+    if enabled {
+        assert!(
+            waits.max_notification_waiters > 0,
+            "renewal contention must be observed"
+        );
+    } else {
+        assert_eq!(waits.notification_lock_backend_seconds, 0.0);
+    }
+    println!(
+        "BENCH {}",
+        serde_json::json!({
+            "phase": "renewals", "long_poll": enabled, "clients": clients, "repetition": repetition,
+            "lease_seconds": lease.as_secs(), "renewals": renewals, "elapsed_seconds": elapsed,
+            "renewals_per_second": renewals as f64 / elapsed,
+            "sample_interval_ms": COMMIT_WAIT_SAMPLE_INTERVAL.as_millis(),
+            "commit_waits": waits,
+        })
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "local release-mode benchmark; requires PostgreSQL without assertions"]
 async fn workflow_latency_and_throughput_with_long_polling() {
+    benchmark_workflows(2, 20, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a synchronous standby and DUROXIDE_PG_POOL_MAX >= 98; run in release mode"]
+async fn notification_contention_with_synchronous_standby() {
+    benchmark_workflows(16, 64, true).await;
+}
+
+async fn benchmark_workflows(concurrency: usize, clients: usize, require_standby: bool) {
     use duroxide::runtime::{registry::ActivityRegistry, Runtime, RuntimeOptions};
     use duroxide::{
         ActivityContext, Client, OrchestrationContext, OrchestrationRegistry, OrchestrationStatus,
     };
 
-    const CLIENTS: usize = 20;
     const REPETITIONS: usize = 3;
     const DURATION: Duration = Duration::from_secs(10);
     const SPARSE_SAMPLES: usize = 20;
@@ -1894,7 +2064,10 @@ async fn workflow_latency_and_throughput_with_long_polling() {
             .wait_for_orchestration(instance, Duration::from_secs(30))
             .await
             .unwrap();
-        assert!(matches!(status, OrchestrationStatus::Completed { output, .. } if output == input));
+        assert!(
+            matches!(&status, OrchestrationStatus::Completed { output, .. } if output == &input),
+            "unexpected benchmark outcome: {status:?}"
+        );
         start.elapsed()
     }
 
@@ -1910,12 +2083,45 @@ async fn workflow_latency_and_throughput_with_long_polling() {
                         'fsync', current_setting('fsync'),
                         'full_page_writes', current_setting('full_page_writes'),
                         'synchronous_commit', current_setting('synchronous_commit'),
-                        'synchronous_standby_names', current_setting('synchronous_standby_names'))",
+                        'synchronous_standby_names', current_setting('synchronous_standby_names'),
+                        'replicas', (SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                            'application_name', application_name, 'state', state, 'sync_state', sync_state)
+                            ORDER BY application_name), '[]'::jsonb) FROM pg_stat_replication))",
                 )
                 .fetch_one(&fixture.control)
                 .await
                 .unwrap();
                 assert_eq!(settings["debug_assertions"], "off");
+                if require_standby {
+                    assert_eq!(settings["fsync"], "on");
+                    assert_eq!(settings["full_page_writes"], "on");
+                    assert!(matches!(
+                        settings["synchronous_commit"].as_str(),
+                        Some("on" | "remote_apply")
+                    ));
+                    assert!(
+                        settings["replicas"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|replica| replica["state"] == "streaming"
+                                && matches!(
+                                    replica["sync_state"].as_str(),
+                                    Some("sync" | "quorum")
+                                )),
+                        "this profile requires an active synchronous standby: {settings}"
+                    );
+                    assert!(
+                        fixture.provider.pool().options().get_max_connections() as usize
+                            >= clients + 2 * concurrency + 2,
+                        "provide enough connections to measure server locks rather than pool queueing",
+                    );
+                    let mut warm = Vec::new();
+                    for _ in 0..clients + 2 * concurrency + 1 {
+                        warm.push(fixture.provider.pool().acquire().await.unwrap());
+                    }
+                    drop(warm);
+                }
                 let activities = ActivityRegistry::builder()
                     .register("Echo", |_ctx: ActivityContext, input: String| async move {
                         Ok(input)
@@ -1935,8 +2141,8 @@ async fn workflow_latency_and_throughput_with_long_polling() {
                     )
                     .build();
                 let options = RuntimeOptions {
-                    orchestration_concurrency: 2,
-                    worker_concurrency: 2,
+                    orchestration_concurrency: concurrency,
+                    worker_concurrency: concurrency,
                     dispatcher_min_poll_interval: Duration::from_millis(100),
                     dispatcher_long_poll_timeout: Duration::from_secs(30),
                     ..Default::default()
@@ -1950,7 +2156,7 @@ async fn workflow_latency_and_throughput_with_long_polling() {
                         "orch_concurrency": options.orchestration_concurrency,
                         "worker_concurrency": options.worker_concurrency,
                         "pool_max": fixture.provider.pool().options().get_max_connections(),
-                        "clients": CLIENTS, "duration_seconds": DURATION.as_secs(),
+                        "clients": clients, "duration_seconds": DURATION.as_secs(),
                         "postgres": settings,
                     })
                 );
@@ -1981,10 +2187,11 @@ async fn workflow_latency_and_throughput_with_long_polling() {
                         })
                     );
                 }
+                let (stop_sampling, samples) = start_commit_wait_sampling(&fixture).await;
                 let start = Instant::now();
                 let deadline = start + DURATION;
                 let mut tasks = tokio::task::JoinSet::new();
-                for lane in 0..CLIENTS {
+                for lane in 0..clients {
                     let client = client.clone();
                     tasks.spawn(async move {
                         let mut completed = 0;
@@ -2005,6 +2212,23 @@ async fn workflow_latency_and_throughput_with_long_polling() {
                     completed += result.unwrap();
                 }
                 let elapsed = start.elapsed().as_secs_f64();
+                stop_sampling
+                    .send(())
+                    .expect("commit-wait sampler must remain active");
+                let waits = samples.await.unwrap();
+                if require_standby && enabled {
+                    assert!(
+                        waits.max_notification_waiters > 0,
+                        "notification contention must be observed"
+                    );
+                    assert!(
+                        waits.max_synchronous_replication_waiters > 0,
+                        "synchronous commit waits must be observed"
+                    );
+                }
+                if !enabled {
+                    assert_eq!(waits.notification_lock_backend_seconds, 0.0);
+                }
                 assert!(completed > 0);
                 let throughput = completed as f64 / elapsed;
                 throughputs.push(throughput);
@@ -2015,10 +2239,15 @@ async fn workflow_latency_and_throughput_with_long_polling() {
                         "activities_per_workflow": activities_per_workflow,
                         "completed": completed, "elapsed_seconds": elapsed,
                         "workflows_per_second": throughput,
+                        "sample_interval_ms": COMMIT_WAIT_SAMPLE_INTERVAL.as_millis(),
+                        "commit_waits": waits,
                     })
                 );
                 runtime.shutdown(Some(1000)).await;
                 drop(client);
+                if require_standby && activities_per_workflow == 1 {
+                    benchmark_renewals(&fixture, clients, DURATION, enabled, repetition).await;
+                }
                 fixture.cleanup().await;
             }
             throughputs.sort_by(f64::total_cmp);
@@ -2054,9 +2283,9 @@ async fn idle_query_load_is_reduced_with_long_polling() {
         let statement_count = || async {
             sqlx::query_scalar::<_, i64>(
                 "SELECT COALESCE(SUM(calls), 0)::BIGINT FROM pg_stat_statements \
-                 WHERE toplevel AND strpos(query, $1) > 0",
+                 WHERE toplevel AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                   AND strpos(query, 'pg_stat_statements') = 0",
             )
-            .bind(format!("{}.", fixture.schema))
             .fetch_one(&fixture.control)
             .await
             .expect("create pg_stat_statements in the benchmark database")
