@@ -174,9 +174,182 @@ Two test layers cover the Entra integration:
 |---------------------|-------------|---------|
 | `DUROXIDE_PG_POOL_MAX` | Maximum connection pool size | `10` |
 
+### Optional long-polling
+
+Existing constructors use short polling. To reduce idle queries and wake workers
+when work arrives, explicitly enable long-polling:
+
+```rust,no_run
+use duroxide_pg::{PostgresProvider, ProviderConfig};
+
+# async fn example(database_url: &str) -> anyhow::Result<()> {
+let mut config = ProviderConfig::url(database_url);
+config.schema_name = Some("my_app".to_string());
+config.long_poll.enabled = true;
+let provider = PostgresProvider::new_with_config(config).await?;
+# Ok(())
+# }
+```
+
+The same setting works with `ProviderConfig::entra(...)`. Long-polling reserves
+one connection **within** the provider's pool for PostgreSQL `LISTEN`, so the
+pool must allow at least two connections. It keeps another connection warm for
+fetches rather than leaving the first dispatcher to open one. Leave it disabled
+for client-only providers, especially one-connection backend clients. It requires a
+session-preserving database connection; transaction-pooling proxies are not a
+substitute for a dedicated LISTEN session.
+
+`LongPollConfig` also provides `notifier_poll_interval` (default 60 seconds)
+and `timer_grace_period` (default 100 milliseconds). The provider schedules
+future work and orchestration, activity, and session lease expiry, rescans after
+a timer fires, and periodically wakes fetches to recover missed notifications.
+Claims and renewals announce their lease deadlines without immediately waking
+fetches. An expired claim can therefore be recovered even if its owner crashes.
+Notifications are hints; queue predicates and locks remain authoritative.
+
+Read-only timer scans run in a transaction with 200 ms server-side lock and
+statement timeouts. PostgreSQL cancels blocked scans, and the rolled-back
+connection returns to the pool rather than leaving a blocked server backend
+behind. Scan errors retry after about one second.
+
+A one-second client watchdog keeps fetches checking for work if a scan stalls
+beyond those server limits. It does not cancel the scan or start another one;
+the same in-flight scan is retained across listener reconnects. Reconnecting
+also has an independent one-second polling fallback. Successful reconnection
+resubscribes and rechecks work.
+
+An enabled fetch waits for work until its `poll_timeout`; a zero timeout still
+performs a single fetch. The timeout bounds notification waiting, not an
+in-flight database operation. Dropping the provider or closing its pool stops
+the notification/timer task; connection cleanup has the network-failure
+limitation described below.
+The first notification wakes a fetch immediately. Further notifications that
+find no eligible work, and timer catch-up scans, are coalesced to a 100 ms
+cadence to bound query load. This can add up to 100 ms after an unsuccessful
+wake; the overall polling deadline is not extended.
+
+Migration `0030` installs **disabled** queue notification triggers. Constructing
+a provider with both `MigrationPolicy::ApplyAll` and `long_poll.enabled = true`
+activates them for that schema. `VerifyOnly` workers require that activation
+first and perform no DDL themselves. See [Migration Policy](docs/migration-policy.md).
+
+Once activated, inserts, visibility changes, lease changes, released locks, and
+consumption of claimed orchestration messages emit notifications. Acknowledgment
+notifications are delivered after the transaction releases the instance lock, so other
+workers recheck events that arrived during the turn. Delayed abandonment also
+announces the immediate instance-lock release, so other visible messages need
+not wait for the abandoned message's delay. This includes writes from
+short-polling producers. Turning off a provider's listener does not deactivate
+the schema's triggers. Transactions writing those queues or session leases cannot use
+`PREPARE TRANSACTION`, because PostgreSQL does
+not support preparing transactions that emit notifications. Schemas that have
+not opted in retain their existing transaction behavior.
+
+PostgreSQL serializes transactions that emit notifications through a
+server-wide lock held until commit completes. Slow WAL flushes or synchronous
+replication waits can therefore delay other notification writers, even in
+other schemas or databases on that server. This cost includes **every successful
+activity and orchestration claim**, renewals that change their lease deadlines,
+and session-lease writes. Empty fetches do not notify. A normal completed
+activity has three notifying commits (enqueue, claim, completion acknowledgment);
+an orchestration turn has two (claim and acknowledgment). Each lease-renewal
+transaction also joins this serialization when it emits a hint. Multiple hints
+in one transaction still acquire the commit lock only once.
+
+These are schema-wide costs, including short-polling callers of an activated
+schema. Benchmark concurrent writers with representative commit latency before
+activation; idle-query savings alone do not establish loaded throughput.
+
+Detected connection failures reconnect automatically, but silent network
+partitions are not actively probed. Until the transport reports a failure,
+work relies on the polling and refresh fallbacks instead of prompt
+notifications. SQLx listener cleanup can also wait indefinitely on a wedged
+socket, so provider drop does not guarantee bounded connection cleanup and
+`pool.close()` has no hard shutdown deadline in that situation.
+
+Recreate providers if their queue tables are dropped and recreated: notification
+channels identify the original tables. Runtime session-capacity decisions are
+also made once per fetch; a slot that started polling without session capacity
+may need another fetch after its poll timeout before it can claim session work.
+
+This feature does **not** convert a `duroxide-pg-opt` database into a
+`duroxide-pg` database. Their migration histories remain incompatible.
+
+#### Reproducing long-poll performance
+
+The ignored benchmarks in [tests/long_poll_tests.rs](tests/long_poll_tests.rs)
+compare short and long polling without changing the runtime's lease durations.
+Use a disposable, optimized PostgreSQL server with assertions disabled:
+
+```sh
+DUROXIDE_PG_POOL_MAX=10 cargo nextest run --release --test long_poll_tests \
+  --run-ignored only --nocapture \
+  -E 'test(workflow_latency_and_throughput_with_long_polling)'
+```
+
+Use otherwise idle, controlled hosts for comparisons. Concurrent workloads can
+invalidate both throughput comparisons and wait-time measurements.
+
+The workflow driver uses two orchestration slots, two worker slots, a 100 ms
+minimum poll interval, and a 30 s long-poll timeout. It measures 20 sparse
+one-activity workflows with a 200 ms idle gap, then 20 concurrent clients running
+one- and five-sequential-activity workflows for 10 seconds, with three loaded
+repetitions per mode. Activities return immediately. A completed warm-up workflow
+is excluded. Latency includes enqueue and the client's completion-status polling;
+throughput includes draining in-flight workflows after submissions stop.
+
+Each `BENCH` JSON line records the mode, pool limit, concurrency, duration,
+PostgreSQL version, commit settings (`fsync`, `full_page_writes`,
+`synchronous_commit`, and `synchronous_standby_names`), and replication state.
+Loaded runs sample notification-commit lock waits and `SyncRep` waits every
+10 ms. The reported backend-seconds are estimates integrated across the
+provider's connections, not individual-query latency measurements, and can
+exceed wall-clock time. The notification measurement uses PostgreSQL's shared
+`pg_database` object-0 heavyweight lock, not the `NotifyQueue` LWLock.
+Keep the settings and source revision alongside results; the driver does not
+relax durability.
+The separate `idle_query_load_is_reduced_with_long_polling` benchmark requires
+`pg_stat_statements` and measures 65 seconds per mode. Run it alone in an
+otherwise idle disposable database: it counts database-wide top-level statements
+except its statistics queries, including timer-scan transaction control.
+The `pg-stress` binary continues to use short polling.
+
+For commit-contention measurements, use a disposable primary with a physical
+synchronous standby. The higher-concurrency profile uses 16 orchestration
+slots, 16 worker slots, 64 clients, and a warmed pool; it also measures
+concurrent orchestration, activity, and session renewals with 60-second leases.
+Both workflow and renewal runs use three 10-second repetitions per mode.
+The renewal workload deliberately saturates renewal calls rather than using
+the runtime's normal renewal intervals.
+
+For a reproducible 10 ms apply-latency experiment, configure the standby's
+connection with `application_name=pr41_bench_standby` and set
+`recovery_min_apply_delay = '10ms'` there. On the primary, keep `fsync` and
+`full_page_writes` enabled and use:
+
+```conf
+synchronous_standby_names = 'FIRST 1 (pr41_bench_standby)'
+synchronous_commit = 'remote_apply'
+```
+
+Once that standby is streaming, run against the primary:
+
+```sh
+DUROXIDE_PG_POOL_MAX=100 cargo nextest run --release --test long_poll_tests \
+  --run-ignored only --nocapture \
+  -E 'test(notification_contention_with_synchronous_standby)'
+```
+
+The test rejects missing synchronous replication and insufficient pool capacity.
+It requires observed notification and replication waits in the enabled runs;
+disabled-schema controls must have no notification-lock waits. This experiment
+models a delayed synchronous apply acknowledgment, not a particular cloud
+service's replication topology.
+
 ## Features
 
 - Automatic schema migration on startup
+- Optional notification-driven long-polling for orchestration and activity work
 - Connection pooling via sqlx
 - Custom schema support for multi-tenant isolation
 - Full implementation of the Duroxide `Provider` and `ProviderAdmin` traits

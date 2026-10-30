@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in long-polling through `ProviderConfig::long_poll`, for both URL and
+  Entra connections. It uses LISTEN/NOTIFY, bounded timer tracking for both
+  queues, periodic recovery of missed notifications, and reconnect handling.
+  Existing constructors remain short-polling by default.
+- Follow-up empty fetches and timer catch-up scans are coalesced at 100 ms
+  intervals; the first notification wake remains immediate. The configuration
+  type is non-exhaustive to permit compatible additions.
+- Acknowledgments notify other orchestration waiters after releasing a claim,
+  and per-queue catch-up scans wake work that became due between timer wakes.
+- Claims, renewals, and session leases announce future expiry deadlines, allowing
+  waiting dispatchers to recover crashed owners without waiting for the full
+  poll timeout. Delayed orchestration abandonment also wakes other visible work
+  immediately when it releases the instance lock.
+- Long-poll startup retains a warm fetch connection alongside LISTEN. Read-only
+  timer scans use 200 ms server-side lock and statement timeouts and return
+  their rolled-back connections to the pool. A one-second client watchdog
+  retains any pending scan instead of repeatedly detaching server backends;
+  degraded listeners keep polling independently of reconnect attempts.
+- Migration `0030` adds disabled notification triggers. An `ApplyAll` provider
+  with long-polling enabled explicitly activates them for its schema;
+  `VerifyOnly` requires prior activation and performs no DDL. Once activated,
+  queue and session-lease writes cannot use PostgreSQL `PREPARE TRANSACTION`.
+  Schemas that have not opted in retain their previous transaction behavior.
+- Long-polling reserves one connection within the configured pool and requires
+  at least two connections. Client-only providers can leave it disabled.
+  Notification channels support long and mixed-case schema names. This does
+  not convert the incompatible `duroxide-pg-opt` migration history.
+
+### Changed
+
+- Require SQLx 0.8.3 or later within the 0.8 series for explicit listener
+  reconnect handling. The existing native-TLS feature selection is unchanged.
+- Migration and notification-activation transactions use bounded lock waits
+  and jittered retries for deadlocks and lock contention, with a ten-second
+  retry budget. Permanent errors remain errors and failed attempts do not
+  change the migration ledger. Retry warnings include the SQLSTATE and full
+  error context.
+- Add a reproducible sparse/loaded workflow benchmark alongside the idle-query
+  benchmark, recording concurrency, duration, pool size, and commit settings.
+- Add a synchronous-standby contention profile with 16 orchestration and
+  16 worker slots, 64 clients, and concurrent lease-renewal measurements.
+  Benchmarks record sampled notification-commit and replication wait time;
+  documentation makes the per-claim and per-renewal notification costs explicit.
+
 ## [0.1.38] - 2026-10-26
 
 ### Fixed
