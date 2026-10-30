@@ -207,12 +207,16 @@ Claims and renewals announce their lease deadlines without immediately waking
 fetches. An expired claim can therefore be recovered even if its owner crashes.
 Notifications are hints; queue predicates and locks remain authoritative.
 
-Read-only timer scans have a 250 ms budget, including connection acquisition,
-so a scan blocked on one queue cannot indefinitely monopolize a two-connection
-pool. Failed or cancelled scans discard their connections. Scan errors retry
-after about one second; while reconnecting, an independent one-second wakeup
-keeps fetches checking for work even if connection establishment stalls.
-Successful reconnection resubscribes and rechecks work.
+Read-only timer scans run in a transaction with 200 ms server-side lock and
+statement timeouts. PostgreSQL cancels blocked scans, and the rolled-back
+connection returns to the pool rather than leaving a blocked server backend
+behind. Scan errors retry after about one second.
+
+A one-second client watchdog keeps fetches checking for work if a scan stalls
+beyond those server limits. It does not cancel the scan or start another one;
+the same in-flight scan is retained across listener reconnects. Reconnecting
+also has an independent one-second polling fallback. Successful reconnection
+resubscribes and rechecks work.
 
 An enabled fetch waits for work until its `poll_timeout`; a zero timeout still
 performs a single fetch. The timeout bounds notification waiting, not an

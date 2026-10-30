@@ -23,8 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   poll timeout. Delayed orchestration abandonment also wakes other visible work
   immediately when it releases the instance lock.
 - Long-poll startup retains a warm fetch connection alongside LISTEN. Read-only
-  timer scans are bounded to 250 ms; degraded listeners keep a one-second
-  polling fallback independent of reconnect attempts.
+  timer scans use 200 ms server-side lock and statement timeouts and return
+  their rolled-back connections to the pool. A one-second client watchdog
+  retains any pending scan instead of repeatedly detaching server backends;
+  degraded listeners keep polling independently of reconnect attempts.
 - Migration `0027` adds disabled notification triggers. An `ApplyAll` provider
   with long-polling enabled explicitly activates them for its schema;
   `VerifyOnly` requires prior activation and performs no DDL. Once activated,

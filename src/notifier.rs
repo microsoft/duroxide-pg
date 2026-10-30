@@ -4,22 +4,20 @@
 use anyhow::{ensure, Context, Result};
 use duroxide::providers::ProviderError;
 use sqlx::postgres::{types::Oid, PgListener, PgNotification};
-use sqlx::{pool::PoolConnection, PgPool, Postgres};
+use sqlx::{pool::PoolConnection, Connection, PgPool, Postgres};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tokio::time::{
-    interval_at, sleep, sleep_until, timeout, timeout_at, Instant, MissedTickBehavior,
-};
+use tokio::time::{interval_at, sleep, sleep_until, timeout_at, Instant, MissedTickBehavior};
 use tracing::warn;
 
 use crate::provider::PostgresProvider;
 
 const MIN_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const DEGRADED_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-const TIMER_REFRESH_TIMEOUT: Duration = Duration::from_millis(250);
+const TIMER_REFRESH_BACKSTOP: Duration = Duration::from_secs(1);
 
 /// Optional LISTEN/NOTIFY-based waiting for orchestration and activity work.
 ///
@@ -172,6 +170,7 @@ async fn run(
     timer_query: String,
     config: LongPollConfig,
 ) {
+    let mut refresh = TimerRefresh::default();
     loop {
         let result = run_connected(
             &pool,
@@ -180,6 +179,7 @@ async fn run(
             &notifications,
             &timer_query,
             &config,
+            &mut refresh,
         )
         .await;
         for notify in &notifications {
@@ -244,6 +244,40 @@ async fn run(
     }
 }
 
+type TimerDeadlines = (Option<i64>, Option<i64>);
+
+#[derive(Default)]
+struct TimerRefresh {
+    task: Option<JoinHandle<Result<TimerDeadlines>>>,
+}
+
+impl TimerRefresh {
+    fn start(&mut self, pool: &PgPool, query: &str) {
+        // Keep the same scan across listener reconnects and client watchdog wakes.
+        if self.task.is_none() {
+            let pool = pool.clone();
+            let query = query.to_string();
+            self.task = Some(tokio::spawn(
+                async move { refresh_timers(&pool, &query).await },
+            ));
+        }
+    }
+
+    async fn result(&mut self) -> Result<TimerDeadlines> {
+        let result = self.task.as_mut().expect("timer scan was started").await;
+        self.task.take();
+        result.context("Long-poll timer scan task failed")?
+    }
+}
+
+impl Drop for TimerRefresh {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
 struct RefreshConnection(Option<PoolConnection<Postgres>>);
 
 impl Drop for RefreshConnection {
@@ -256,18 +290,40 @@ impl Drop for RefreshConnection {
     }
 }
 
-async fn refresh_timers(pool: &PgPool, query: &str) -> Result<(Option<i64>, Option<i64>)> {
-    timeout(TIMER_REFRESH_TIMEOUT, async {
-        let mut connection = RefreshConnection(Some(pool.acquire().await?));
-        let result = sqlx::query_as(query)
+async fn refresh_timers(pool: &PgPool, query: &str) -> Result<TimerDeadlines> {
+    let mut connection = RefreshConnection(Some(pool.acquire().await?));
+    let mut tx = connection
+        .0
+        .as_mut()
+        .expect("refresh owns its connection")
+        .begin()
+        .await?;
+    let result: Result<_> = async {
+        sqlx::Executor::execute(
+            &mut *tx,
+            "SET LOCAL lock_timeout = '200ms'; SET LOCAL statement_timeout = '200ms'",
+        )
+        .await
+        .context("Setting long-poll timer scan timeouts")?;
+        sqlx::query_as(query)
             .bind(PostgresProvider::now_millis())
-            .fetch_one(&mut **connection.0.as_mut().expect("refresh owns its connection"))
-            .await?;
-        drop(connection.0.take());
-        Ok(result)
-    })
-    .await
-    .context("Long-poll timer scan exceeded its 250ms read-only query budget")?
+            .fetch_one(&mut *tx)
+            .await
+            .context("Reading long-poll timer deadlines")
+    }
+    .await;
+    match &result {
+        Ok(_) => tx
+            .commit()
+            .await
+            .context("Committing long-poll timer scan")?,
+        Err(error) => tx
+            .rollback()
+            .await
+            .with_context(|| format!("Rolling back long-poll timer scan after {error:#}"))?,
+    }
+    drop(connection.0.take());
+    result
 }
 
 async fn run_connected(
@@ -277,15 +333,17 @@ async fn run_connected(
     notifications: &[Arc<Notify>; 2],
     timer_query: &str,
     config: &LongPollConfig,
+    refresh: &mut TimerRefresh,
 ) -> Result<()> {
     let mut timers: [Option<Instant>; 2] = [None, None];
     let mut next_refresh = Instant::now();
     let mut next_recovery = next_refresh;
     let mut refresh_started = next_refresh;
-    let refresh = refresh_timers(pool, timer_query);
-    tokio::pin!(refresh);
+    refresh.start(pool, timer_query);
     let mut refreshing = true;
     let mut refresh_failed = false;
+    let mut refresh_stalled = false;
+    let mut next_backstop = refresh_started + TIMER_REFRESH_BACKSTOP;
     // A paced scan must recheck work that matured since a queue's timer wake.
     // Keep events during an in-flight scan pending for the following scan.
     let mut pending_catchup = [false; 2];
@@ -301,7 +359,7 @@ async fn run_connected(
                 };
                 handle_notification(notification, channels, notifications, &mut timers, config);
             }
-            result = &mut refresh, if refreshing => {
+            result = refresh.result(), if refreshing => {
                 refreshing = false;
                 let recover = refresh_failed || Instant::now() >= next_recovery;
                 if recover {
@@ -339,17 +397,33 @@ async fn run_connected(
                         }
                         warn!(
                             target: "duroxide::providers::postgres::notifier",
-                            error = %error,
+                            error = %format_args!("{error:#}"),
                             "Long-poll timer refresh failed; retrying with one-second polling fallback"
                         );
                     }
                 }
             }
+            _ = sleep_until(next_backstop), if refreshing => {
+                if !refresh_stalled {
+                    warn!(
+                        target: "duroxide::providers::postgres::notifier",
+                        "Long-poll timer scan is still running; polling without cancelling or starting another scan"
+                    );
+                }
+                refresh_stalled = true;
+                refresh_failed = true;
+                for notify in notifications {
+                    notify.notify_waiters();
+                }
+                next_backstop = Instant::now() + DEGRADED_RETRY_INTERVAL;
+            }
             _ = sleep_until(next_refresh), if !refreshing => {
                 refresh_started = Instant::now();
                 refreshing_catchup = std::mem::take(&mut pending_catchup);
-                refresh.set(refresh_timers(pool, timer_query));
+                refresh.start(pool, timer_query);
                 refreshing = true;
+                refresh_stalled = false;
+                next_backstop = refresh_started + TIMER_REFRESH_BACKSTOP;
             }
             _ = sleep_until(next_timer.unwrap_or(next_refresh)), if next_timer.is_some() => {
                 let now = Instant::now();
@@ -466,6 +540,7 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::time::timeout;
 
     #[test]
     fn defaults_preserve_short_polling() {
@@ -579,6 +654,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timer_scan_timeouts_are_server_errors_and_reuse_the_connection() {
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping timer-scan database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let control = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .unwrap();
+        let schema = format!("bounded_scan_{}", uuid::Uuid::new_v4().simple());
+        sqlx::Executor::execute(
+            &control,
+            format!(
+                "CREATE SCHEMA {schema}; CREATE TABLE {schema}.probe (id INTEGER);
+             INSERT INTO {schema}.probe VALUES (1)"
+            )
+            .as_str(),
+        )
+        .await
+        .unwrap();
+        let before: (i32, String, String) = sqlx::query_as(
+            "SELECT pg_backend_pid(), current_setting('lock_timeout'), current_setting('statement_timeout')",
+        ).fetch_one(&pool).await.unwrap();
+        let valid = "SELECT $1::BIGINT, NULL::BIGINT";
+        assert!(refresh_timers(&pool, valid).await.unwrap().0.is_some());
+        let mut blocker = control.begin().await.unwrap();
+        sqlx::query(&format!(
+            "LOCK TABLE {schema}.probe IN ACCESS EXCLUSIVE MODE"
+        ))
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+        let mut outcomes = Vec::new();
+        for query in [
+            "SELECT $1::BIGINT, NULL::BIGINT FROM pg_sleep(2)".to_string(),
+            format!("SELECT $1::BIGINT, NULL::BIGINT FROM {schema}.probe"),
+        ] {
+            let error = timeout(Duration::from_secs(1), refresh_timers(&pool, &query))
+                .await
+                .expect("server timeout should beat the client backstop")
+                .unwrap_err();
+            let after: (i32, String, String) = sqlx::query_as(
+                "SELECT pg_backend_pid(), current_setting('lock_timeout'), current_setting('statement_timeout')",
+            ).fetch_one(&pool).await.unwrap();
+            outcomes.push((error, after));
+        }
+        blocker.rollback().await.unwrap();
+        let rows: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {schema}.probe"))
+            .fetch_one(&control)
+            .await
+            .unwrap();
+        assert!(refresh_timers(&pool, valid).await.unwrap().0.is_some());
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&control)
+            .await
+            .unwrap();
+        control.close().await;
+        assert_eq!(rows, 1, "failed scans must not change the durable state");
+        for (error, after) in outcomes {
+            let code = error
+                .downcast_ref::<sqlx::Error>()
+                .and_then(sqlx::Error::as_database_error)
+                .and_then(|error| error.code());
+            assert!(
+                matches!(code.as_deref(), Some("55P03" | "57014")),
+                "{error:#}"
+            );
+            assert_eq!(
+                after, before,
+                "timeouts must roll back and return the same healthy connection"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn dense_overdue_refreshes_are_paced_and_do_not_wake_the_other_queue() {
         dotenvy::dotenv().ok();
         let Ok(url) = std::env::var("DATABASE_URL") else {
@@ -614,6 +772,7 @@ mod tests {
         );
         let mut worker_wakes = 0;
         {
+            let mut refresh = TimerRefresh::default();
             let run = run_connected(
                 &pool,
                 &mut listener,
@@ -621,6 +780,7 @@ mod tests {
                 &notifications,
                 &query,
                 &config,
+                &mut refresh,
             );
             tokio::pin!(run);
             let duration = tokio::time::timeout(Duration::from_millis(350), async {
@@ -702,6 +862,7 @@ mod tests {
             let notifications = notifications.clone();
             let query = format!("SELECT * FROM {schema}.scan($1)");
             async move {
+                let mut refresh = TimerRefresh::default();
                 run_connected(
                     &pool,
                     &mut listener,
@@ -712,6 +873,7 @@ mod tests {
                         enabled: true,
                         ..Default::default()
                     },
+                    &mut refresh,
                 )
                 .await
             }
@@ -790,6 +952,7 @@ mod tests {
             "WITH attempt AS MATERIALIZED (SELECT nextval('{schema}.calls') AS n) \
              SELECT 1 / (n - 1), NULL::BIGINT FROM attempt WHERE $1::BIGINT IS NOT NULL"
         );
+        let mut refresh = TimerRefresh::default();
         let result = tokio::time::timeout(
             Duration::from_millis(1500),
             run_connected(
@@ -802,9 +965,11 @@ mod tests {
                     enabled: true,
                     ..Default::default()
                 },
+                &mut refresh,
             ),
         )
         .await;
+        drop(refresh);
         assert!(
             result.is_err(),
             "the listener should stay connected after a scan error"
@@ -849,6 +1014,156 @@ mod tests {
         drop(listener);
         pool.close().await;
         assert_eq!(connections, 2, "LISTEN must leave another connection warm");
+    }
+
+    #[tokio::test]
+    async fn watchdog_and_reconnect_keep_the_same_pending_timer_scan() {
+        use std::sync::atomic::AtomicBool;
+
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping pending-scan database test");
+            return;
+        };
+        let block_next = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .min_connections(3)
+            .max_connections(3)
+            .before_acquire({
+                let block_next = block_next.clone();
+                let entered = entered.clone();
+                let release = release.clone();
+                move |_, _| {
+                    let block_next = block_next.clone();
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        if block_next.swap(false, Ordering::Relaxed) {
+                            let released = release.notified();
+                            tokio::pin!(released);
+                            released.as_mut().enable();
+                            entered.notify_one();
+                            released.await;
+                        }
+                        Ok(true)
+                    })
+                }
+            })
+            .connect(&url)
+            .await
+            .unwrap();
+        let control = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .unwrap();
+        let schema = format!("pending_scan_{}", uuid::Uuid::new_v4().simple());
+        sqlx::Executor::execute(
+            &control,
+            format!("CREATE SCHEMA {schema}; CREATE SEQUENCE {schema}.calls").as_str(),
+        )
+        .await
+        .unwrap();
+        let channels = [format!("{schema}_orch"), format!("{schema}_worker")];
+        let listener = subscribe(&pool, &channels).await.unwrap();
+        let pid: i32 = sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity WHERE query LIKE 'LISTEN%' AND strpos(query, $1) > 0",
+        )
+        .bind(&channels[0])
+        .fetch_one(&control)
+        .await
+        .unwrap();
+        let notifications = [Arc::new(Notify::new()), Arc::new(Notify::new())];
+        let initial_scan = notifications[0].notified();
+        tokio::pin!(initial_scan);
+        initial_scan.as_mut().enable();
+        let task = tokio::spawn(run(
+            pool.clone(), listener, channels.clone(), notifications.clone(),
+            format!("SELECT NULL::BIGINT, NULL::BIGINT FROM nextval('{schema}.calls') WHERE $1::BIGINT IS NOT NULL"),
+            LongPollConfig {
+                enabled: true,
+                notifier_poll_interval: Duration::from_millis(50),
+                ..Default::default()
+            },
+        ));
+        timeout(Duration::from_secs(3), initial_scan).await.unwrap();
+        block_next.store(true, Ordering::Relaxed);
+        timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            timeout(Duration::from_millis(1500), notifications[0].notified())
+                .await
+                .expect("the watchdog must wake fetches while a scan is pending");
+        }
+        let before_reconnect: i64 =
+            sqlx::query_scalar(&format!("SELECT last_value FROM {schema}.calls"))
+                .fetch_one(&control)
+                .await
+                .unwrap();
+        sqlx::query("SELECT pg_terminate_backend($1)")
+            .bind(pid)
+            .execute(&control)
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let reconnected: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE query LIKE 'LISTEN%' \
+                     AND strpos(query, $1) > 0 AND pid <> $2)",
+                )
+                .bind(&channels[0])
+                .bind(pid)
+                .fetch_one(&control)
+                .await
+                .unwrap();
+                if reconnected {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("listener must reconnect without replacing the pending scan");
+        let after_reconnect: i64 =
+            sqlx::query_scalar(&format!("SELECT last_value FROM {schema}.calls"))
+                .fetch_one(&control)
+                .await
+                .unwrap();
+        release.notify_waiters();
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let calls: i64 =
+                    sqlx::query_scalar(&format!("SELECT last_value FROM {schema}.calls"))
+                        .fetch_one(&control)
+                        .await
+                        .unwrap();
+                if calls >= 2 {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the original scan must resume once connection acquisition finishes");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        timeout(Duration::from_secs(3), pool.close()).await.unwrap();
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&control)
+            .await
+            .unwrap();
+        control.close().await;
+        assert_eq!(
+            before_reconnect, 1,
+            "the watchdog must not replace the blocked scan"
+        );
+        assert_eq!(
+            after_reconnect, 1,
+            "reconnecting must not replace the blocked scan"
+        );
     }
 
     #[tokio::test]

@@ -196,7 +196,11 @@ impl Fixture {
 
     async fn with_schema(long_poll: LongPollConfig, schema: String) -> Self {
         let enabled = long_poll.enabled;
-        let mut config = ProviderConfig::url(database_url());
+        let application = format!("lp_fixture_{}", uuid::Uuid::new_v4().simple());
+        let mut url = url::Url::parse(&database_url()).unwrap();
+        url.query_pairs_mut()
+            .append_pair("application_name", &application);
+        let mut config = ProviderConfig::url(url.as_str());
         config.schema_name = Some(schema.clone());
         config.long_poll = long_poll;
         let provider = Arc::new(PostgresProvider::new_with_config(config).await.unwrap());
@@ -212,26 +216,30 @@ impl Fixture {
         };
         if enabled {
             fixture
-                .wait_for_query(
-                    &format!("FROM {schema}.worker_queue", schema = fixture.schema),
-                    None,
-                )
+                .wait_for_query("COMMIT", None, Some(&application))
                 .await;
             tokio::task::yield_now().await;
         }
         fixture
     }
 
-    async fn wait_for_query(&self, query: &str, since: Option<DateTime<Utc>>) {
+    async fn wait_for_query(
+        &self,
+        query: &str,
+        since: Option<DateTime<Utc>>,
+        application: Option<&str>,
+    ) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let seen: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
                  WHERE datname = current_database() AND state = 'idle' \
-                 AND strpos(query, $1) > 0 AND ($2::TIMESTAMPTZ IS NULL OR query_start >= $2))",
+                 AND strpos(query, $1) > 0 AND ($2::TIMESTAMPTZ IS NULL OR query_start >= $2) \
+                 AND ($3::TEXT IS NULL OR application_name = $3))",
             )
             .bind(query)
             .bind(since)
+            .bind(application)
             .fetch_one(&self.control)
             .await
             .unwrap();
@@ -279,6 +287,7 @@ impl Fixture {
         self.wait_for_query(
             &format!("{}.{}", self.schema, queue.fetch_name()),
             Some(since),
+            None,
         )
         .await;
         assert!(
@@ -659,6 +668,7 @@ async fn acknowledgment_wakes_another_provider_after_it_consumed_a_locked_instan
         .wait_for_query(
             &format!("{}.fetch_orchestration_item", waiter.schema),
             Some(inserted_after),
+            None,
         )
         .await;
     assert!(!waiting.is_finished(), "the instance is still locked");
@@ -964,7 +974,11 @@ async fn disabled_producer_wakes_verify_only_consumer() {
         tokio::spawn(async move { Queue::Worker.fetch(&consumer, POLL).await })
     };
     fixture
-        .wait_for_query(&format!("{}.fetch_work_item", fixture.schema), Some(since))
+        .wait_for_query(
+            &format!("{}.fetch_work_item", fixture.schema),
+            Some(since),
+            None,
+        )
         .await;
     producer
         .enqueue_for_worker(activity("mixed-config", None, None))
@@ -1034,7 +1048,11 @@ async fn pool_closure_wakes_waiters_and_releases_listener() {
             .await
     });
     fixture
-        .wait_for_query(&format!("{}.fetch_work_item", fixture.schema), Some(since))
+        .wait_for_query(
+            &format!("{}.fetch_work_item", fixture.schema),
+            Some(since),
+            None,
+        )
         .await;
     tokio::time::timeout(Duration::from_secs(3), fixture.provider.pool().close())
         .await
@@ -1067,7 +1085,11 @@ async fn pool_closure_during_reconnect_does_not_leave_fetch_waiting() {
             .await
     });
     fixture
-        .wait_for_query(&format!("{}.fetch_work_item", fixture.schema), Some(since))
+        .wait_for_query(
+            &format!("{}.fetch_work_item", fixture.schema),
+            Some(since),
+            None,
+        )
         .await;
     tokio::time::timeout(Duration::from_secs(2), fixture.provider.pool().close())
         .await
@@ -1119,7 +1141,11 @@ async fn notifications_wake_the_matching_tag_waiter() {
         }));
     }
     fixture
-        .wait_for_query(&format!("{}.fetch_work_item", fixture.schema), Some(since))
+        .wait_for_query(
+            &format!("{}.fetch_work_item", fixture.schema),
+            Some(since),
+            None,
+        )
         .await;
     fixture
         .provider
@@ -1190,7 +1216,11 @@ async fn notifications_wake_the_session_owner_not_just_an_arbitrary_slot() {
         })
     };
     fixture
-        .wait_for_query(&format!("{}.fetch_work_item", fixture.schema), Some(since))
+        .wait_for_query(
+            &format!("{}.fetch_work_item", fixture.schema),
+            Some(since),
+            None,
+        )
         .await;
     fixture
         .provider
@@ -1266,6 +1296,71 @@ async fn notification_migration_preserves_an_application_function_with_the_old_g
     assert!(definition.is_some_and(|definition| definition.contains("application-owned function")));
     fixture.cleanup().await;
     control.close().await;
+}
+
+#[tokio::test]
+async fn adv_blocked_timer_scans_do_not_accumulate_server_backends() {
+    let mut config = polling_config(true);
+    config.notifier_poll_interval = Duration::from_millis(500);
+    let fixture = Fixture::new(config).await;
+    let schema = fixture.schema.clone();
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url())
+        .await
+        .unwrap();
+    let count_waiting = |admin: PgPool| {
+        let schema = schema.clone();
+        async move {
+            // Other parallel tests deliberately hold unrelated database locks.
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                 AND strpos(query, $1) > 0",
+            )
+            .bind(format!("FROM {schema}."))
+            .fetch_one(&admin)
+            .await
+            .unwrap()
+        }
+    };
+    let count_backends = |admin: PgPool| async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND backend_type = 'client backend'",
+        )
+        .fetch_one(&admin)
+        .await
+        .unwrap()
+    };
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let backends_before = count_backends(admin.clone()).await;
+    let mut locker = admin.begin().await.unwrap();
+    sqlx::query(&format!(
+        "LOCK TABLE {schema}.worker_queue IN ACCESS EXCLUSIVE MODE"
+    ))
+    .execute(&mut *locker)
+    .await
+    .unwrap();
+    let mut waiting = Vec::new();
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        waiting.push(count_waiting(admin.clone()).await);
+    }
+    let backends_locked = count_backends(admin.clone()).await;
+    locker.rollback().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let waiting_after = count_waiting(admin.clone()).await;
+    let backends_after = count_backends(admin.clone()).await;
+    println!(
+        "ADV-RESULT schema={schema} lock=ACCESS_EXCLUSIVE(worker_queue) held_s=8 notifier_poll_ms=500 lock_waiting_backends_each_second={waiting:?} database_client_backends_before={backends_before} at_8s={backends_locked} 2s_after_release={backends_after} lock_waiting_after_release={waiting_after}"
+    );
+    admin.close().await;
+    fixture.cleanup().await;
+    assert!(
+        waiting.iter().all(|n| *n <= 2),
+        "blocked timer scans must not accumulate waiting server backends: {waiting:?}"
+    );
 }
 
 #[tokio::test]
@@ -1364,10 +1459,11 @@ async fn timers_expiring_during_refresh_do_not_hide_the_next_timer() {
 
     let second = fixture.waiting_fetch(Queue::Worker).await;
     Queue::Worker
-        .enqueue(&fixture, "during-refresh", Some(Duration::from_millis(200)))
+        .enqueue(&fixture, "during-refresh", Some(Duration::from_millis(50)))
         .await;
+    let third_enqueued = Instant::now();
     Queue::Worker
-        .enqueue(&fixture, "after-refresh", Some(Duration::from_millis(700)))
+        .enqueue(&fixture, "after-refresh", Some(Duration::from_millis(300)))
         .await;
     let second = claimed(second).await;
     Queue::Worker.ack(&fixture.provider, &second.token).await;
@@ -1375,8 +1471,17 @@ async fn timers_expiring_during_refresh_do_not_hide_the_next_timer() {
 
     let third = fixture.waiting_fetch(Queue::Worker).await;
     let third = claimed(third).await;
+    let elapsed = third_enqueued.elapsed();
     Queue::Worker.ack(&fixture.provider, &third.token).await;
     fixture.cleanup().await;
+    assert!(
+        elapsed >= Duration::from_millis(300),
+        "timer fired early: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(600),
+        "the timer, not the one-second polling fallback, must wake this fetch: {elapsed:?}"
+    );
 }
 
 #[tokio::test]
