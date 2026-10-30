@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve pending continue-as-new instances in age-filtered bulk deletion.
+  Populating their completion timestamps no longer makes queued continuations
+  eligible for deletion. Unfiltered bulk deletion retains its existing behavior.
+- Record `completed_at` for `ContinuedAsNew` executions so age-based execution
+  pruning also works for long-running workflows. Migration `0027` recovers
+  missing timestamps from terminal history events without changing current
+  execution protection. Rows without a recoverable terminal event remain NULL
+  and produce a migration warning.
+- Both pruning APIs serialize with instance deletion and execution updates, then
+  recheck eligibility to protect replacement instances. Atomic deletion uses the
+  same instance-ID lock order to prevent multi-instance deadlocks with pruning
+  (migration `0028`).
+
+### Added
+
+- Migration `0028` adds the `prune_executions_batch` SQL API. It scans at most
+  1,000 execution keys per call and returns a cursor even for protected or young
+  rows, allowing maintenance to make bounded progress without changing retention.
+  It locks only instances with deletion candidates.
+  Public-schema cleanup also removes the batch-pruning function.
+
+### Upgrading
+
+- **Migrations `0027` and `0028` require a fully drained upgrade.** Pause delete
+  and prune jobs, then stop and drain every process that uses the provider:
+  workers, clients, retention and maintenance jobs, and direct SQL callers.
+  Wait for in-flight calls and transactions to finish. Start one process using
+  the new binary with `MigrationPolicy::ApplyAll` first; provider initialization
+  applies the migrations. Keep provider traffic stopped until initialization
+  succeeds, then restart the remaining new binaries and updated SQL callers.
+  Stopping only workers is insufficient: old age-based deletion code
+  can delete pending continuations after their completion timestamps are filled.
+- Expect a one-time wave of age-based deletions of old continue-as-new
+  generations when retention resumes. Review retention cutoffs before restarting
+  delete and prune jobs. Backfill time and WAL volume grow with the number of
+  continue-as-new rows to repair; budget the maintenance window accordingly.
+- If an upgrade was not fully drained, old acknowledgements can leave missing
+  timestamps after the backfill. Stop and drain all callers before following the
+  [explicit repair procedure](migrations/README.md#repairing-missing-continued-execution-timestamps).
+  Re-running the backfill while old calls remain in flight does not close that
+  race.
+
 ## [0.1.38] - 2026-10-26
 
 ### Fixed

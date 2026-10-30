@@ -6,6 +6,7 @@
 //! Each test in this file reproduces a specific bug that was reported and fixed.
 //! These tests ensure the bugs don't regress.
 
+use duroxide::providers::{InstanceFilter, Provider, PruneOptions};
 use duroxide::runtime::registry::ActivityRegistry;
 use duroxide::runtime::{self, RuntimeOptions};
 use duroxide::{ActivityContext, Client, OrchestrationContext, OrchestrationRegistry};
@@ -39,6 +40,493 @@ async fn cleanup_schema(schema_name: &str) {
         .execute(&pool)
         .await
         .expect("Failed to drop schema");
+}
+
+async fn create_pre_0027_schema(pool: &sqlx::PgPool, schema: &str) {
+    static MIGRATIONS: include_dir::Dir =
+        include_dir::include_dir!("$CARGO_MANIFEST_DIR/migrations");
+    let mut files: Vec<_> = MIGRATIONS
+        .files()
+        .filter(|file| file.path().extension().and_then(|ext| ext.to_str()) == Some("sql"))
+        .collect();
+    files.sort_by_key(|file| file.path());
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(&format!(
+        "CREATE SCHEMA {schema};
+         SET LOCAL search_path TO {schema}, pg_temp;
+         CREATE TABLE _duroxide_migrations (
+             version BIGINT PRIMARY KEY,
+             name TEXT NOT NULL,
+             applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+         );"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    for file in files {
+        let name = file.path().file_name().unwrap().to_str().unwrap();
+        let version: i64 = name.split_once('_').unwrap().0.parse().unwrap();
+        if version >= 27 {
+            break;
+        }
+        sqlx::raw_sql(file.contents_utf8().unwrap())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO _duroxide_migrations (version, name) VALUES ($1, $2)")
+            .bind(version)
+            .bind(name)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    let last_version: i64 = sqlx::query_scalar("SELECT max(version) FROM _duroxide_migrations")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(last_version, 26);
+    let batch_function: Option<String> = sqlx::query_scalar(
+        "SELECT to_regprocedure('prune_executions_batch(text,bigint,bigint,integer)')::text",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert!(batch_function.is_none(), "no post-0026 objects may survive");
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_continue_as_new_backfill_reports_malformed_history_key() {
+    let schema = unique_schema_name();
+    let database_url = get_database_url();
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    create_pre_0027_schema(&pool, &schema).await;
+    sqlx::raw_sql(&format!(
+        "INSERT INTO {schema}.instances
+             (instance_id, orchestration_name, current_execution_id, created_at, updated_at)
+         VALUES ('damaged-history', 'test', 3, to_timestamp(0), to_timestamp(0));
+         INSERT INTO {schema}.executions
+             (instance_id, execution_id, status, started_at)
+         SELECT 'damaged-history', n,
+                CASE WHEN n < 3 THEN 'ContinuedAsNew' ELSE 'Running' END, to_timestamp(0)
+         FROM generate_series(1, 3) n;
+         INSERT INTO {schema}.history
+             (instance_id, execution_id, event_id, event_type, event_data, created_at)
+         SELECT 'damaged-history', n, 7, 'Event',
+                '{{\"type\":\"OrchestrationContinuedAsNew\",\"input\":\"next\"}}', to_timestamp(n)
+         FROM generate_series(1, 2) n;"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let snapshot_sql = format!(
+        "SELECT jsonb_build_object(
+             'ledger', (SELECT jsonb_agg(m ORDER BY m.version) FROM {schema}._duroxide_migrations m),
+             'functions', (SELECT jsonb_agg(pg_get_functiondef(p.oid) ORDER BY p.oid)
+                           FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                           WHERE n.nspname='{schema}'),
+             'instances', (SELECT jsonb_agg(i ORDER BY i.instance_id) FROM {schema}.instances i),
+             'executions', (SELECT jsonb_agg(e ORDER BY e.instance_id, e.execution_id)
+                            FROM {schema}.executions e),
+             'history', (SELECT jsonb_agg(h ORDER BY h.instance_id, h.execution_id, h.event_id)
+                         FROM {schema}.history h))"
+    );
+    for (payload, code) in [
+        ("not json", "22P02"),
+        (
+            r#"{"type":"OrchestrationContinuedAsNew","input":"\u0000"}"#,
+            "22P05",
+        ),
+        (
+            r#"{"type":"OrchestrationContinuedAsNew","value":1e1000000}"#,
+            "22003",
+        ),
+    ] {
+        sqlx::query(&format!(
+            "UPDATE {schema}.history SET event_data=$1
+             WHERE instance_id='damaged-history' AND execution_id=2 AND event_id=7"
+        ))
+        .bind(payload)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let before: serde_json::Value = sqlx::query_scalar(&snapshot_sql)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query(&format!("SET LOCAL search_path TO {schema}, pg_temp"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let error = sqlx::raw_sql(include_str!(
+            "../migrations/0027_continue_as_new_completed_at.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .unwrap_err();
+        tx.rollback().await.unwrap();
+        let startup_error = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+            .await
+            .err()
+            .expect("startup must reject malformed durable history");
+        let after: serde_json::Value = sqlx::query_scalar(&snapshot_sql)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            after, before,
+            "a rejected backfill must not change the ledger, functions, or durable state"
+        );
+        let database_error = error.as_database_error().unwrap();
+        assert_eq!(database_error.code().as_deref(), Some(code));
+        for context in [
+            schema.as_str(),
+            "damaged-history",
+            "execution_id=2",
+            "event_id=7",
+        ] {
+            assert!(
+                database_error.message().contains(context),
+                "missing {context:?} in backfill error: {error}"
+            );
+            assert!(
+                startup_error.to_string().contains(context),
+                "startup must preserve the backfill error context"
+            );
+        }
+    }
+
+    sqlx::query(&format!(
+        "UPDATE {schema}.history
+         SET event_data='{{\"type\":\"OrchestrationContinuedAsNew\",\"input\":\"next\"}}'
+         WHERE instance_id='damaged-history' AND execution_id=2 AND event_id=7"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let before: serde_json::Value = sqlx::query_scalar(&snapshot_sql)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let provider = PostgresProvider::new_with_schema(&database_url, Some(&schema))
+        .await
+        .expect("valid history must allow the upgrade");
+    let timestamps: Vec<Option<i64>> = sqlx::query_scalar(&format!(
+        "SELECT (extract(epoch FROM completed_at)*1000)::bigint FROM {schema}.executions
+         ORDER BY execution_id"
+    ))
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(timestamps, [Some(1_000), Some(2_000), None]);
+    let after: serde_json::Value = sqlx::query_scalar(&snapshot_sql)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after["history"], before["history"]);
+    assert_eq!(after["instances"], before["instances"]);
+    let old_ledger = before["ledger"].as_array().unwrap();
+    let new_ledger = after["ledger"].as_array().unwrap();
+    assert_eq!(&new_ledger[..old_ledger.len()], old_ledger);
+    assert_eq!(new_ledger[old_ledger.len()]["version"], 27);
+    assert_eq!(new_ledger[old_ledger.len() + 1]["version"], 28);
+    cleanup_schema(&schema).await;
+    provider.pool().close().await;
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn test_age_pruning_continue_as_new() {
+    verify_age_pruning(false).await;
+}
+
+#[tokio::test]
+async fn test_age_pruning_migrates_existing_history() {
+    verify_age_pruning(true).await;
+}
+
+async fn verify_age_pruning(upgrade: bool) {
+    let schema = unique_schema_name();
+    let database_url = get_database_url();
+    let mut store = Arc::new(
+        PostgresProvider::new_with_schema(&database_url, Some(&schema))
+            .await
+            .unwrap(),
+    );
+    if upgrade {
+        // Constructors migrate eagerly. Rebuild the disposable schema from the
+        // old prefix before generating history, rather than only downgrading ack.
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(store.pool())
+            .await
+            .unwrap();
+        create_pre_0027_schema(store.pool(), &schema).await;
+    }
+
+    let orchestrations = OrchestrationRegistry::builder()
+        .register(
+            "AgePruning",
+            |ctx: OrchestrationContext, input: String| async move {
+                let generation: u32 = input.parse().map_err(|error| format!("{error}"))?;
+                ctx.schedule_wait(format!("generation-{generation}")).await;
+                if generation < 3 {
+                    ctx.continue_as_new((generation + 1).to_string()).await
+                } else {
+                    Ok("done".to_string())
+                }
+            },
+        )
+        .build();
+    let options = RuntimeOptions {
+        dispatcher_min_poll_interval: Duration::from_millis(10),
+        ..Default::default()
+    };
+    let mut runtime = runtime::Runtime::start_with_options(
+        store.clone(),
+        ActivityRegistry::builder().build(),
+        orchestrations.clone(),
+        options.clone(),
+    )
+    .await;
+    let mut client = Client::new(store.clone());
+    let instance = "age-pruning";
+    client
+        .start_orchestration(instance, "AgePruning", "1")
+        .await
+        .unwrap();
+    for generation in 1..=3 {
+        let signal = format!("generation-{generation}");
+        assert!(common::wait_for_subscription(store.clone(), instance, &signal, 30_000).await);
+        if generation < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            client.raise_event(instance, &signal, "{}").await.unwrap();
+        }
+    }
+    let old_history = store.read_with_execution(instance, 1).await.unwrap();
+    let current_history = store.read_with_execution(instance, 3).await.unwrap();
+    let times: Vec<i64> = sqlx::query_scalar(&format!(
+        "SELECT (extract(epoch FROM created_at)*1000)::bigint FROM {schema}.history
+         WHERE instance_id=$1 AND event_data::jsonb->>'type'='OrchestrationContinuedAsNew'
+         ORDER BY execution_id"
+    ))
+    .bind(instance)
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(times.len(), 2);
+    assert!(times[0] < times[1]);
+    let first_completed = u64::try_from(times[0]).unwrap();
+
+    if upgrade {
+        assert!(client
+            .get_execution_info(instance, 1)
+            .await
+            .unwrap()
+            .completed_at
+            .is_none());
+        assert!(client
+            .get_execution_info(instance, 2)
+            .await
+            .unwrap()
+            .completed_at
+            .is_none());
+        runtime.shutdown(Some(2_000)).await;
+        sqlx::raw_sql(&format!(
+            "INSERT INTO {schema}.instances
+                 (instance_id,orchestration_name,current_execution_id,created_at,updated_at)
+             VALUES ('legacy-guards','AgePruning',6,now(),now());
+             INSERT INTO {schema}.executions(instance_id,execution_id,status,started_at,completed_at)
+             SELECT 'legacy-guards',n,
+                 CASE n WHEN 1 THEN 'ContinuedAsNew' WHEN 2 THEN 'Completed'
+                        WHEN 3 THEN 'Failed' WHEN 5 THEN 'ContinuedAsNew' ELSE 'Running' END,
+                 to_timestamp(0),CASE WHEN n=5 THEN to_timestamp(123) END
+             FROM generate_series(1,6) n;
+             INSERT INTO {schema}.history(instance_id,execution_id,event_id,event_type,event_data,created_at)
+             SELECT 'legacy-guards',n,1,'Event',
+                 jsonb_build_object('type','OrchestrationContinuedAsNew')::text,to_timestamp(456)
+             FROM generate_series(2,5) n;"
+        ))
+        .execute(store.pool())
+        .await
+        .unwrap();
+        store = Arc::new(
+            PostgresProvider::new_with_schema(&database_url, Some(&schema))
+                .await
+                .unwrap(),
+        );
+        client = Client::new(store.clone());
+        for _ in 0..2 {
+            let guarded: Vec<Option<i64>> = sqlx::query_scalar(&format!(
+                "SELECT (extract(epoch FROM completed_at)*1000)::bigint FROM {schema}.executions
+                 WHERE instance_id='legacy-guards' ORDER BY execution_id"
+            ))
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+            assert_eq!(guarded, [None, None, None, None, Some(123_000), None]);
+            assert_eq!(
+                store.read_with_execution(instance, 1).await.unwrap(),
+                old_history
+            );
+            assert_eq!(
+                store.read_with_execution(instance, 3).await.unwrap(),
+                current_history
+            );
+            assert_eq!(
+                client
+                    .get_execution_info(instance, 1)
+                    .await
+                    .unwrap()
+                    .completed_at,
+                Some(first_completed),
+            );
+            let mut tx = store.pool().begin().await.unwrap();
+            sqlx::query(&format!("SET LOCAL search_path TO {schema}, pg_temp"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::raw_sql(include_str!(
+                "../migrations/0027_continue_as_new_completed_at.sql"
+            ))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+        runtime = runtime::Runtime::start_with_options(
+            store.clone(),
+            ActivityRegistry::builder().build(),
+            orchestrations.clone(),
+            options.clone(),
+        )
+        .await;
+    }
+
+    assert_eq!(
+        client
+            .get_execution_info(instance, 1)
+            .await
+            .unwrap()
+            .completed_at,
+        Some(first_completed),
+    );
+    assert_eq!(
+        client
+            .get_execution_info(instance, 2)
+            .await
+            .unwrap()
+            .completed_at,
+        Some(u64::try_from(times[1]).unwrap()),
+    );
+    assert!(client
+        .get_execution_info(instance, 3)
+        .await
+        .unwrap()
+        .completed_at
+        .is_none());
+    let result = client
+        .prune_executions(
+            instance,
+            PruneOptions {
+                completed_before: Some(first_completed),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.executions_deleted, 0, "the cutoff is exclusive");
+    let result = client
+        .prune_executions(
+            instance,
+            PruneOptions {
+                keep_last: Some(3),
+                completed_before: Some(first_completed + 1),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.executions_deleted, 0,
+        "count and age filters must be ANDed"
+    );
+    let result = client
+        .prune_executions_bulk(
+            InstanceFilter {
+                instance_ids: Some(vec![instance.to_string()]),
+                ..Default::default()
+            },
+            PruneOptions {
+                keep_last: Some(2),
+                completed_before: Some(first_completed + 1),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.instances_processed, 1);
+    assert_eq!(result.executions_deleted, 1);
+    assert_eq!(
+        result.events_deleted,
+        u64::try_from(old_history.len()).unwrap()
+    );
+    let mut remaining = client.list_executions(instance).await.unwrap();
+    remaining.sort_unstable();
+    assert_eq!(remaining, [2, 3]);
+    assert_eq!(
+        store.read_with_execution(instance, 3).await.unwrap(),
+        current_history
+    );
+    assert_eq!(
+        client.get_instance_info(instance).await.unwrap().status,
+        "Running"
+    );
+
+    // Restart to prove replay uses the retained history, not a cached execution.
+    runtime.shutdown(Some(2_000)).await;
+    let runtime = runtime::Runtime::start_with_options(
+        store.clone(),
+        ActivityRegistry::builder().build(),
+        orchestrations,
+        options,
+    )
+    .await;
+    client
+        .raise_event(instance, "generation-3", "{}")
+        .await
+        .unwrap();
+    client
+        .wait_for_orchestration(instance, Duration::from_secs(30))
+        .await
+        .unwrap();
+    let info = client.get_instance_info(instance).await.unwrap();
+    assert_eq!(info.status, "Completed");
+    assert_eq!(info.output.as_deref(), Some("done"));
+    let completed = client
+        .get_execution_info(instance, 3)
+        .await
+        .unwrap()
+        .completed_at
+        .unwrap();
+    let result = client
+        .prune_executions(
+            instance,
+            PruneOptions {
+                completed_before: Some(completed + 1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.executions_deleted, 1);
+    assert_eq!(client.list_executions(instance).await.unwrap(), [3]);
+    runtime.shutdown(Some(2_000)).await;
+    cleanup_schema(&schema).await;
+    store.pool().close().await;
 }
 
 // =============================================================================

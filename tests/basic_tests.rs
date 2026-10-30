@@ -80,6 +80,17 @@ async fn test_provider_creation_default_schema() {
 
     assert!(table_exists, "Tables should be created in public schema");
 
+    let batch_pruner_exists_sql = "SELECT pg_catalog.to_regprocedure(
+        'public.prune_executions_batch(text,bigint,bigint,integer)') IS NOT NULL";
+    let batch_pruner_exists: bool = sqlx::query_scalar(batch_pruner_exists_sql)
+        .fetch_one(provider.pool())
+        .await
+        .expect("Failed to check batch pruning function before cleanup");
+    assert!(
+        batch_pruner_exists,
+        "Batch pruning function should be created"
+    );
+
     // Verify public schema exists before cleanup
     let public_schema_exists_before: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'public')",
@@ -95,6 +106,15 @@ async fn test_provider_creation_default_schema() {
 
     // Cleanup: drop tables from public schema (but NOT the schema itself)
     provider.cleanup_schema().await.expect("Failed to cleanup");
+
+    let batch_pruner_exists_after: bool = sqlx::query_scalar(batch_pruner_exists_sql)
+        .fetch_one(provider.pool())
+        .await
+        .expect("Failed to check batch pruning function after cleanup");
+    assert!(
+        !batch_pruner_exists_after,
+        "Public-schema cleanup must drop the batch pruning function"
+    );
 
     // Verify tables were dropped from public schema
     let table_exists_after: bool = sqlx::query_scalar(
