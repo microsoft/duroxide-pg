@@ -110,10 +110,79 @@ The migration itself deletes no executions or history. Once timestamps are
 recovered, subsequent age-based pruning can remove generations older than the
 configured cutoff, while still protecting the current and running executions.
 
-Stop worker runtimes before upgrading and resume them after migrations complete,
-so acknowledgements using the old function cannot race the one-time backfill.
-The backfill can take time on a large history store. The migration is idempotent;
-reapplying it does not change already populated timestamps.
+#### Upgrading safely
+
+Migrations `0027` and `0028` require a fully drained upgrade, not a rolling
+upgrade with old and new provider binaries running together:
+
+1. Pause all delete and prune jobs.
+2. Stop and drain **every process that uses the provider**: workers, clients,
+   retention and maintenance jobs, and direct SQL callers. Wait for in-flight
+   calls and transactions to finish.
+3. Apply the migrations with provider traffic still stopped, then restart only
+   new binaries containing these fixes and updated direct SQL callers.
+4. Review retention cutoffs before resuming delete and prune jobs. Expect a
+   one-time wave of age-based deletions of old continue-as-new generations whose
+   completion timestamps have now been recovered.
+
+Stopping only workers is insufficient. An old client's age-based deletion
+selector can select a pending continuation after its completion timestamp has
+been filled, deleting the instance and its queued continuation.
+
+Backfill time and WAL volume grow with the number of continue-as-new rows to
+repair. Large histories can further increase backfill time. Allow for this work
+in the maintenance window and WAL storage budget.
+
+#### Repairing missing continued-execution timestamps
+
+If an upgrade was not fully drained, an acknowledgement already executing the
+old function can write a NULL `completed_at` after the backfill. These rows remain
+ineligible for age-based pruning. **Draining all callers is the fence**:
+re-running the backfill while old calls remain in flight does not close the race.
+
+First pause deletion and pruning, stop and drain all callers as above, and ensure
+the migrations have completed. With provider traffic still stopped, replace
+`your_provider_schema` below and run this transaction. It fills only missing
+`ContinuedAsNew` timestamps using the last terminal history event's original
+`created_at`; existing timestamps and other statuses are unchanged. It neither
+replaces functions nor changes the migration ledger. Do not delete migration
+tracking rows or re-run whole migrations to perform this repair.
+
+```sql
+BEGIN;
+SET LOCAL search_path TO your_provider_schema, pg_temp;
+
+WITH completion_times AS (
+    SELECT e.instance_id, e.execution_id, terminal.created_at
+    FROM executions e
+    CROSS JOIN LATERAL (
+        SELECT h.created_at
+        FROM history h
+        WHERE h.instance_id = e.instance_id
+          AND h.execution_id = e.execution_id
+          AND h.event_data::jsonb->>'type' = 'OrchestrationContinuedAsNew'
+        ORDER BY h.event_id DESC
+        LIMIT 1
+    ) terminal
+    WHERE e.status = 'ContinuedAsNew' AND e.completed_at IS NULL
+)
+UPDATE executions e
+SET completed_at = c.created_at
+FROM completion_times c
+WHERE e.instance_id = c.instance_id AND e.execution_id = c.execution_id
+  AND e.status = 'ContinuedAsNew' AND e.completed_at IS NULL;
+
+SELECT instance_id, execution_id
+FROM executions
+WHERE status = 'ContinuedAsNew' AND completed_at IS NULL
+ORDER BY instance_id, execution_id;
+COMMIT;
+```
+
+Rows returned by the final query have no recoverable terminal timestamp; inspect
+their history rather than substituting the current time. Invalid history JSONB
+aborts the transaction instead of being skipped. After repair, restart only new
+binaries and updated SQL callers, then resume retention with reviewed cutoffs.
 
 ### Batched execution pruning (0028)
 
@@ -167,7 +236,9 @@ Public-schema cleanup also removes the batch-pruning function, while leaving the
 
 ### Migration already applied
 - Check the `_duroxide_migrations` table in your schema
-- If you need to re-run a migration, manually delete its entry from the tracking table (use with caution!)
+- Keep applied migration records intact. Use a documented data repair, such as
+  the continued-execution timestamp repair above, or a new migration rather than
+  deleting ledger rows to force old migrations to run again.
 
 ### Schema conflicts
 - Each schema maintains its own migration history
