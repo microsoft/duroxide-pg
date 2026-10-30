@@ -99,6 +99,10 @@ execution's last `OrchestrationContinuedAsNew` history event. This uses the same
 provider clock as acknowledgement, not the execution's start time or upgrade
 time. Existing non-NULL timestamps and other execution statuses are unchanged.
 
+If a history payload cannot be decoded as JSONB, the migration aborts and reports
+its schema, instance, execution, and event key. No timestamp changes or function
+replacements from migration `0027` are committed on failure.
+
 If no terminal event is available, the timestamp stays NULL and the migration
 warns with the affected row count. These rows remain ineligible for age-based
 pruning; inspect their history before choosing an explicit count-based policy.

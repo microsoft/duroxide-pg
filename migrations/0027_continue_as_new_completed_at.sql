@@ -8,6 +8,7 @@ DO $$
 DECLARE
     v_schema_name TEXT := current_schema();
     v_unresolved BIGINT;
+    v_history RECORD;
 BEGIN
     EXECUTE format($fmt$
         CREATE OR REPLACE FUNCTION %1$I.ack_orchestration_item(
@@ -311,24 +312,46 @@ $fmt$, v_schema_name);
 
     -- History.created_at used the same provider clock as the acknowledgement.
     -- event_type can contain "Event", so inspect the serialized discriminator.
-    EXECUTE format($fmt$
-        WITH completion_times AS (
-            SELECT e.instance_id, e.execution_id, terminal.created_at
-            FROM %1$I.executions e
-            CROSS JOIN LATERAL (
-                SELECT h.created_at FROM %1$I.history h
-                WHERE h.instance_id = e.instance_id AND h.execution_id = e.execution_id
-                  AND h.event_data::jsonb->>'type' = 'OrchestrationContinuedAsNew'
-                ORDER BY h.event_id DESC LIMIT 1
-            ) terminal
-            WHERE e.status = 'ContinuedAsNew' AND e.completed_at IS NULL
-        )
-        UPDATE %1$I.executions e
-        SET completed_at = c.created_at
-        FROM completion_times c
-        WHERE e.instance_id = c.instance_id AND e.execution_id = c.execution_id
-          AND e.status = 'ContinuedAsNew' AND e.completed_at IS NULL
+    BEGIN
+        EXECUTE format($fmt$
+            WITH completion_times AS (
+                SELECT e.instance_id, e.execution_id, terminal.created_at
+                FROM %1$I.executions e
+                CROSS JOIN LATERAL (
+                    SELECT h.created_at FROM %1$I.history h
+                    WHERE h.instance_id = e.instance_id AND h.execution_id = e.execution_id
+                      AND h.event_data::jsonb->>'type' = 'OrchestrationContinuedAsNew'
+                    ORDER BY h.event_id DESC LIMIT 1
+                ) terminal
+                WHERE e.status = 'ContinuedAsNew' AND e.completed_at IS NULL
+            )
+            UPDATE %1$I.executions e
+            SET completed_at = c.created_at
+            FROM completion_times c
+            WHERE e.instance_id = c.instance_id AND e.execution_id = c.execution_id
+              AND e.status = 'ContinuedAsNew' AND e.completed_at IS NULL
 $fmt$, v_schema_name);
+    EXCEPTION WHEN data_exception THEN
+        -- Only rescan on failure, keeping successful backfills set-based.
+        FOR v_history IN EXECUTE format($fmt$
+            SELECT h.instance_id, h.execution_id, h.event_id, h.event_data
+            FROM %1$I.history h
+            JOIN %1$I.executions e USING (instance_id, execution_id)
+            WHERE e.status = 'ContinuedAsNew' AND e.completed_at IS NULL
+            ORDER BY h.instance_id, h.execution_id, h.event_id DESC
+$fmt$, v_schema_name)
+        LOOP
+            BEGIN
+                PERFORM v_history.event_data::jsonb;
+            EXCEPTION WHEN data_exception THEN
+                RAISE EXCEPTION 'Migration 0027: invalid history event_data in schema % (instance_id=%, execution_id=%, event_id=%): %',
+                    v_schema_name, v_history.instance_id, v_history.execution_id,
+                    v_history.event_id, SQLERRM
+                    USING ERRCODE = SQLSTATE;
+            END;
+        END LOOP;
+        RAISE;
+    END;
 
     EXECUTE format(
         'SELECT count(*) FROM %I.executions WHERE status = ''ContinuedAsNew'' AND completed_at IS NULL',
