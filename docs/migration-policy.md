@@ -46,6 +46,19 @@ startup so multiple nodes do not race to apply the same migration.
 `ApplyAll` also rejects unknown future migration versions before it runs DDL, so
 an older binary will not mutate a schema that appears ahead of its code.
 
+## Worker Queue Progress (Migration 0027)
+
+Migration `0027` changes worker selection to order eligible items by visibility
+time, then queue ID. Deferred work moves behind items that were already ready,
+even when its delay expires before the backlog drains. Session and tag routing
+are unchanged. The migration adds an index on `worker_queue(visible_at, id)`;
+this non-concurrent index build blocks queue writes while it runs.
+
+The stored procedure signature is unchanged, so already-running older providers
+can continue using it. As with other migrations, older binaries cannot restart
+against the upgraded schema because they reject unknown migration versions.
+Coordinate migration and worker rollout accordingly.
+
 ## Example
 
 ```rust
