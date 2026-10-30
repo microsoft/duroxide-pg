@@ -228,7 +228,7 @@ find no eligible work, and timer catch-up scans, are coalesced to a 100 ms
 cadence to bound query load. This can add up to 100 ms after an unsuccessful
 wake; the overall polling deadline is not extended.
 
-Migration `0027` installs **disabled** queue notification triggers. Constructing
+Migration `0030` installs **disabled** queue notification triggers. Constructing
 a provider with both `MigrationPolicy::ApplyAll` and `long_poll.enabled = true`
 activates them for that schema. `VerifyOnly` workers require that activation
 first and perform no DDL themselves. See [Migration Policy](docs/migration-policy.md).

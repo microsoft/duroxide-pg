@@ -1242,6 +1242,20 @@ async fn notifications_wake_the_session_owner_not_just_an_arbitrary_slot() {
 #[tokio::test]
 async fn public_style_cleanup_removes_notification_function() {
     let fixture = Fixture::new(LongPollConfig::default()).await;
+    let pruning_function = format!(
+        "{}.prune_executions_batch(TEXT, BIGINT, BIGINT, INTEGER)",
+        fixture.schema,
+    );
+    let pruning_exists: bool = sqlx::query_scalar("SELECT to_regprocedure($1) IS NOT NULL")
+        .bind(&pruning_function)
+        .fetch_one(&fixture.control)
+        .await
+        .unwrap();
+    if !pruning_exists {
+        sqlx::query(&format!(
+            "CREATE FUNCTION {pruning_function} RETURNS VOID LANGUAGE plpgsql AS $$ BEGIN RETURN; END $$"
+        )).execute(&fixture.control).await.unwrap();
+    }
     sqlx::query(&format!("SELECT {}.cleanup_schema()", fixture.schema))
         .execute(&fixture.control)
         .await
@@ -1251,8 +1265,17 @@ async fn public_style_cleanup_removes_notification_function() {
         .fetch_one(&fixture.control)
         .await
         .unwrap();
-    assert!(!exists);
+    let pruning_exists: bool = sqlx::query_scalar("SELECT to_regprocedure($1) IS NOT NULL")
+        .bind(&pruning_function)
+        .fetch_one(&fixture.control)
+        .await
+        .unwrap();
     fixture.cleanup().await;
+    assert!(!exists);
+    assert!(
+        !pruning_exists,
+        "cleanup must retain migration 0028's batched-pruning DROP"
+    );
 }
 
 #[tokio::test]
@@ -1574,7 +1597,7 @@ async fn notification_installation_and_activation_follow_writer_lock_order() {
                     .await
                     .unwrap();
                 sqlx::raw_sql(include_str!(
-                    "../migrations/0027_add_long_poll_notifications.sql"
+                    "../migrations/0030_add_long_poll_notifications.sql"
                 ))
                 .execute(&mut *tx)
                 .await
@@ -1751,7 +1774,7 @@ async fn upgrading_pre_notification_schema_preserves_work_and_defaults_to_disabl
         .await
         .unwrap();
     let schema = schema_name();
-    harness::migrate_through(&control, &schema, 26).await;
+    harness::migrate_through(&control, &schema, 29).await;
     let payload = serde_json::to_string(&activity("retained", None, None)).unwrap();
     sqlx::query(&format!(
         "INSERT INTO {schema}.worker_queue \

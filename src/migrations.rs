@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 
-// Touch this module when adding embedded files so incremental builds see them. Latest: 0027.
+// Touch this module when adding embedded files so incremental builds see them. Latest: 0030.
 static MIGRATIONS: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations");
 
 const DDL_LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout = '250ms'";
@@ -307,17 +307,18 @@ impl MigrationRunner {
     }
 
     async fn retry_ddl(&self, error: &anyhow::Error, deadline: Instant, operation: &str) -> bool {
-        let retryable = error
+        let sqlstate = error
             .downcast_ref::<sqlx::Error>()
             .and_then(sqlx::Error::as_database_error)
-            .is_some_and(|error| matches!(error.code().as_deref(), Some("40P01" | "55P03")));
-        if !retryable || Instant::now() >= deadline {
+            .and_then(|error| error.code());
+        if !matches!(sqlstate.as_deref(), Some("40P01" | "55P03")) || Instant::now() >= deadline {
             return false;
         }
         tracing::warn!(
             schema = %self.schema_name,
             operation,
-            error = %error,
+            sqlstate = sqlstate.as_deref(),
+            error = %format_args!("{error:#}"),
             "DDL lock contention; retrying the rolled-back transaction"
         );
         let jitter = Duration::from_millis(50 + u64::from(uuid::Uuid::new_v4().as_bytes()[0]));
@@ -900,6 +901,75 @@ impl MigrationRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ddl_retry_logs_sqlstate_and_full_error_context() {
+        #[derive(Clone, Default)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping DDL logging database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let runner = MigrationRunner::new(Arc::new(pool.clone()), "diagnostic_test".to_string());
+        let captured = Capture::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_env_filter("off,duroxide_pg::migrations=warn")
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        for (code, message) in [
+            ("40P01", "simulated migration deadlock"),
+            ("55P03", "simulated migration lock timeout"),
+        ] {
+            let error = sqlx::query(&format!(
+                "DO $$ BEGIN RAISE EXCEPTION '{message}' USING ERRCODE = '{code}'; END $$"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap_err();
+            let error = anyhow::Error::new(error).context("outer migration statement context");
+            assert!(
+                runner
+                    .retry_ddl(
+                        &error,
+                        Instant::now() + Duration::from_secs(5),
+                        "test migration"
+                    )
+                    .await
+            );
+            let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+            assert!(
+                output.contains("sqlstate=") && output.contains(code),
+                "{output}"
+            );
+            assert!(
+                output.contains("outer migration statement context") && output.contains(message),
+                "{output}"
+            );
+        }
+        pool.close().await;
+    }
 
     #[test]
     fn migration_search_path_pins_pg_temp_last() {

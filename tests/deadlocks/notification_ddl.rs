@@ -31,7 +31,7 @@ async fn snapshot(pool: &PgPool, schema: &str) -> Value {
 async fn notification_upgrade_retries_reverse_order_delete_contention() {
     with_schema(|schema| async move {
         let pool = raw_pool(&database_url()).await;
-        migrate_through(&pool, &schema, 26).await;
+        migrate_through(&pool, &schema, 29).await;
         sqlx::Executor::execute(
             &pool,
             format!(
@@ -99,7 +99,7 @@ async fn notification_upgrade_retries_reverse_order_delete_contention() {
         let after_ledger = after["ledger"].as_array().unwrap();
         assert_eq!(&after_ledger[..before_ledger.len()], before_ledger);
         assert_eq!(after_ledger.len(), before_ledger.len() + 1);
-        assert_eq!(after_ledger.last().unwrap()["version"], 27);
+        assert_eq!(after_ledger.last().unwrap()["version"], 30);
         assert!(after["worker"].is_null());
         assert!(after["orchestration"].is_null());
     })
@@ -111,12 +111,12 @@ async fn notification_migration_retries_only_transient_errors_and_rolls_back() {
     for code in ["40P01", "55P03", "42501"] {
         with_schema(move |schema| async move {
             let pool = raw_pool(&database_url()).await;
-            migrate_through(&pool, &schema, 26).await;
+            migrate_through(&pool, &schema, 29).await;
             sqlx::Executor::execute(&pool, format!(
                 "CREATE SEQUENCE {schema}.migration_attempts;
                  CREATE FUNCTION {schema}.reject_first_migration() RETURNS trigger LANGUAGE plpgsql AS $$
                  BEGIN
-                     IF NEW.version = 27 AND nextval('{schema}.migration_attempts') = 1 THEN
+                     IF NEW.version = 30 AND nextval('{schema}.migration_attempts') = 1 THEN
                          RAISE EXCEPTION 'injected migration failure' USING ERRCODE = '{code}';
                      END IF;
                      RETURN NEW;
@@ -149,7 +149,7 @@ async fn notification_migration_retries_only_transient_errors_and_rolls_back() {
                 let after_ledger = after["ledger"].as_array().unwrap();
                 assert_eq!(&after_ledger[..before_ledger.len()], before_ledger);
                 assert_eq!(after_ledger.len(), before_ledger.len() + 1);
-                assert_eq!(after_ledger.last().unwrap()["version"], 27);
+                assert_eq!(after_ledger.last().unwrap()["version"], 30);
             }
         }).await;
     }

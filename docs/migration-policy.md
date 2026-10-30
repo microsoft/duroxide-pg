@@ -40,9 +40,18 @@ immediately. A failed attempt does not advance the migration ledger. The
 migration connection is closed on exit or cancellation so a failed unlock
 cannot leave a session advisory lock in the pool.
 
+The contention budget is currently fixed, not a provider configuration option.
+If it runs out, inspect the logged schema, SQLSTATE, and error chain, stop or
+drain competing workers and admin writers, and allow transactions holding the
+blocking locks to finish. Then retry `ApplyAll` from the process with DDL
+privileges. Earlier successful migrations remain recorded; the failed
+transaction is rolled back and will be retried on startup. Do not delete or
+edit migration ledger rows to force a retry. Backfill migrations must use their
+drained-upgrade procedure: a transaction retry repeats that backfill's work.
+
 ## Long-Poll Notification Activation
 
-Migration `0027` installs disabled notification triggers. With
+Migration `0030` installs disabled notification triggers. With
 `long_poll.enabled = true`, `ApplyAll` also enables the queue and session triggers in a
 transaction while holding the migration lock. `VerifyOnly` requires that the
 triggers are already active; otherwise construction returns an error explaining

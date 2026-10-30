@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_worker_processed ON worker_queue(processed_at);
 
 Migrations are automatically applied when creating a `PostgresProvider`. Each test schema gets its own migration history, so you can test migrations in isolation.
 
-Migration `0027` installs disabled queue-notification triggers. A provider with
+Migration `0030` installs disabled queue-notification triggers. A provider with
 `MigrationPolicy::ApplyAll` and `long_poll.enabled = true` activates them for the
 schema under the migration lock. `VerifyOnly` requires prior activation. See
 [Migration Policy](../docs/migration-policy.md) for compatibility and privilege
@@ -99,6 +99,15 @@ The six triggers cover both queues and session leases. Claims and renewals send
 future lease-expiry hints; releasing an orchestration claim also sends an
 immediate hint, even when the abandoned message is delayed. Installation and
 activation use bounded transaction retries under lock contention.
+
+The long-poll migration is reserved as `0030`, after `0027`-`0028` from
+[#32](https://github.com/microsoft/duroxide-pg/pull/32) and `0029` from
+[#51](https://github.com/microsoft/duroxide-pg/pull/51). Its `cleanup_schema`
+definition retains migration `0028`'s batched-pruning cleanup.
+Disposable development/test databases that applied an earlier draft of the
+long-poll migration as `0027` must be recreated before using this sequence.
+Do not delete migration records or apply this draft over such a database that
+contains data you need to preserve.
 
 The provider validation harness can exercise either mode:
 

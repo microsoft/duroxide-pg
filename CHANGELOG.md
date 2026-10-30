@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their rolled-back connections to the pool. A one-second client watchdog
   retains any pending scan instead of repeatedly detaching server backends;
   degraded listeners keep polling independently of reconnect attempts.
-- Migration `0027` adds disabled notification triggers. An `ApplyAll` provider
+- Migration `0030` adds disabled notification triggers. An `ApplyAll` provider
   with long-polling enabled explicitly activates them for its schema;
   `VerifyOnly` requires prior activation and performs no DDL. Once activated,
   queue and session-lease writes cannot use PostgreSQL `PREPARE TRANSACTION`.
@@ -44,7 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Migration and notification-activation transactions use bounded lock waits
   and jittered retries for deadlocks and lock contention, with a ten-second
   retry budget. Permanent errors remain errors and failed attempts do not
-  change the migration ledger.
+  change the migration ledger. Retry warnings include the SQLSTATE and full
+  error context.
 - Add a reproducible sparse/loaded workflow benchmark alongside the idle-query
   benchmark, recording concurrency, duration, pool size, and commit settings.
 

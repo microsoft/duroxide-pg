@@ -1,7 +1,7 @@
 -- Copyright (c) Microsoft Corporation.
 -- Licensed under the MIT License.
 
--- Migration 0027: notification hints for optional long-polling.
+-- Migration 0030: notification hints for optional long-polling.
 -- Table OIDs keep channels short and independent of identifier case/truncation.
 
 CREATE OR REPLACE FUNCTION duroxide_notify_queue_work()
@@ -144,6 +144,7 @@ BEGIN
             DROP FUNCTION IF EXISTS %1$I.get_parent_id(TEXT);
             DROP FUNCTION IF EXISTS %1$I.delete_instances_atomic(TEXT[], BOOLEAN);
             DROP FUNCTION IF EXISTS %1$I.prune_executions(TEXT, INTEGER, BIGINT);
+            DROP FUNCTION IF EXISTS %1$I.prune_executions_batch(TEXT, BIGINT, BIGINT, INTEGER);
             DROP FUNCTION IF EXISTS %1$I.renew_session_lock(TEXT[], BIGINT, BIGINT, BIGINT);
             DROP FUNCTION IF EXISTS %1$I.cleanup_orphaned_sessions(BIGINT);
             DROP FUNCTION IF EXISTS %1$I.get_custom_status(TEXT, BIGINT);
