@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Deferred activities no longer repeatedly overtake already-ready work after
+  their retry delay expires. Migration `0029` orders eligible worker items by
+  visibility time and then queue ID, with a matching index, for both session and
+  non-session workers. Session ownership, tag filtering, lock handling, and
+  attempt accounting are unchanged.
+
+### Changed
+
+- Upgrading applies migration `0029`, which replaces `fetch_work_item` without
+  changing its signature and adds an index on `worker_queue(visible_at, id)`.
+  Index creation blocks worker queue operations until the migration commits;
+  for busy queues, [pre-build the index concurrently](migrations/README.md#worker-queue-progress-migration-0029).
+  Invalid prebuilt indexes are rejected. Already-running older providers can
+  use the updated function, but older binaries reject the new migration
+  version on startup.
+
 ## [0.1.38] - 2026-10-26
 
 ### Fixed

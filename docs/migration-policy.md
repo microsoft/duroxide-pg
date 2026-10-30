@@ -46,6 +46,11 @@ startup so multiple nodes do not race to apply the same migration.
 `ApplyAll` also rejects unknown future migration versions before it runs DDL, so
 an older binary will not mutate a schema that appears ahead of its code.
 
+## Worker Queue Progress (Migration 0029)
+
+See the [migration rollout notes](../migrations/README.md#worker-queue-progress-migration-0029)
+for queue locking impact, concurrent index preparation, and provider compatibility.
+
 ## Example
 
 ```rust
