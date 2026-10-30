@@ -35,9 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Migrations `0027` and `0028` require a fully drained upgrade.** Pause delete
   and prune jobs, then stop and drain every process that uses the provider:
   workers, clients, retention and maintenance jobs, and direct SQL callers.
-  Wait for in-flight calls and transactions to finish. Apply the migrations with
-  provider traffic stopped, then restart only new binaries and updated SQL
-  callers. Stopping only workers is insufficient: old age-based deletion code
+  Wait for in-flight calls and transactions to finish. Start one process using
+  the new binary with `MigrationPolicy::ApplyAll` first; provider initialization
+  applies the migrations. Keep provider traffic stopped until initialization
+  succeeds, then restart the remaining new binaries and updated SQL callers.
+  Stopping only workers is insufficient: old age-based deletion code
   can delete pending continuations after their completion timestamps are filled.
 - Expect a one-time wave of age-based deletions of old continue-as-new
   generations when retention resumes. Review retention cutoffs before restarting

@@ -119,9 +119,12 @@ upgrade with old and new provider binaries running together:
 2. Stop and drain **every process that uses the provider**: workers, clients,
    retention and maintenance jobs, and direct SQL callers. Wait for in-flight
    calls and transactions to finish.
-3. Apply the migrations with provider traffic still stopped, then restart only
-   new binaries containing these fixes and updated direct SQL callers.
-4. Review retention cutoffs before resuming delete and prune jobs. Expect a
+3. Start one process using the new binary with `MigrationPolicy::ApplyAll` first.
+   It applies the migrations during provider initialization; keep provider
+   traffic stopped until initialization succeeds.
+4. Restart the remaining processes using only new binaries containing these fixes
+   and updated direct SQL callers.
+5. Review retention cutoffs before resuming delete and prune jobs. Expect a
    one-time wave of age-based deletions of old continue-as-new generations whose
    completion timestamps have now been recovered.
 
