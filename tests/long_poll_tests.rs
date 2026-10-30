@@ -14,6 +14,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
+#[path = "deadlocks/harness.rs"]
+mod harness;
+
 const LOCK: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_secs(5);
 
@@ -119,14 +122,23 @@ impl Queue {
     }
 
     async fn fetch(self, provider: &PostgresProvider, timeout: Duration) -> Option<Claim> {
+        self.fetch_with_lock(provider, LOCK, timeout).await
+    }
+
+    async fn fetch_with_lock(
+        self,
+        provider: &PostgresProvider,
+        lock_timeout: Duration,
+        poll_timeout: Duration,
+    ) -> Option<Claim> {
         match self {
             Self::Orchestration => provider
-                .fetch_orchestration_item(LOCK, timeout, None)
+                .fetch_orchestration_item(lock_timeout, poll_timeout, None)
                 .await
                 .unwrap()
                 .map(|(_, token, attempt)| Claim { token, attempt }),
             Self::Worker => provider
-                .fetch_work_item(LOCK, timeout, None, &TagFilter::Any)
+                .fetch_work_item(lock_timeout, poll_timeout, None, &TagFilter::Any)
                 .await
                 .unwrap()
                 .map(|(_, token, attempt)| Claim { token, attempt }),
@@ -371,6 +383,208 @@ async fn existing_work_returns_without_waiting() {
 }
 
 #[tokio::test]
+async fn long_poll_construction_leaves_a_warm_fetch_connection() {
+    let schema = schema_name();
+    let mut config = ProviderConfig::url(database_url());
+    config.schema_name = Some(schema.clone());
+    config.long_poll.enabled = true;
+    let provider = Arc::new(PostgresProvider::new_with_config(config).await.unwrap());
+    let connections = provider.pool().size();
+    let control = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url())
+        .await
+        .unwrap();
+    Fixture {
+        provider,
+        control,
+        schema,
+    }
+    .cleanup()
+    .await;
+    assert!(
+        connections >= 2,
+        "LISTEN must not consume the only warm connection: {connections}"
+    );
+}
+
+#[tokio::test]
+async fn expired_claims_wake_fetches_before_the_poll_timeout() {
+    let mut failures = Vec::new();
+    for queue in [Queue::Orchestration, Queue::Worker] {
+        for claim_before_listener in [false, true] {
+            let owner = Fixture::new(polling_config(false)).await;
+            let waiter = if claim_before_listener {
+                None
+            } else {
+                Some(Fixture::with_schema(polling_config(true), owner.schema.clone()).await)
+            };
+            queue.enqueue(&owner, "crashed-owner", None).await;
+            let first = queue
+                .fetch_with_lock(&owner.provider, Duration::from_secs(1), Duration::ZERO)
+                .await
+                .unwrap();
+            let waiter = match waiter {
+                Some(waiter) => waiter,
+                None => Fixture::with_schema(polling_config(true), owner.schema.clone()).await,
+            };
+            let pool = owner.provider.pool().clone();
+            drop(owner.provider);
+            pool.close().await;
+            owner.control.close().await;
+            let before: (String, i64, i32) = sqlx::query_as(&format!(
+                "SELECT lock_token, locked_until, attempt_count FROM {}.{}",
+                waiter.schema,
+                queue.table(),
+            ))
+            .fetch_one(&waiter.control)
+            .await
+            .unwrap();
+            assert_eq!(before.0, first.token);
+            assert_eq!(before.2, 1);
+            let result = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Some(claim) =
+                        queue.fetch(&waiter.provider, Duration::from_secs(10)).await
+                    {
+                        break claim;
+                    }
+                }
+            })
+            .await;
+            let after: (String, i64, i32) = sqlx::query_as(&format!(
+                "SELECT lock_token, locked_until, attempt_count FROM {}.{}",
+                waiter.schema,
+                queue.table(),
+            ))
+            .fetch_one(&waiter.control)
+            .await
+            .unwrap();
+            waiter.cleanup().await;
+            match result {
+                Ok(claim) => {
+                    assert_ne!(claim.token, first.token);
+                    assert_eq!(claim.attempt, 2);
+                    assert_eq!(after.0, claim.token);
+                    assert!(after.1 > before.1);
+                    assert_eq!(after.2, 2);
+                }
+                Err(error) => {
+                    assert_eq!(after, before, "a waiting fetch must not alter the claim");
+                    failures.push((queue, claim_before_listener, error));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "lease recovery was delayed: {failures:?}"
+    );
+}
+
+#[tokio::test]
+async fn session_expiry_wakes_a_waiting_new_owner() {
+    let fixture = Fixture::enabled().await;
+    for instance in ["held-session-item", "waiting-session-item"] {
+        fixture
+            .provider
+            .enqueue_for_worker(activity(instance, Some("expiring-session"), None))
+            .await
+            .unwrap();
+    }
+    let first = fixture
+        .provider
+        .fetch_work_item(
+            LOCK,
+            Duration::ZERO,
+            Some(&SessionFetchConfig {
+                owner_id: "crashed-session-owner".to_string(),
+                lock_timeout: Duration::from_secs(1),
+            }),
+            &TagFilter::Any,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let recovered = tokio::time::timeout(
+        Duration::from_secs(3),
+        fixture.provider.fetch_work_item(
+            LOCK,
+            Duration::from_secs(10),
+            Some(&SessionFetchConfig {
+                owner_id: "new-session-owner".to_string(),
+                lock_timeout: LOCK,
+            }),
+            &TagFilter::Any,
+        ),
+    )
+    .await;
+    let owner: String = sqlx::query_scalar(&format!(
+        "SELECT worker_id FROM {}.sessions WHERE session_id = 'expiring-session'",
+        fixture.schema,
+    ))
+    .fetch_one(&fixture.control)
+    .await
+    .unwrap();
+    fixture.cleanup().await;
+    let (item, token, attempt) = recovered
+        .expect("session expiry must beat the ten-second polling timeout")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        item,
+        WorkItem::ActivityExecute { instance, .. } if instance == "waiting-session-item"
+    ));
+    assert_ne!(token, first.1);
+    assert_eq!(attempt, 1);
+    assert_eq!(owner, "new-session-owner");
+}
+
+#[tokio::test]
+async fn delayed_abandon_immediately_releases_other_visible_orchestration_messages() {
+    let fixture = Fixture::enabled().await;
+    Queue::Orchestration
+        .enqueue(&fixture, "delayed-abandon", None)
+        .await;
+    let first = Queue::Orchestration
+        .fetch(&fixture.provider, Duration::ZERO)
+        .await
+        .unwrap();
+    fixture
+        .provider
+        .enqueue_for_orchestrator(
+            WorkItem::ExternalRaised {
+                instance: "delayed-abandon".to_string(),
+                name: "ready".to_string(),
+                data: String::new(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let waiting = fixture.waiting_fetch(Queue::Orchestration).await;
+    let start = Instant::now();
+    Queue::Orchestration
+        .abandon(
+            &fixture.provider,
+            &first.token,
+            Some(Duration::from_secs(2)),
+        )
+        .await;
+    let next = claimed(waiting).await;
+    let elapsed = start.elapsed();
+    Queue::Orchestration
+        .ack(&fixture.provider, &next.token)
+        .await;
+    fixture.cleanup().await;
+    assert!(elapsed < Duration::from_secs(1), "release took {elapsed:?}");
+    assert_eq!(
+        next.attempt, 1,
+        "only the already-visible message should be claimed"
+    );
+}
+
+#[tokio::test]
 async fn orphan_cleanup_does_not_put_ready_orchestrations_to_sleep() {
     let producer = Fixture::new(LongPollConfig::default()).await;
     for instance in ["orphan-a", "orphan-b"] {
@@ -475,7 +689,7 @@ async fn acknowledgment_wakes_another_provider_after_it_consumed_a_locked_instan
 }
 
 #[tokio::test]
-async fn orchestration_claims_stay_silent_but_acknowledgments_notify() {
+async fn orchestration_claims_announce_only_expiry_but_acknowledgments_notify() {
     let fixture = Fixture::enabled().await;
     let mut listener = sqlx::postgres::PgListener::connect_with(&fixture.control)
         .await
@@ -495,6 +709,20 @@ async fn orchestration_claims_stay_silent_but_acknowledgments_notify() {
         .fetch(&fixture.provider, Duration::ZERO)
         .await
         .unwrap();
+    let notification = tokio::time::timeout(Duration::from_secs(3), listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let deadline: i64 = sqlx::query_scalar(&format!(
+        "SELECT locked_until FROM {}.instance_locks WHERE lock_token = $1",
+        fixture.schema,
+    ))
+    .bind(&claim.token)
+    .fetch_one(&fixture.control)
+    .await
+    .unwrap();
+    assert_eq!(notification.payload().parse::<i64>().unwrap(), deadline);
+    assert!(deadline > Utc::now().timestamp_millis());
     assert!(
         tokio::time::timeout(Duration::from_millis(100), listener.recv())
             .await
@@ -514,36 +742,31 @@ async fn orchestration_claims_stay_silent_but_acknowledgments_notify() {
 }
 
 #[tokio::test]
-async fn closely_spaced_timers_do_not_disappear_between_paced_scans() {
+async fn renewed_claims_are_not_recovered_at_the_original_expiry() {
     for queue in [Queue::Orchestration, Queue::Worker] {
-        let mut config = polling_config(true);
-        config.timer_grace_period = Duration::ZERO;
-        let fixture = Fixture::new(config).await;
-        let first = fixture.waiting_fetch(queue).await;
-        queue
-            .enqueue(
-                &fixture,
-                "first-close-timer",
-                Some(Duration::from_millis(20)),
-            )
-            .await;
-        queue
-            .enqueue(
-                &fixture,
-                "second-close-timer",
-                Some(Duration::from_millis(40)),
-            )
-            .await;
-        let first = claimed(first).await;
-        // Keep the first item claimed so its acknowledgment cannot supply a
-        // notification that would hide a missed timer wake.
-        let second =
-            tokio::time::timeout(Duration::from_secs(3), queue.fetch(&fixture.provider, POLL))
+        let fixture = Fixture::enabled().await;
+        queue.enqueue(&fixture, "renewed", None).await;
+        let first = queue
+            .fetch_with_lock(&fixture.provider, Duration::from_secs(1), Duration::ZERO)
+            .await
+            .unwrap();
+        match queue {
+            Queue::Orchestration => fixture
+                .provider
+                .renew_orchestration_item_lock(&first.token, Duration::from_secs(2))
                 .await
-                .expect("the paced scan must wake work that matured since the first timer")
-                .expect("second timer");
+                .unwrap(),
+            Queue::Worker => fixture
+                .provider
+                .renew_work_item_lock(&first.token, Duration::from_secs(2))
+                .await
+                .unwrap(),
+        }
+        let start = Instant::now();
+        let second = claimed(fixture.waiting_fetch(queue).await).await;
+        assert!(start.elapsed() >= Duration::from_millis(1800));
         assert_ne!(first.token, second.token);
-        queue.ack(&fixture.provider, &first.token).await;
+        assert_eq!(second.attempt, 2);
         queue.ack(&fixture.provider, &second.token).await;
         fixture.cleanup().await;
     }
@@ -1338,7 +1561,7 @@ async fn activation_releases_worker_lock_before_retrying_reverse_order_contentio
     loop {
         let tried_second_lock: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name = $1 \
-             AND strpos(query, 'orchestrator_queue IN SHARE ROW EXCLUSIVE MODE NOWAIT') > 0)",
+             AND strpos(query, 'orchestrator_queue IN SHARE ROW EXCLUSIVE MODE') > 0)",
         )
         .bind(&application)
         .fetch_one(&fixture.control)
@@ -1423,47 +1646,7 @@ async fn upgrading_pre_notification_schema_preserves_work_and_defaults_to_disabl
         .await
         .unwrap();
     let schema = schema_name();
-    sqlx::query(&format!("CREATE SCHEMA {schema};",))
-        .execute(&control)
-        .await
-        .unwrap();
-    sqlx::query(&format!(
-        "CREATE TABLE {schema}._duroxide_migrations \
-         (version BIGINT PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)",
-    )).execute(&control).await.unwrap();
-    let directory = include_dir::include_dir!("$CARGO_MANIFEST_DIR/migrations");
-    let mut files: Vec<_> = directory
-        .files()
-        .filter(|file| {
-            file.path()
-                .extension()
-                .is_some_and(|extension| extension == "sql")
-        })
-        .filter(|file| file.path().file_name().unwrap().to_str().unwrap() < "0027")
-        .collect();
-    files.sort_by_key(|file| file.path());
-    for file in files {
-        let name = file.path().file_name().unwrap().to_str().unwrap();
-        let version: i64 = name.split('_').next().unwrap().parse().unwrap();
-        let mut tx = control.begin().await.unwrap();
-        sqlx::query(&format!("SET LOCAL search_path TO {schema}, pg_temp"))
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        sqlx::raw_sql(file.contents_utf8().unwrap())
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        sqlx::query(&format!(
-            "INSERT INTO {schema}._duroxide_migrations(version,name) VALUES ($1,$2)"
-        ))
-        .bind(version)
-        .bind(name)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-    }
+    harness::migrate_through(&control, &schema, 26).await;
     let payload = serde_json::to_string(&activity("retained", None, None)).unwrap();
     sqlx::query(&format!(
         "INSERT INTO {schema}.worker_queue \
@@ -1556,6 +1739,171 @@ async fn two_phase_commit_is_preserved_until_explicit_notification_activation() 
     }
     drop(connection);
     fixture.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "local release-mode benchmark; requires PostgreSQL without assertions"]
+async fn workflow_latency_and_throughput_with_long_polling() {
+    use duroxide::runtime::{registry::ActivityRegistry, Runtime, RuntimeOptions};
+    use duroxide::{
+        ActivityContext, Client, OrchestrationContext, OrchestrationRegistry, OrchestrationStatus,
+    };
+
+    const CLIENTS: usize = 20;
+    const REPETITIONS: usize = 3;
+    const DURATION: Duration = Duration::from_secs(10);
+    const SPARSE_SAMPLES: usize = 20;
+    const SPARSE_GAP: Duration = Duration::from_millis(200);
+
+    async fn complete(client: &Client, instance: &str, activities: usize) -> Duration {
+        let start = Instant::now();
+        let input = activities.to_string();
+        client
+            .start_orchestration(instance, "Bench", &input)
+            .await
+            .unwrap();
+        let status = client
+            .wait_for_orchestration(instance, Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(matches!(status, OrchestrationStatus::Completed { output, .. } if output == input));
+        start.elapsed()
+    }
+
+    for enabled in [false, true] {
+        for activities_per_workflow in [1, 5] {
+            let mut throughputs = Vec::new();
+            for repetition in 0..REPETITIONS {
+                let fixture = Fixture::new(polling_config(enabled)).await;
+                let settings: serde_json::Value = sqlx::query_scalar(
+                    "SELECT jsonb_build_object(
+                        'postgres_version', current_setting('server_version'),
+                        'debug_assertions', current_setting('debug_assertions'),
+                        'fsync', current_setting('fsync'),
+                        'full_page_writes', current_setting('full_page_writes'),
+                        'synchronous_commit', current_setting('synchronous_commit'),
+                        'synchronous_standby_names', current_setting('synchronous_standby_names'))",
+                )
+                .fetch_one(&fixture.control)
+                .await
+                .unwrap();
+                assert_eq!(settings["debug_assertions"], "off");
+                let activities = ActivityRegistry::builder()
+                    .register("Echo", |_ctx: ActivityContext, input: String| async move {
+                        Ok(input)
+                    })
+                    .build();
+                let orchestrations = OrchestrationRegistry::builder()
+                    .register(
+                        "Bench",
+                        |ctx: OrchestrationContext, input: String| async move {
+                            let count =
+                                input.parse::<usize>().map_err(|error| error.to_string())?;
+                            for _ in 0..count {
+                                ctx.schedule_activity("Echo", input.clone()).await?;
+                            }
+                            Ok(input)
+                        },
+                    )
+                    .build();
+                let options = RuntimeOptions {
+                    orchestration_concurrency: 2,
+                    worker_concurrency: 2,
+                    dispatcher_min_poll_interval: Duration::from_millis(100),
+                    dispatcher_long_poll_timeout: Duration::from_secs(30),
+                    ..Default::default()
+                };
+                println!(
+                    "BENCH {}",
+                    serde_json::json!({
+                        "phase": "config", "long_poll": enabled, "repetition": repetition,
+                        "rust_debug_assertions": cfg!(debug_assertions),
+                        "activities_per_workflow": activities_per_workflow,
+                        "orch_concurrency": options.orchestration_concurrency,
+                        "worker_concurrency": options.worker_concurrency,
+                        "pool_max": fixture.provider.pool().options().get_max_connections(),
+                        "clients": CLIENTS, "duration_seconds": DURATION.as_secs(),
+                        "postgres": settings,
+                    })
+                );
+                let runtime = Runtime::start_with_options(
+                    fixture.provider.clone(),
+                    activities,
+                    orchestrations,
+                    options,
+                )
+                .await;
+                let client = Arc::new(Client::new(fixture.provider.clone()));
+                complete(&client, "warmup", activities_per_workflow).await;
+                if activities_per_workflow == 1 && repetition == 0 {
+                    let mut latencies = Vec::new();
+                    for sample in 0..SPARSE_SAMPLES {
+                        tokio::time::sleep(SPARSE_GAP).await;
+                        latencies.push(complete(&client, &format!("sparse-{sample}"), 1).await);
+                    }
+                    latencies.sort_unstable();
+                    let median_ms = (latencies[SPARSE_SAMPLES / 2 - 1].as_secs_f64()
+                        + latencies[SPARSE_SAMPLES / 2].as_secs_f64())
+                        * 500.0;
+                    println!(
+                        "BENCH {}",
+                        serde_json::json!({
+                            "phase": "sparse", "long_poll": enabled, "samples": SPARSE_SAMPLES,
+                            "idle_gap_ms": SPARSE_GAP.as_millis(), "median_ms": median_ms,
+                        })
+                    );
+                }
+                let start = Instant::now();
+                let deadline = start + DURATION;
+                let mut tasks = tokio::task::JoinSet::new();
+                for lane in 0..CLIENTS {
+                    let client = client.clone();
+                    tasks.spawn(async move {
+                        let mut completed = 0;
+                        while Instant::now() < deadline {
+                            complete(
+                                &client,
+                                &format!("loaded-{lane}-{completed}"),
+                                activities_per_workflow,
+                            )
+                            .await;
+                            completed += 1;
+                        }
+                        completed
+                    });
+                }
+                let mut completed = 0;
+                while let Some(result) = tasks.join_next().await {
+                    completed += result.unwrap();
+                }
+                let elapsed = start.elapsed().as_secs_f64();
+                assert!(completed > 0);
+                let throughput = completed as f64 / elapsed;
+                throughputs.push(throughput);
+                println!(
+                    "BENCH {}",
+                    serde_json::json!({
+                        "phase": "loaded", "long_poll": enabled, "repetition": repetition,
+                        "activities_per_workflow": activities_per_workflow,
+                        "completed": completed, "elapsed_seconds": elapsed,
+                        "workflows_per_second": throughput,
+                    })
+                );
+                runtime.shutdown(Some(1000)).await;
+                drop(client);
+                fixture.cleanup().await;
+            }
+            throughputs.sort_by(f64::total_cmp);
+            println!(
+                "BENCH {}",
+                serde_json::json!({
+                    "phase": "loaded_median", "long_poll": enabled,
+                    "activities_per_workflow": activities_per_workflow,
+                    "workflows_per_second": throughputs[REPETITIONS / 2],
+                })
+            );
+        }
+    }
 }
 
 #[tokio::test]

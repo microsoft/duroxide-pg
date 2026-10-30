@@ -95,6 +95,10 @@ Migration `0027` installs disabled queue-notification triggers. A provider with
 schema under the migration lock. `VerifyOnly` requires prior activation. See
 [Migration Policy](../docs/migration-policy.md) for compatibility and privilege
 requirements.
+The six triggers cover both queues and session leases. Claims and renewals send
+future lease-expiry hints; releasing an orchestration claim also sends an
+immediate hint, even when the abandoned message is delayed. Installation and
+activation use bounded transaction retries under lock contention.
 
 The provider validation harness can exercise either mode:
 

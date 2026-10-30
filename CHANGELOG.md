@@ -18,10 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type is non-exhaustive to permit compatible additions.
 - Acknowledgments notify other orchestration waiters after releasing a claim,
   and per-queue catch-up scans wake work that became due between timer wakes.
+- Claims, renewals, and session leases announce future expiry deadlines, allowing
+  waiting dispatchers to recover crashed owners without waiting for the full
+  poll timeout. Delayed orchestration abandonment also wakes other visible work
+  immediately when it releases the instance lock.
+- Long-poll startup retains a warm fetch connection alongside LISTEN. Read-only
+  timer scans are bounded to 250 ms; degraded listeners keep a one-second
+  polling fallback independent of reconnect attempts.
 - Migration `0027` adds disabled notification triggers. An `ApplyAll` provider
   with long-polling enabled explicitly activates them for its schema;
   `VerifyOnly` requires prior activation and performs no DDL. Once activated,
-  queue-writing transactions cannot use PostgreSQL `PREPARE TRANSACTION`.
+  queue and session-lease writes cannot use PostgreSQL `PREPARE TRANSACTION`.
   Schemas that have not opted in retain their previous transaction behavior.
 - Long-polling reserves one connection within the configured pool and requires
   at least two connections. Client-only providers can leave it disabled.
@@ -32,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Require SQLx 0.8.3 or later within the 0.8 series for explicit listener
   reconnect handling. The existing native-TLS feature selection is unchanged.
+- Migration and notification-activation transactions use bounded lock waits
+  and jittered retries for deadlocks and lock contention, with a ten-second
+  retry budget. Permanent errors remain errors and failed attempts do not
+  change the migration ledger.
+- Add a reproducible sparse/loaded workflow benchmark alongside the idle-query
+  benchmark, recording concurrency, duration, pool size, and commit settings.
 
 ## [0.1.38] - 2026-10-26
 

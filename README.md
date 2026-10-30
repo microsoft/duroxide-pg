@@ -193,18 +193,26 @@ let provider = PostgresProvider::new_with_config(config).await?;
 
 The same setting works with `ProviderConfig::entra(...)`. Long-polling reserves
 one connection **within** the provider's pool for PostgreSQL `LISTEN`, so the
-pool must allow at least two connections. Leave it disabled for client-only
-providers, especially one-connection backend clients. It requires a
+pool must allow at least two connections. It keeps another connection warm for
+fetches rather than leaving the first dispatcher to open one. Leave it disabled
+for client-only providers, especially one-connection backend clients. It requires a
 session-preserving database connection; transaction-pooling proxies are not a
 substitute for a dedicated LISTEN session.
 
 `LongPollConfig` also provides `notifier_poll_interval` (default 60 seconds)
 and `timer_grace_period` (default 100 milliseconds). The provider schedules
-future work in both queues, rescans after a timer fires, and periodically wakes
-fetches to recover missed notifications. Reconnection resubscribes and rechecks
-work. Notifications are hints; queue predicates and locks remain authoritative.
-Lost notifications and eligibility changes such as expired leases are also
-recovered by subsequent fetches after the runtime's long-poll timeout.
+future work and orchestration, activity, and session lease expiry, rescans after
+a timer fires, and periodically wakes fetches to recover missed notifications.
+Claims and renewals announce their lease deadlines without immediately waking
+fetches. An expired claim can therefore be recovered even if its owner crashes.
+Notifications are hints; queue predicates and locks remain authoritative.
+
+Read-only timer scans have a 250 ms budget, including connection acquisition,
+so a scan blocked on one queue cannot indefinitely monopolize a two-connection
+pool. Failed or cancelled scans discard their connections. Scan errors retry
+after about one second; while reconnecting, an independent one-second wakeup
+keeps fetches checking for work even if connection establishment stalls.
+Successful reconnection resubscribes and rechecks work.
 
 An enabled fetch waits for work until its `poll_timeout`; a zero timeout still
 performs a single fetch. The timeout bounds notification waiting, not an
@@ -221,12 +229,14 @@ a provider with both `MigrationPolicy::ApplyAll` and `long_poll.enabled = true`
 activates them for that schema. `VerifyOnly` workers require that activation
 first and perform no DDL themselves. See [Migration Policy](docs/migration-policy.md).
 
-Once activated, inserts, visibility changes, released locks, and consumption of
-claimed orchestration messages emit notifications. Acknowledgment notifications
-are delivered after the transaction releases the instance lock, so other
-workers recheck events that arrived during the turn. This includes writes from
+Once activated, inserts, visibility changes, lease changes, released locks, and
+consumption of claimed orchestration messages emit notifications. Acknowledgment
+notifications are delivered after the transaction releases the instance lock, so other
+workers recheck events that arrived during the turn. Delayed abandonment also
+announces the immediate instance-lock release, so other visible messages need
+not wait for the abandoned message's delay. This includes writes from
 short-polling producers. Turning off a provider's listener does not deactivate
-the schema's triggers. Transactions writing those queues cannot use
+the schema's triggers. Transactions writing those queues or session leases cannot use
 `PREPARE TRANSACTION`, because PostgreSQL does
 not support preparing transactions that emit notifications. Schemas that have
 not opted in retain their existing transaction behavior.
@@ -252,6 +262,34 @@ may need another fetch after its poll timeout before it can claim session work.
 
 This feature does **not** convert a `duroxide-pg-opt` database into a
 `duroxide-pg` database. Their migration histories remain incompatible.
+
+#### Reproducing long-poll performance
+
+The ignored benchmarks in [tests/long_poll_tests.rs](tests/long_poll_tests.rs)
+compare short and long polling without changing the runtime's lease durations.
+Use a disposable, optimized PostgreSQL server with assertions disabled:
+
+```sh
+DUROXIDE_PG_POOL_MAX=10 cargo nextest run --release --test long_poll_tests \
+  --run-ignored only --nocapture \
+  -E 'test(workflow_latency_and_throughput_with_long_polling)'
+```
+
+The workflow driver uses two orchestration slots, two worker slots, a 100 ms
+minimum poll interval, and a 30 s long-poll timeout. It measures 20 sparse
+one-activity workflows with a 200 ms idle gap, then 20 concurrent clients running
+one- and five-sequential-activity workflows for 10 seconds, with three loaded
+repetitions per mode. Activities return immediately. A completed warm-up workflow
+is excluded. Latency includes enqueue and the client's completion-status polling;
+throughput includes draining in-flight workflows after submissions stop.
+
+Each `BENCH` JSON line records the mode, pool limit, concurrency, duration,
+PostgreSQL version, and commit settings (`fsync`, `full_page_writes`,
+`synchronous_commit`, and `synchronous_standby_names`). Keep those settings and
+the source revision alongside results; the driver does not relax durability.
+The separate `idle_query_load_is_reduced_with_long_polling` benchmark requires
+`pg_stat_statements` and measures 65 seconds per mode. The `pg-stress` binary
+continues to use short polling.
 
 ## Features
 

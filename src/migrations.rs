@@ -1,15 +1,28 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use include_dir::{include_dir, Dir};
 use sqlx::Connection;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
 
 // Touch this module when adding embedded files so incremental builds see them. Latest: 0027.
 static MIGRATIONS: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations");
+
+const DDL_LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout = '250ms'";
+const DDL_RETRY_BUDGET: Duration = Duration::from_secs(10);
+const NOTIFICATION_TRIGGERS: &[(&str, &str)] = &[
+    ("worker_queue", "trg_notify_worker_work"),
+    ("worker_queue", "trg_notify_worker_work_released"),
+    ("orchestrator_queue", "trg_notify_orch_work"),
+    ("orchestrator_queue", "trg_notify_orch_work_released"),
+    ("orchestrator_queue", "trg_notify_orch_work_consumed"),
+    ("sessions", "trg_notify_session_lease"),
+];
 
 const BASE_TABLES: &[&str] = &[
     "instances",
@@ -81,13 +94,19 @@ impl MigrationRunner {
         Ok(())
     }
 
-    async fn unlock_for_migrations(&self, conn: &mut sqlx::postgres::PgConnection) {
+    async fn unlock_for_migrations(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<()> {
         let key = self.advisory_lock_key();
-        // Best-effort unlock.
-        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
             .bind(key)
-            .execute(&mut *conn)
-            .await;
+            .fetch_one(&mut *conn)
+            .await
+            .context("Releasing the migration advisory lock")?;
+        anyhow::ensure!(
+            unlocked,
+            "Migration advisory lock was not held for schema {:?}",
+            self.schema_name
+        );
+        Ok(())
     }
 
     /// Run all pending migrations
@@ -97,6 +116,8 @@ impl MigrationRunner {
 
     pub(crate) async fn migrate_with_notifications(&self, notifications: bool) -> Result<()> {
         let mut conn = self.pool.acquire().await?;
+        // Cancellation or failed unlocking must not return a session lock to the pool.
+        conn.close_on_drop();
         let conn = &mut *conn;
         self.lock_for_migrations(conn).await?;
 
@@ -104,7 +125,7 @@ impl MigrationRunner {
         // older binary cannot rewrite a schema that is ahead of its code.
         // Short-circuit: do NOT run migrate_inner if unknown migrations are
         // detected.
-        let result = async {
+        let result: Result<()> = async {
             self.check_no_unknown_migrations(conn).await?;
             self.migrate_inner(conn).await?;
             if notifications {
@@ -113,9 +134,9 @@ impl MigrationRunner {
             Ok(())
         }
         .await;
-        self.unlock_for_migrations(conn).await;
-
-        result
+        let unlock_result = self.unlock_for_migrations(conn).await;
+        result?;
+        unlock_result
     }
 
     /// Verify that the migration tracking table exists and that every embedded
@@ -178,7 +199,9 @@ impl MigrationRunner {
             );
         }
 
-        if notifications && self.notification_trigger_counts(conn).await?.1 != 4 {
+        if notifications
+            && self.notification_trigger_counts(conn).await?.1 != NOTIFICATION_TRIGGERS.len() as i64
+        {
             anyhow::bail!(
                 "long-poll notifications are not enabled in schema {:?}. \
                  Construct a provider with MigrationPolicy::ApplyAll and \
@@ -194,20 +217,22 @@ impl MigrationRunner {
         &self,
         conn: &mut sqlx::postgres::PgConnection,
     ) -> Result<(i64, i64)> {
+        let (relations, names): (Vec<_>, Vec<_>) = NOTIFICATION_TRIGGERS
+            .iter()
+            .map(|(table, trigger)| (format!("{}.{table}", self.schema_name), *trigger))
+            .unzip();
         let counts: (i64, i64) = sqlx::query_as(
             "SELECT COUNT(*), COUNT(*) FILTER (WHERE tgenabled IN ('O', 'A')) \
              FROM pg_catalog.pg_trigger \
-             WHERE (tgrelid = $1::TEXT::REGCLASS AND tgname IN \
-                    ('trg_notify_orch_work', 'trg_notify_orch_work_released')) \
-                OR (tgrelid = $2::TEXT::REGCLASS AND tgname IN \
-                    ('trg_notify_worker_work', 'trg_notify_worker_work_released'))",
+             JOIN unnest($1::TEXT[], $2::TEXT[]) expected(relation, name) \
+               ON tgrelid = expected.relation::REGCLASS AND tgname = expected.name",
         )
-        .bind(format!("{}.orchestrator_queue", self.schema_name))
-        .bind(format!("{}.worker_queue", self.schema_name))
+        .bind(relations)
+        .bind(names)
         .fetch_one(conn)
         .await?;
         anyhow::ensure!(
-            counts.0 == 4,
+            counts.0 == NOTIFICATION_TRIGGERS.len() as i64,
             "long-poll notification triggers are missing in schema {:?}; repair the schema before enabling long-polling",
             self.schema_name,
         );
@@ -215,63 +240,89 @@ impl MigrationRunner {
     }
 
     async fn enable_notifications(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<()> {
-        if self.notification_trigger_counts(conn).await?.1 == 4 {
+        if self.notification_trigger_counts(conn).await?.1 == NOTIFICATION_TRIGGERS.len() as i64 {
             return Ok(());
         }
 
-        let mut retries = 0;
+        let deadline = Instant::now() + DDL_RETRY_BUDGET;
         loop {
-            let result: Result<(), sqlx::Error> = async {
-                // Match normal acknowledgments. Other administrative operations
-                // can reverse this order, so never wait while holding both up.
+            let result = async {
                 let mut tx = conn.begin().await?;
-                sqlx::query(&format!(
-                    "LOCK TABLE {}.worker_queue IN SHARE ROW EXCLUSIVE MODE",
-                    self.schema_name,
-                ))
-                .execute(&mut *tx)
-                .await?;
-                sqlx::query(&format!(
-                    "LOCK TABLE {}.orchestrator_queue IN SHARE ROW EXCLUSIVE MODE NOWAIT",
-                    self.schema_name,
-                ))
-                .execute(&mut *tx)
-                .await?;
-                for (table, trigger) in [
-                    ("worker_queue", "trg_notify_worker_work"),
-                    ("orchestrator_queue", "trg_notify_orch_work"),
-                ] {
-                    sqlx::query(&format!(
-                        "ALTER TABLE {}.{table} ENABLE TRIGGER {trigger}, \
-                         ENABLE TRIGGER {trigger}_released",
-                        self.schema_name,
-                    ))
-                    .execute(&mut *tx)
-                    .await?;
+                let result = async {
+                    sqlx::query(DDL_LOCK_TIMEOUT_SQL).execute(&mut *tx).await?;
+                    // Match acknowledgments, but bound every wait because admin
+                    // deletion can acquire the queue locks in the opposite order.
+                    for table in ["worker_queue", "orchestrator_queue", "sessions"] {
+                        sqlx::query(&format!(
+                            "LOCK TABLE {}.{table} IN SHARE ROW EXCLUSIVE MODE",
+                            self.schema_name,
+                        ))
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    for (table, trigger) in NOTIFICATION_TRIGGERS {
+                        sqlx::query(&format!(
+                            "ALTER TABLE {}.{table} ENABLE TRIGGER {trigger}",
+                            self.schema_name,
+                        ))
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    Ok(())
                 }
-                tx.commit().await
+                .await;
+                Self::finish_ddl(tx, result).await
             }
             .await;
             match result {
                 Ok(()) => return Ok(()),
-                Err(error)
-                    if retries < 3
-                        && error.as_database_error().is_some_and(|error| {
-                            matches!(error.code().as_deref(), Some("40P01" | "55P03"))
-                        }) =>
-                {
-                    retries += 1;
-                    tracing::warn!(
-                        schema = %self.schema_name,
-                        attempt = retries,
-                        error = %error,
-                        "Queue lock contention activating long-poll notifications; retrying the transaction"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(50 * retries)).await;
+                Err(error) => {
+                    if !self
+                        .retry_ddl(&error, deadline, "activating long-poll notifications")
+                        .await
+                    {
+                        return Err(error.context(format!(
+                            "Failed to activate long-poll notifications in schema {:?}",
+                            self.schema_name
+                        )));
+                    }
                 }
-                Err(error) => return Err(error.into()),
             }
         }
+    }
+
+    async fn finish_ddl(
+        tx: sqlx::Transaction<'_, sqlx::Postgres>,
+        result: Result<()>,
+    ) -> Result<()> {
+        match result {
+            Ok(()) => tx.commit().await.context("Committing DDL transaction"),
+            Err(error) => {
+                tx.rollback()
+                    .await
+                    .with_context(|| format!("Rolling back DDL after {error:#}"))?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn retry_ddl(&self, error: &anyhow::Error, deadline: Instant, operation: &str) -> bool {
+        let retryable = error
+            .downcast_ref::<sqlx::Error>()
+            .and_then(sqlx::Error::as_database_error)
+            .is_some_and(|error| matches!(error.code().as_deref(), Some("40P01" | "55P03")));
+        if !retryable || Instant::now() >= deadline {
+            return false;
+        }
+        tracing::warn!(
+            schema = %self.schema_name,
+            operation,
+            error = %error,
+            "DDL lock contention; retrying the rolled-back transaction"
+        );
+        let jitter = Duration::from_millis(50 + u64::from(uuid::Uuid::new_v4().as_bytes()[0]));
+        tokio::time::sleep(jitter.min(deadline.saturating_duration_since(Instant::now()))).await;
+        Instant::now() < deadline
     }
 
     /// Check that the database has no migrations the running binary does not
@@ -745,20 +796,24 @@ impl MigrationRunner {
         conn: &mut sqlx::postgres::PgConnection,
         migration: &Migration,
     ) -> Result<()> {
-        // Start transaction
-        let mut tx = conn.begin().await?;
+        let deadline = Instant::now() + DDL_RETRY_BUDGET;
+        loop {
+            match self.apply_migration_once(conn, migration).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if !self.retry_ddl(&error, deadline, &migration.name).await {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
 
-        // Set search_path for this transaction.
-        //
-        // `pg_temp` is pinned explicitly at the lowest priority. Without it,
-        // `pg_temp` keeps its implicit highest-priority position, which would let a
-        // temporary object shadow the unqualified references this migration relies on
-        // the search_path to resolve. This is defense-in-depth (CVE-2018-1058
-        // guidance); see `migration_search_path_stmt` for the threat model.
-        sqlx::query(&Self::migration_search_path_stmt(&self.schema_name))
-            .execute(&mut *tx)
-            .await?;
-
+    async fn apply_migration_once(
+        &self,
+        conn: &mut sqlx::postgres::PgConnection,
+        migration: &Migration,
+    ) -> Result<()> {
         // Remove comment lines and split SQL into individual statements
         let sql = migration.sql.trim();
         let cleaned_sql: String = sql
@@ -791,41 +846,46 @@ impl MigrationRunner {
             migration.version
         );
 
-        for (idx, statement) in statements.iter().enumerate() {
-            if !statement.trim().is_empty() {
-                tracing::debug!(
-                    "Executing statement {} of {}: {}...",
-                    idx + 1,
-                    statements.len(),
-                    &statement.chars().take(50).collect::<String>()
-                );
-                sqlx::query(statement)
+        let mut tx = conn.begin().await?;
+        let result =
+            async {
+                sqlx::query(DDL_LOCK_TIMEOUT_SQL).execute(&mut *tx).await?;
+                sqlx::query(&Self::migration_search_path_stmt(&self.schema_name))
                     .execute(&mut *tx)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to execute statement {} in migration {}: {}\nStatement: {}",
+                    .await?;
+                for (idx, statement) in statements.iter().enumerate() {
+                    if !statement.trim().is_empty() {
+                        tracing::debug!(
+                            "Executing statement {} of {}: {}...",
                             idx + 1,
-                            migration.version,
-                            e,
-                            statement
+                            statements.len(),
+                            &statement.chars().take(50).collect::<String>()
+                        );
+                        sqlx::query(statement)
+                            .execute(&mut *tx)
+                            .await
+                            .with_context(|| {
+                                format!(
+                            "Failed to execute statement {} in migration {}:\nStatement: {}",
+                            idx + 1, migration.version, statement
                         )
-                    })?;
+                            })?;
+                    }
+                }
+
+                sqlx::query(&format!(
+                    "INSERT INTO {}._duroxide_migrations (version, name) VALUES ($1, $2)",
+                    self.schema_name
+                ))
+                .bind(migration.version)
+                .bind(&migration.name)
+                .execute(&mut *tx)
+                .await?;
+                Ok(())
             }
-        }
+            .await;
 
-        // Record migration as applied
-        sqlx::query(&format!(
-            "INSERT INTO {}._duroxide_migrations (version, name) VALUES ($1, $2)",
-            self.schema_name
-        ))
-        .bind(migration.version)
-        .bind(&migration.name)
-        .execute(&mut *tx)
-        .await?;
-
-        // Commit transaction
-        tx.commit().await?;
+        Self::finish_ddl(tx, result).await?;
 
         tracing::info!(
             "Applied migration {}: {}",

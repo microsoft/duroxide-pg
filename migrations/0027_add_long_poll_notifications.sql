@@ -10,23 +10,29 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $notify$
 BEGIN
-    IF TG_OP = 'DELETE' THEN
+    IF TG_TABLE_NAME = 'sessions' THEN
+        PERFORM pg_catalog.pg_notify(
+            'duroxide_pg_' || pg_catalog.format('%I.worker_queue', TG_TABLE_SCHEMA)::pg_catalog.regclass::pg_catalog.oid::TEXT,
+            NEW.locked_until::TEXT
+        );
+        RETURN NEW;
+    ELSIF TG_OP = 'DELETE' THEN
         -- Acknowledgment consumes claimed rows and releases the instance lock
         -- in one transaction; NOTIFY is delivered only after that commit.
-        IF OLD.lock_token IS NOT NULL THEN
-            PERFORM pg_catalog.pg_notify('duroxide_pg_' || TG_RELID::TEXT, '0');
-        END IF;
+        PERFORM pg_catalog.pg_notify('duroxide_pg_' || TG_RELID::TEXT, '0');
         RETURN OLD;
-    ELSIF TG_OP = 'UPDATE' THEN
-        IF NEW.visible_at IS NOT DISTINCT FROM OLD.visible_at
-           AND NOT (OLD.lock_token IS NOT NULL AND NEW.lock_token IS NULL) THEN
-            RETURN NEW;
+    ELSIF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'orchestrator_queue' THEN
+        IF OLD.lock_token IS NOT NULL AND NEW.lock_token IS NULL THEN
+            -- Other visible messages can run even when this message is delayed.
+            PERFORM pg_catalog.pg_notify('duroxide_pg_' || TG_RELID::TEXT, '0');
         END IF;
     END IF;
 
     PERFORM pg_catalog.pg_notify(
         'duroxide_pg_' || TG_RELID::TEXT,
-        pg_catalog.ceil(EXTRACT(EPOCH FROM NEW.visible_at) * 1000)::BIGINT::TEXT
+        CASE WHEN NEW.lock_token IS NOT NULL THEN NEW.locked_until::TEXT
+             ELSE pg_catalog.ceil(EXTRACT(EPOCH FROM NEW.visible_at) * 1000)::BIGINT::TEXT
+        END
     );
     RETURN NEW;
 END;
@@ -41,11 +47,15 @@ ALTER TABLE worker_queue DISABLE TRIGGER trg_notify_worker_work;
 
 DROP TRIGGER IF EXISTS trg_notify_worker_work_released ON worker_queue;
 CREATE TRIGGER trg_notify_worker_work_released
-    AFTER UPDATE OF visible_at, lock_token ON worker_queue
+    AFTER UPDATE OF visible_at, lock_token, locked_until ON worker_queue
     FOR EACH ROW
     WHEN (
         NEW.visible_at IS DISTINCT FROM OLD.visible_at
         OR (OLD.lock_token IS NOT NULL AND NEW.lock_token IS NULL)
+        OR (NEW.lock_token IS NOT NULL AND (
+            NEW.lock_token IS DISTINCT FROM OLD.lock_token
+            OR NEW.locked_until IS DISTINCT FROM OLD.locked_until
+        ))
     )
     EXECUTE FUNCTION duroxide_notify_queue_work();
 ALTER TABLE worker_queue DISABLE TRIGGER trg_notify_worker_work_released;
@@ -58,10 +68,32 @@ ALTER TABLE orchestrator_queue DISABLE TRIGGER trg_notify_orch_work;
 
 DROP TRIGGER IF EXISTS trg_notify_orch_work_released ON orchestrator_queue;
 CREATE TRIGGER trg_notify_orch_work_released
-    AFTER DELETE OR UPDATE OF visible_at, lock_token ON orchestrator_queue
+    AFTER UPDATE OF visible_at, lock_token, locked_until ON orchestrator_queue
     FOR EACH ROW
+    WHEN (
+        NEW.visible_at IS DISTINCT FROM OLD.visible_at
+        OR (OLD.lock_token IS NOT NULL AND NEW.lock_token IS NULL)
+        OR (NEW.lock_token IS NOT NULL AND (
+            NEW.lock_token IS DISTINCT FROM OLD.lock_token
+            OR NEW.locked_until IS DISTINCT FROM OLD.locked_until
+        ))
+    )
     EXECUTE FUNCTION duroxide_notify_queue_work();
 ALTER TABLE orchestrator_queue DISABLE TRIGGER trg_notify_orch_work_released;
+
+DROP TRIGGER IF EXISTS trg_notify_orch_work_consumed ON orchestrator_queue;
+CREATE TRIGGER trg_notify_orch_work_consumed
+    AFTER DELETE ON orchestrator_queue
+    FOR EACH ROW
+    WHEN (OLD.lock_token IS NOT NULL)
+    EXECUTE FUNCTION duroxide_notify_queue_work();
+ALTER TABLE orchestrator_queue DISABLE TRIGGER trg_notify_orch_work_consumed;
+
+DROP TRIGGER IF EXISTS trg_notify_session_lease ON sessions;
+CREATE TRIGGER trg_notify_session_lease
+    AFTER INSERT OR UPDATE OF locked_until ON sessions
+    FOR EACH ROW EXECUTE FUNCTION duroxide_notify_queue_work();
+ALTER TABLE sessions DISABLE TRIGGER trg_notify_session_lease;
 
 DO $$
 DECLARE

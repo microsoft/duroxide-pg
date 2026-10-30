@@ -33,19 +33,27 @@ separate privileged process has already run migrations.
 `ApplyAll` takes a PostgreSQL session advisory lock scoped to the target schema
 before checking or applying migrations. That serializes concurrent provider
 startup so multiple nodes do not race to apply the same migration.
+Each migration transaction uses a 250 ms `lock_timeout`. Deadlocks (`40P01`) and
+lock timeouts (`55P03`) roll back and retry the entire transaction with jitter,
+within a ten-second contention budget per migration. Other errors return
+immediately. A failed attempt does not advance the migration ledger. The
+migration connection is closed on exit or cancellation so a failed unlock
+cannot leave a session advisory lock in the pool.
 
 ## Long-Poll Notification Activation
 
 Migration `0027` installs disabled notification triggers. With
-`long_poll.enabled = true`, `ApplyAll` also enables both queues' triggers in a
+`long_poll.enabled = true`, `ApplyAll` also enables the queue and session triggers in a
 transaction while holding the migration lock. `VerifyOnly` requires that the
 triggers are already active; otherwise construction returns an error explaining
 that an `ApplyAll` provider must activate them first. It never performs DDL.
 Activation follows acknowledgments' worker-before-orchestration lock order.
-If the second queue cannot be locked immediately, it releases the first and
-retries, rather than deadlocking with operations that lock the queues in reverse
-order. Lock contention and deadlocks retry the entire activation transaction
-up to three times before returning an error.
+Every lock acquisition, including the first queue, uses the same 250 ms
+`lock_timeout` and ten-second retry budget as migration transactions. Each
+failed attempt rolls back before the jittered delay. This bounds interference
+with writers and allows activation to outlast short bursts of reverse-order
+admin-delete contention. Exhausting the budget returns the database error
+without partially activating triggers.
 
 Activation is schema-wide and persists after the initializing provider exits.
 It allows short-polling clients to notify long-polling workers. Constructing a
@@ -53,9 +61,16 @@ provider with long-polling disabled does not deactivate these shared triggers.
 Schemas that have not opted in do not emit notifications.
 
 PostgreSQL cannot prepare a transaction that emits a notification, so
-`PREPARE TRANSACTION` is not supported for queue writes after activation.
+`PREPARE TRANSACTION` is not supported for queue or session-lease writes after activation.
 Reverting to two-phase-commit use requires stopping all long-polling workers
-and explicitly disabling the four `trg_notify_*` triggers on the two queues;
+and explicitly disabling all six notification triggers:
+
+- `worker_queue`: `trg_notify_worker_work`, `trg_notify_worker_work_released`
+- `orchestrator_queue`: `trg_notify_orch_work`, `trg_notify_orch_work_released`,
+  `trg_notify_orch_work_consumed`
+- `sessions`: `trg_notify_session_lease`
+
+These are verified and enabled from a single trigger inventory;
 changing a process's configuration alone is not sufficient.
 
 Notification-emitting commits also participate in PostgreSQL's server-wide

@@ -412,7 +412,7 @@ impl PostgresProvider {
 
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
-            .min_connections(1)
+            .min_connections(if long_poll.enabled { 2 } else { 1 })
             .acquire_timeout(std::time::Duration::from_secs(30))
             .connect(database_url)
             .await?;
@@ -545,7 +545,7 @@ impl PostgresProvider {
 
         let pool = PgPoolOptions::new()
             .max_connections(options.max_connections_value())
-            .min_connections(1)
+            .min_connections(if long_poll.enabled { 2 } else { 1 })
             .acquire_timeout(options.acquire_timeout_value())
             .connect_with(base_options.clone().password(&token.secret))
             .await?;
@@ -3586,11 +3586,45 @@ mod entra_pipeline_tests {
             MigrationPolicy::ApplyAll,
             LongPollConfig {
                 enabled: true,
+                notifier_poll_interval: Duration::from_millis(50),
                 ..Default::default()
             },
         )
         .await
         .expect("Entra long-poll construction should work with two connections");
+        let control = PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(
+                build_entra_connect_options(&host, port, &db, &user, PgSslMode::Disable)
+                    .password(&password),
+            )
+            .await
+            .unwrap();
+        let mut blocker = control.begin().await.unwrap();
+        sqlx::query(&format!(
+            "LOCK TABLE {schema}.orchestrator_queue IN ACCESS EXCLUSIVE MODE"
+        ))
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                     WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0)",
+                )
+                .bind(format!("FROM {schema}.orchestrator_queue"))
+                .fetch_one(&control)
+                .await
+                .unwrap();
+                if blocked {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timer scan must reach the blocked queue");
         let fetch = provider.fetch_work_item(
             Duration::from_secs(30),
             Duration::from_secs(5),
@@ -3612,16 +3646,19 @@ mod entra_pipeline_tests {
                 .await
                 .unwrap();
         };
-        let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
             tokio::join!(fetch, enqueue)
         })
-        .await
-        .expect("notification must wake the two-connection Entra provider");
-        assert!(result.unwrap().is_some());
+        .await;
+        blocker.rollback().await.unwrap();
         provider.cleanup_schema().await.unwrap();
         let pool = provider.pool().clone();
         drop(provider);
         pool.close().await;
+        control.close().await;
+        let (result, ()) =
+            result.expect("a blocked scan must not starve the two-connection Entra provider");
+        assert!(result.unwrap().is_some());
     }
 
     #[tokio::test]
