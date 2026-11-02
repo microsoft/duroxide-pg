@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `VerifyOnly` requires prior activation and performs no DDL. Once activated,
   queue and session-lease writes cannot use PostgreSQL `PREPARE TRANSACTION`.
   Schemas that have not opted in retain their previous transaction behavior.
+  **Do not release this change before #32 and #51:** migration `0030` must ship
+  with #32's `0027`-`0028` and #51's `0029`. Likewise, #51 must not be released
+  before #32. A schema migrated past missing predecessors is rejected by a later
+  combined build.
 - Long-polling reserves one connection within the configured pool and requires
   at least two connections. Client-only providers can leave it disabled.
   Notification channels support long and mixed-case schema names. This does
@@ -45,7 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and jittered retries for deadlocks and lock contention, with a ten-second
   retry budget. Permanent errors remain errors and failed attempts do not
   change the migration ledger. Retry warnings include the SQLSTATE and full
-  error context.
+  error context. Migration statement errors also retain the database message
+  in ordinary error display while preserving the original source for SQLSTATE
+  checks.
 - Add a reproducible sparse/loaded workflow benchmark alongside the idle-query
   benchmark, recording concurrency, duration, pool size, and commit settings.
 - Add a synchronous-standby contention profile with 16 orchestration and

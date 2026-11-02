@@ -865,11 +865,12 @@ impl MigrationRunner {
                         sqlx::query(statement)
                             .execute(&mut *tx)
                             .await
-                            .with_context(|| {
-                                format!(
-                            "Failed to execute statement {} in migration {}:\nStatement: {}",
-                            idx + 1, migration.version, statement
-                        )
+                            .map_err(|error| {
+                                let message = format!(
+                                    "Failed to execute statement {} in migration {}: {error}\nStatement: {}",
+                                    idx + 1, migration.version, statement
+                                );
+                                anyhow::Error::new(error).context(message)
                             })?;
                     }
                 }
@@ -901,6 +902,112 @@ impl MigrationRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn migration_statement_display_preserves_database_message_and_source() {
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping migration error database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let schema = format!("migration_error_{}", uuid::Uuid::new_v4().simple());
+        let runner = MigrationRunner::new(Arc::new(pool.clone()), schema.clone());
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        runner
+            .ensure_migration_table(&mut connection)
+            .await
+            .unwrap();
+        let valid = Migration {
+            version: 1,
+            name: "0001_error_fixture.sql".to_string(),
+            sql: "CREATE TABLE history_probe (id INTEGER PRIMARY KEY, valid BOOLEAN);
+                  INSERT INTO history_probe VALUES (7, false);
+                  CREATE FUNCTION validate_history_probe() RETURNS VOID LANGUAGE plpgsql AS $$
+                  DECLARE bad_id INTEGER;
+                  BEGIN
+                      SELECT id INTO bad_id FROM history_probe WHERE NOT valid LIMIT 1;
+                      IF FOUND THEN
+                          RAISE EXCEPTION 'Malformed history: instance=damaged-history execution_id=1 event_id=%', bad_id
+                              USING ERRCODE = '22023';
+                      END IF;
+                  END $$;".to_string(),
+        };
+        runner
+            .apply_migration(&mut connection, &valid)
+            .await
+            .unwrap();
+        let snapshot = format!(
+            "SELECT jsonb_build_object(
+                'ledger', (SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM {schema}._duroxide_migrations m),
+                'history', (SELECT jsonb_agg(to_jsonb(h) ORDER BY id) FROM {schema}.history_probe h),
+                'function', pg_get_functiondef('{schema}.validate_history_probe()'::regprocedure))"
+        );
+        let before: serde_json::Value = sqlx::query_scalar(&snapshot)
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        let invalid = Migration {
+            version: 2,
+            name: "0002_validate_history.sql".to_string(),
+            sql: "INSERT INTO history_probe VALUES (8, true);
+                  ALTER FUNCTION validate_history_probe() STABLE;
+                  SELECT validate_history_probe();"
+                .to_string(),
+        };
+        let error = runner
+            .apply_migration(&mut connection, &invalid)
+            .await
+            .unwrap_err();
+        let after: serde_json::Value = sqlx::query_scalar(&snapshot)
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(&format!("UPDATE {schema}.history_probe SET valid = true"))
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        runner
+            .apply_migration(&mut connection, &invalid)
+            .await
+            .unwrap();
+        let versions = runner.get_applied_versions(&mut connection).await.unwrap();
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+        pool.close().await;
+        assert_eq!(
+            after, before,
+            "failed migration must preserve its ledger, function, and history"
+        );
+        assert_eq!(versions, vec![1, 2]);
+        let database_error = error
+            .downcast_ref::<sqlx::Error>()
+            .and_then(sqlx::Error::as_database_error)
+            .expect("retain the database source");
+        assert_eq!(database_error.code().as_deref(), Some("22023"));
+        let display = error.to_string();
+        for expected in [
+            "Failed to execute statement 3 in migration 2",
+            "Malformed history: instance=damaged-history execution_id=1 event_id=7",
+            "Statement: SELECT validate_history_probe();",
+        ] {
+            assert!(
+                display.contains(expected),
+                "missing {expected:?} in Display: {display}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn ddl_retry_logs_sqlstate_and_full_error_context() {

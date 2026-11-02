@@ -104,6 +104,12 @@ The long-poll migration is reserved as `0030`, after `0027`-`0028` from
 [#32](https://github.com/microsoft/duroxide-pg/pull/32) and `0029` from
 [#51](https://github.com/microsoft/duroxide-pg/pull/51). Its `cleanup_schema`
 definition retains migration `0028`'s batched-pruning cleanup.
+**Do not release #41 before #32 and #51.** A release containing `0030` must
+also contain the preceding `0027`-`0029` migrations; #51 likewise must not be
+released before #32. Shipping a later migration first creates a ledger that
+the later combined build rejects as a non-prefix. Reserving a migration number
+does not make the intervening migrations optional. Do not repair this by editing
+the ledger; coordinate the release order before publishing.
 Disposable development/test databases that applied an earlier draft of the
 long-poll migration as `0027` must be recreated before using this sequence.
 Do not delete migration records or apply this draft over such a database that
