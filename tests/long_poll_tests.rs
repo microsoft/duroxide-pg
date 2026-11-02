@@ -784,7 +784,12 @@ async fn renewed_claims_are_not_recovered_at_the_original_expiry() {
 
 #[tokio::test]
 async fn delayed_inserts_and_successive_timers_wake_both_queues() {
-    for queue in [Queue::Orchestration, Queue::Worker] {
+    for (queue, second_fetch_delay) in [
+        (Queue::Orchestration, Duration::ZERO),
+        (Queue::Worker, Duration::ZERO),
+        (Queue::Orchestration, Duration::from_secs(1)),
+        (Queue::Worker, Duration::from_secs(1)),
+    ] {
         let fixture = Fixture::enabled().await;
         let fetch = fixture.waiting_fetch(queue).await;
         let start = Instant::now();
@@ -797,7 +802,9 @@ async fn delayed_inserts_and_successive_timers_wake_both_queues() {
         let first = claimed(fetch).await;
         assert!(start.elapsed() >= Duration::from_millis(300));
         queue.ack(&fixture.provider, &first.token).await;
-        let next = fixture.waiting_fetch(queue).await;
+        tokio::time::sleep(second_fetch_delay).await;
+        let provider = fixture.provider.clone();
+        let next = tokio::spawn(async move { queue.fetch(&provider, POLL).await });
         let second = claimed(next).await;
         assert!(start.elapsed() >= Duration::from_millis(700));
         queue.ack(&fixture.provider, &second.token).await;
