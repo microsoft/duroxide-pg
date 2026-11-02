@@ -115,10 +115,10 @@ impl MigrationRunner {
     }
 
     pub(crate) async fn migrate_with_notifications(&self, notifications: bool) -> Result<()> {
-        let mut conn = self.pool.acquire().await?;
+        let mut connection = self.pool.acquire().await?;
         // Cancellation or failed unlocking must not return a session lock to the pool.
-        conn.close_on_drop();
-        let conn = &mut *conn;
+        connection.close_on_drop();
+        let conn = &mut *connection;
         self.lock_for_migrations(conn).await?;
 
         // Reject unknown migrations while holding the advisory lock so that an
@@ -136,7 +136,10 @@ impl MigrationRunner {
         .await;
         let unlock_result = self.unlock_for_migrations(conn).await;
         result?;
-        unlock_result
+        unlock_result?;
+        // Explicit return bypasses close-on-drop only after the unlock is confirmed.
+        connection.return_to_pool().await;
+        Ok(())
     }
 
     /// Verify that the migration tracking table exists and that every embedded
@@ -902,6 +905,235 @@ impl MigrationRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn migration_connection_stays_warm_after_successful_unlock() {
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping migration connection database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let mut control = sqlx::PgConnection::connect(&url).await.unwrap();
+        let schema = format!("warm_migration_{}", uuid::Uuid::new_v4().simple());
+        let runner = MigrationRunner::new(Arc::new(pool.clone()), schema.clone());
+        let original_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let mut results = Vec::new();
+        for notifications in [false, false, true] {
+            runner
+                .migrate_with_notifications(notifications)
+                .await
+                .unwrap();
+            let idle = pool.num_idle();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let unlocked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+                .bind(runner.advisory_lock_key())
+                .fetch_one(&mut control)
+                .await
+                .unwrap();
+            results.push((idle, pid, unlocked));
+        }
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&mut control)
+            .await
+            .unwrap();
+        for (idle, pid, unlocked) in results {
+            assert_eq!(
+                pid, original_pid,
+                "migration success must not force a new connection"
+            );
+            assert_eq!(
+                idle, 1,
+                "the original connection must be idle before startup returns"
+            );
+            assert!(
+                unlocked,
+                "the warm connection must not retain the migration lock"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_connection_is_discarded_when_unlock_is_not_confirmed() {
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping migration unlock database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let mut control = sqlx::PgConnection::connect(&url).await.unwrap();
+        let schema = format!("lost_migration_lock_{}", uuid::Uuid::new_v4().simple());
+        let runner = MigrationRunner::new(Arc::new(pool.clone()), schema.clone());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&mut control)
+            .await
+            .unwrap();
+        runner.ensure_migration_table(&mut control).await.unwrap();
+        let versions: Vec<_> = runner
+            .load_migrations()
+            .unwrap()
+            .iter()
+            .map(|m| m.version)
+            .collect();
+        let last = versions.last().unwrap();
+        sqlx::Executor::execute(&mut control, format!(
+            "CREATE FUNCTION {schema}.release_lock_early() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+             BEGIN PERFORM pg_advisory_unlock_all(); RETURN NEW; END $$;
+             CREATE TRIGGER release_lock_early AFTER INSERT ON {schema}._duroxide_migrations
+             FOR EACH ROW WHEN (NEW.version = {last}) EXECUTE FUNCTION {schema}.release_lock_early();"
+        ).as_str()).await.unwrap();
+        let before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let error = runner
+            .migrate()
+            .await
+            .expect_err("an unconfirmed unlock is not success");
+        let after: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let applied = runner.get_applied_versions(&mut control).await.unwrap();
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(runner.advisory_lock_key())
+            .fetch_one(&mut control)
+            .await
+            .unwrap();
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&mut control)
+            .await
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("Migration advisory lock was not held"),
+            "{error:#}"
+        );
+        assert_ne!(
+            after, before,
+            "failed unlock must not return the connection to the pool"
+        );
+        assert_eq!(
+            applied, versions,
+            "a cleanup error must not rewrite committed migration records"
+        );
+        assert!(unlocked);
+    }
+
+    #[tokio::test]
+    async fn migration_connection_is_discarded_when_lock_acquisition_is_cancelled() {
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping migration cancellation database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let mut control = sqlx::PgConnection::connect(&url).await.unwrap();
+        let schema = format!("cancel_migration_{}", uuid::Uuid::new_v4().simple());
+        let runner = MigrationRunner::new(Arc::new(pool.clone()), schema.clone());
+        let key = runner.advisory_lock_key();
+        let before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(key)
+            .execute(&mut control)
+            .await
+            .unwrap();
+        let migration = tokio::spawn(async move { runner.migrate().await });
+        let waiting = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event = 'advisory')",
+                ).bind(before).fetch_one(&mut control).await.unwrap();
+                if blocked {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await;
+        migration.abort();
+        assert!(migration.await.unwrap_err().is_cancelled());
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(key)
+            .execute(&mut control)
+            .await
+            .unwrap();
+        let after = tokio::time::timeout(
+            Duration::from_secs(3),
+            sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()").fetch_one(&pool),
+        )
+        .await
+        .expect("cancellation must release the pool slot")
+        .unwrap();
+        let exited = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let gone: bool = sqlx::query_scalar(
+                    "SELECT NOT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
+                )
+                .bind(before)
+                .fetch_one(&mut control)
+                .await
+                .unwrap();
+                if gone {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let absent: bool = sqlx::query_scalar("SELECT to_regnamespace($1) IS NULL")
+            .bind(&schema)
+            .fetch_one(&mut control)
+            .await
+            .unwrap();
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(key)
+            .fetch_one(&mut control)
+            .await
+            .unwrap();
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .execute(&mut control)
+            .await
+            .unwrap();
+        waiting.expect("migration must reach the advisory-lock wait");
+        exited.expect("the cancelled session must exit rather than keep its advisory lock");
+        assert_ne!(after, before);
+        assert!(
+            absent,
+            "cancellation before acquiring the lock must not apply DDL"
+        );
+        assert!(
+            unlocked,
+            "no cancelled session may retain the migration lock"
+        );
+    }
 
     #[tokio::test]
     async fn migration_statement_display_preserves_database_message_and_source() {

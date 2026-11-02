@@ -36,9 +36,11 @@ startup so multiple nodes do not race to apply the same migration.
 Each migration transaction uses a 250 ms `lock_timeout`. Deadlocks (`40P01`) and
 lock timeouts (`55P03`) roll back and retry the entire transaction with jitter,
 within a ten-second contention budget per migration. Other errors return
-immediately. A failed attempt does not advance the migration ledger. The
-migration connection is closed on exit or cancellation so a failed unlock
-cannot leave a session advisory lock in the pool.
+immediately. A failed attempt does not advance the migration ledger. After
+successful migration and confirmed advisory-lock release, the connection is
+returned to the pool so the first fetch can reuse it. Errors or cancellation
+still close the migration connection, preventing an unconfirmed session
+advisory lock from being returned to the pool.
 
 The contention budget is currently fixed, not a provider configuration option.
 If it runs out, inspect the logged schema, SQLSTATE, and error chain, stop or
