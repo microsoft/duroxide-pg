@@ -1,14 +1,27 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use include_dir::{include_dir, Dir};
-use sqlx::Connection;
-use sqlx::PgPool;
+use sqlx::{pool::PoolConnection, Connection, PgPool, Postgres};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
 
+// Touch this module when adding embedded files so incremental builds see them. Latest: 0030.
 static MIGRATIONS: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations");
+
+const DDL_LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout = '250ms'";
+const DDL_RETRY_BUDGET: Duration = Duration::from_secs(10);
+const NOTIFICATION_TRIGGERS: &[(&str, &str)] = &[
+    ("worker_queue", "trg_notify_worker_work"),
+    ("worker_queue", "trg_notify_worker_work_released"),
+    ("orchestrator_queue", "trg_notify_orch_work"),
+    ("orchestrator_queue", "trg_notify_orch_work_released"),
+    ("orchestrator_queue", "trg_notify_orch_work_consumed"),
+    ("sessions", "trg_notify_session_lease"),
+];
 
 const BASE_TABLES: &[&str] = &[
     "instances",
@@ -42,6 +55,19 @@ struct Migration {
 pub struct MigrationRunner {
     pool: Arc<PgPool>,
     schema_name: String,
+}
+
+struct MigrationConnection {
+    connection: PoolConnection<Postgres>,
+    reusable: bool,
+}
+
+impl Drop for MigrationConnection {
+    fn drop(&mut self) {
+        if !self.reusable {
+            self.connection.close_on_drop();
+        }
+    }
 }
 
 impl MigrationRunner {
@@ -80,32 +106,53 @@ impl MigrationRunner {
         Ok(())
     }
 
-    async fn unlock_for_migrations(&self, conn: &mut sqlx::postgres::PgConnection) {
+    async fn unlock_for_migrations(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<()> {
         let key = self.advisory_lock_key();
-        // Best-effort unlock.
-        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
             .bind(key)
-            .execute(&mut *conn)
-            .await;
+            .fetch_one(&mut *conn)
+            .await
+            .context("Releasing the migration advisory lock")?;
+        anyhow::ensure!(
+            unlocked,
+            "Migration advisory lock was not held for schema {:?}",
+            self.schema_name
+        );
+        Ok(())
     }
 
     /// Run all pending migrations
     pub async fn migrate(&self) -> Result<()> {
-        let mut conn = self.pool.acquire().await?;
-        let conn = &mut *conn;
+        self.migrate_with_notifications(false).await
+    }
+
+    pub(crate) async fn migrate_with_notifications(&self, notifications: bool) -> Result<()> {
+        // Cancellation or failed unlocking must not return a session lock to the pool.
+        let mut guard = MigrationConnection {
+            connection: self.pool.acquire().await?,
+            reusable: false,
+        };
+        let conn = &mut *guard.connection;
         self.lock_for_migrations(conn).await?;
 
         // Reject unknown migrations while holding the advisory lock so that an
         // older binary cannot rewrite a schema that is ahead of its code.
         // Short-circuit: do NOT run migrate_inner if unknown migrations are
         // detected.
-        let result = match self.check_no_unknown_migrations(conn).await {
-            Ok(()) => self.migrate_inner(conn).await,
-            Err(e) => Err(e),
-        };
-        self.unlock_for_migrations(conn).await;
-
-        result
+        let result: Result<()> = async {
+            self.check_no_unknown_migrations(conn).await?;
+            self.migrate_inner(conn).await?;
+            if notifications {
+                self.enable_notifications(conn).await?;
+            }
+            Ok(())
+        }
+        .await;
+        let unlock_result = self.unlock_for_migrations(conn).await;
+        result?;
+        unlock_result?;
+        guard.reusable = true;
+        Ok(())
     }
 
     /// Verify that the migration tracking table exists and that every embedded
@@ -119,6 +166,10 @@ impl MigrationRunner {
     /// backends, where a separately privileged worker is responsible for
     /// applying schema changes).
     pub async fn verify(&self) -> Result<()> {
+        self.verify_with_notifications(false).await
+    }
+
+    pub(crate) async fn verify_with_notifications(&self, notifications: bool) -> Result<()> {
         let mut conn = self.pool.acquire().await?;
         let conn = &mut *conn;
 
@@ -139,7 +190,7 @@ impl MigrationRunner {
         // recognize (schema is ahead of the code).
         self.check_no_unknown_migrations(conn).await?;
 
-        let migrations = self.load_migrations()?;
+        let migrations = Self::load_migrations()?;
         let applied = self.get_applied_versions(conn).await?;
         self.validate_applied_prefix(&migrations, &applied)?;
         let existing_tables = self.get_existing_core_relations(conn).await?;
@@ -164,7 +215,131 @@ impl MigrationRunner {
             );
         }
 
+        if notifications
+            && self.notification_trigger_counts(conn).await?.1 != NOTIFICATION_TRIGGERS.len() as i64
+        {
+            anyhow::bail!(
+                "long-poll notifications are not enabled in schema {:?}. \
+                 Construct a provider with MigrationPolicy::ApplyAll and \
+                 long_poll.enabled = true from a process with DDL privileges first.",
+                self.schema_name,
+            );
+        }
+
         Ok(())
+    }
+
+    async fn notification_trigger_counts(
+        &self,
+        conn: &mut sqlx::postgres::PgConnection,
+    ) -> Result<(i64, i64)> {
+        let (relations, names): (Vec<_>, Vec<_>) = NOTIFICATION_TRIGGERS
+            .iter()
+            .map(|(table, trigger)| (format!("{}.{table}", self.schema_name), *trigger))
+            .unzip();
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE tgenabled IN ('O', 'A')) \
+             FROM pg_catalog.pg_trigger \
+             JOIN unnest($1::TEXT[], $2::TEXT[]) expected(relation, name) \
+               ON tgrelid = expected.relation::REGCLASS AND tgname = expected.name",
+        )
+        .bind(relations)
+        .bind(names)
+        .fetch_one(conn)
+        .await?;
+        anyhow::ensure!(
+            counts.0 == NOTIFICATION_TRIGGERS.len() as i64,
+            "long-poll notification triggers are missing in schema {:?}; repair the schema before enabling long-polling",
+            self.schema_name,
+        );
+        Ok(counts)
+    }
+
+    async fn enable_notifications(&self, conn: &mut sqlx::postgres::PgConnection) -> Result<()> {
+        if self.notification_trigger_counts(conn).await?.1 == NOTIFICATION_TRIGGERS.len() as i64 {
+            return Ok(());
+        }
+
+        let deadline = Instant::now() + DDL_RETRY_BUDGET;
+        loop {
+            let result = async {
+                let mut tx = conn.begin().await?;
+                let result = async {
+                    sqlx::query(DDL_LOCK_TIMEOUT_SQL).execute(&mut *tx).await?;
+                    // Match acknowledgments, but bound every wait because admin
+                    // deletion can acquire the queue locks in the opposite order.
+                    for table in ["worker_queue", "orchestrator_queue", "sessions"] {
+                        sqlx::query(&format!(
+                            "LOCK TABLE {}.{table} IN SHARE ROW EXCLUSIVE MODE",
+                            self.schema_name,
+                        ))
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    for (table, trigger) in NOTIFICATION_TRIGGERS {
+                        sqlx::query(&format!(
+                            "ALTER TABLE {}.{table} ENABLE TRIGGER {trigger}",
+                            self.schema_name,
+                        ))
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                Self::finish_ddl(tx, result).await
+            }
+            .await;
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if !self
+                        .retry_ddl(&error, deadline, "activating long-poll notifications")
+                        .await
+                    {
+                        return Err(error.context(format!(
+                            "Failed to activate long-poll notifications in schema {:?}",
+                            self.schema_name
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    async fn finish_ddl(
+        tx: sqlx::Transaction<'_, sqlx::Postgres>,
+        result: Result<()>,
+    ) -> Result<()> {
+        match result {
+            Ok(()) => tx.commit().await.context("Committing DDL transaction"),
+            Err(error) => {
+                tx.rollback()
+                    .await
+                    .with_context(|| format!("Rolling back DDL after {error:#}"))?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn retry_ddl(&self, error: &anyhow::Error, deadline: Instant, operation: &str) -> bool {
+        let sqlstate = error
+            .downcast_ref::<sqlx::Error>()
+            .and_then(sqlx::Error::as_database_error)
+            .and_then(|error| error.code());
+        if !matches!(sqlstate.as_deref(), Some("40P01" | "55P03")) || Instant::now() >= deadline {
+            return false;
+        }
+        tracing::warn!(
+            schema = %self.schema_name,
+            operation,
+            sqlstate = sqlstate.as_deref(),
+            error = %format_args!("{error:#}"),
+            "DDL lock contention; retrying the rolled-back transaction"
+        );
+        let jitter = Duration::from_millis(50 + u64::from(uuid::Uuid::new_v4().as_bytes()[0]));
+        tokio::time::sleep(jitter.min(deadline.saturating_duration_since(Instant::now()))).await;
+        Instant::now() < deadline
     }
 
     /// Check that the database has no migrations the running binary does not
@@ -185,8 +360,7 @@ impl MigrationRunner {
         }
 
         let applied = self.get_applied_versions(conn).await?;
-        let expected: std::collections::HashSet<i64> = self
-            .load_migrations()?
+        let expected: std::collections::HashSet<i64> = Self::load_migrations()?
             .into_iter()
             .map(|m| m.version)
             .collect();
@@ -361,7 +535,7 @@ impl MigrationRunner {
         }
 
         // Load migrations from filesystem
-        let migrations = self.load_migrations()?;
+        let migrations = Self::load_migrations()?;
 
         tracing::debug!(
             "Loaded {} migrations for schema {}",
@@ -409,7 +583,7 @@ impl MigrationRunner {
     }
 
     /// Load migrations from the embedded migrations directory
-    fn load_migrations(&self) -> Result<Vec<Migration>> {
+    fn load_migrations() -> Result<Vec<Migration>> {
         let mut migrations = Vec::new();
 
         // Get all files from embedded directory
@@ -433,7 +607,7 @@ impl MigrationRunner {
                 .ok_or_else(|| anyhow::anyhow!("Migration file is not valid UTF-8: {file_name}"))?
                 .to_string();
 
-            let version = self.parse_version(file_name)?;
+            let version = Self::parse_version(file_name)?;
             let name = file_name.to_string();
 
             migrations.push(Migration { version, name, sql });
@@ -443,7 +617,7 @@ impl MigrationRunner {
     }
 
     /// Parse version number from migration filename (e.g., "0001_initial.sql" -> 1)
-    fn parse_version(&self, filename: &str) -> Result<i64> {
+    fn parse_version(filename: &str) -> Result<i64> {
         let version_str = filename
             .split('_')
             .next()
@@ -638,20 +812,24 @@ impl MigrationRunner {
         conn: &mut sqlx::postgres::PgConnection,
         migration: &Migration,
     ) -> Result<()> {
-        // Start transaction
-        let mut tx = conn.begin().await?;
+        let deadline = Instant::now() + DDL_RETRY_BUDGET;
+        loop {
+            match self.apply_migration_once(conn, migration).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if !self.retry_ddl(&error, deadline, &migration.name).await {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
 
-        // Set search_path for this transaction.
-        //
-        // `pg_temp` is pinned explicitly at the lowest priority. Without it,
-        // `pg_temp` keeps its implicit highest-priority position, which would let a
-        // temporary object shadow the unqualified references this migration relies on
-        // the search_path to resolve. This is defense-in-depth (CVE-2018-1058
-        // guidance); see `migration_search_path_stmt` for the threat model.
-        sqlx::query(&Self::migration_search_path_stmt(&self.schema_name))
-            .execute(&mut *tx)
-            .await?;
-
+    async fn apply_migration_once(
+        &self,
+        conn: &mut sqlx::postgres::PgConnection,
+        migration: &Migration,
+    ) -> Result<()> {
         // Remove comment lines and split SQL into individual statements
         let sql = migration.sql.trim();
         let cleaned_sql: String = sql
@@ -684,41 +862,47 @@ impl MigrationRunner {
             migration.version
         );
 
-        for (idx, statement) in statements.iter().enumerate() {
-            if !statement.trim().is_empty() {
-                tracing::debug!(
-                    "Executing statement {} of {}: {}...",
-                    idx + 1,
-                    statements.len(),
-                    &statement.chars().take(50).collect::<String>()
-                );
-                sqlx::query(statement)
+        let mut tx = conn.begin().await?;
+        let result =
+            async {
+                sqlx::query(DDL_LOCK_TIMEOUT_SQL).execute(&mut *tx).await?;
+                sqlx::query(&Self::migration_search_path_stmt(&self.schema_name))
                     .execute(&mut *tx)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to execute statement {} in migration {}: {}\nStatement: {}",
+                    .await?;
+                for (idx, statement) in statements.iter().enumerate() {
+                    if !statement.trim().is_empty() {
+                        tracing::debug!(
+                            "Executing statement {} of {}: {}...",
                             idx + 1,
-                            migration.version,
-                            e,
-                            statement
-                        )
-                    })?;
+                            statements.len(),
+                            &statement.chars().take(50).collect::<String>()
+                        );
+                        sqlx::query(statement)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|error| {
+                                let message = format!(
+                                    "Failed to execute statement {} in migration {}: {error}\nStatement: {}",
+                                    idx + 1, migration.version, statement
+                                );
+                                anyhow::Error::new(error).context(message)
+                            })?;
+                    }
+                }
+
+                sqlx::query(&format!(
+                    "INSERT INTO {}._duroxide_migrations (version, name) VALUES ($1, $2)",
+                    self.schema_name
+                ))
+                .bind(migration.version)
+                .bind(&migration.name)
+                .execute(&mut *tx)
+                .await?;
+                Ok(())
             }
-        }
+            .await;
 
-        // Record migration as applied
-        sqlx::query(&format!(
-            "INSERT INTO {}._duroxide_migrations (version, name) VALUES ($1, $2)",
-            self.schema_name
-        ))
-        .bind(migration.version)
-        .bind(&migration.name)
-        .execute(&mut *tx)
-        .await?;
-
-        // Commit transaction
-        tx.commit().await?;
+        Self::finish_ddl(tx, result).await?;
 
         tracing::info!(
             "Applied migration {}: {}",
@@ -733,6 +917,404 @@ impl MigrationRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn migration_connection_is_reused_after_successful_unlock() {
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping migration connection database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let mut control = sqlx::PgConnection::connect(&url).await.unwrap();
+        let schema = format!("reuse_migration_{}", uuid::Uuid::new_v4().simple());
+        let runner = MigrationRunner::new(Arc::new(pool.clone()), schema.clone());
+        let original_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let mut results = Vec::new();
+        for notifications in [false, false, true] {
+            runner
+                .migrate_with_notifications(notifications)
+                .await
+                .unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let unlocked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+                .bind(runner.advisory_lock_key())
+                .fetch_one(&mut control)
+                .await
+                .unwrap();
+            results.push((pid, unlocked));
+        }
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&mut control)
+            .await
+            .unwrap();
+        for (pid, unlocked) in results {
+            assert_eq!(
+                pid, original_pid,
+                "migration success must not force a new connection"
+            );
+            assert!(
+                unlocked,
+                "the reused connection must not retain the migration lock"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_connection_is_discarded_when_unlock_is_not_confirmed() {
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping migration unlock database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let mut control = sqlx::PgConnection::connect(&url).await.unwrap();
+        let schema = format!("lost_migration_lock_{}", uuid::Uuid::new_v4().simple());
+        let runner = MigrationRunner::new(Arc::new(pool.clone()), schema.clone());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&mut control)
+            .await
+            .unwrap();
+        runner.ensure_migration_table(&mut control).await.unwrap();
+        let versions: Vec<_> = MigrationRunner::load_migrations()
+            .unwrap()
+            .iter()
+            .map(|m| m.version)
+            .collect();
+        let last = versions.last().unwrap();
+        sqlx::Executor::execute(&mut control, format!(
+            "CREATE FUNCTION {schema}.release_lock_early() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+             BEGIN PERFORM pg_advisory_unlock_all(); RETURN NEW; END $$;
+             CREATE TRIGGER release_lock_early AFTER INSERT ON {schema}._duroxide_migrations
+             FOR EACH ROW WHEN (NEW.version = {last}) EXECUTE FUNCTION {schema}.release_lock_early();"
+        ).as_str()).await.unwrap();
+        let before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let error = runner
+            .migrate()
+            .await
+            .expect_err("an unconfirmed unlock is not success");
+        let after: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let applied = runner.get_applied_versions(&mut control).await.unwrap();
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(runner.advisory_lock_key())
+            .fetch_one(&mut control)
+            .await
+            .unwrap();
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&mut control)
+            .await
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("Migration advisory lock was not held"),
+            "{error:#}"
+        );
+        assert_ne!(
+            after, before,
+            "failed unlock must not return the connection to the pool"
+        );
+        assert_eq!(
+            applied, versions,
+            "a cleanup error must not rewrite committed migration records"
+        );
+        assert!(unlocked);
+    }
+
+    #[tokio::test]
+    async fn migration_connection_is_discarded_when_lock_acquisition_is_cancelled() {
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping migration cancellation database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let mut control = sqlx::PgConnection::connect(&url).await.unwrap();
+        let schema = format!("cancel_migration_{}", uuid::Uuid::new_v4().simple());
+        let runner = MigrationRunner::new(Arc::new(pool.clone()), schema.clone());
+        let key = runner.advisory_lock_key();
+        let before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(key)
+            .execute(&mut control)
+            .await
+            .unwrap();
+        let migration = tokio::spawn(async move { runner.migrate().await });
+        let waiting = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event = 'advisory')",
+                ).bind(before).fetch_one(&mut control).await.unwrap();
+                if blocked {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await;
+        migration.abort();
+        assert!(migration.await.unwrap_err().is_cancelled());
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(key)
+            .execute(&mut control)
+            .await
+            .unwrap();
+        let after = tokio::time::timeout(
+            Duration::from_secs(3),
+            sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()").fetch_one(&pool),
+        )
+        .await
+        .expect("cancellation must release the pool slot")
+        .unwrap();
+        let exited = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let gone: bool = sqlx::query_scalar(
+                    "SELECT NOT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
+                )
+                .bind(before)
+                .fetch_one(&mut control)
+                .await
+                .unwrap();
+                if gone {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let absent: bool = sqlx::query_scalar("SELECT to_regnamespace($1) IS NULL")
+            .bind(&schema)
+            .fetch_one(&mut control)
+            .await
+            .unwrap();
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(key)
+            .fetch_one(&mut control)
+            .await
+            .unwrap();
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .execute(&mut control)
+            .await
+            .unwrap();
+        waiting.expect("migration must reach the advisory-lock wait");
+        exited.expect("the cancelled session must exit rather than keep its advisory lock");
+        assert_ne!(after, before);
+        assert!(
+            absent,
+            "cancellation before acquiring the lock must not apply DDL"
+        );
+        assert!(
+            unlocked,
+            "no cancelled session may retain the migration lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_statement_display_preserves_database_message_and_source() {
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping migration error database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let schema = format!("migration_error_{}", uuid::Uuid::new_v4().simple());
+        let runner = MigrationRunner::new(Arc::new(pool.clone()), schema.clone());
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        runner
+            .ensure_migration_table(&mut connection)
+            .await
+            .unwrap();
+        let valid = Migration {
+            version: 1,
+            name: "0001_error_fixture.sql".to_string(),
+            sql: "CREATE TABLE history_probe (id INTEGER PRIMARY KEY, valid BOOLEAN);
+                  INSERT INTO history_probe VALUES (7, false);
+                  CREATE FUNCTION validate_history_probe() RETURNS VOID LANGUAGE plpgsql AS $$
+                  DECLARE bad_id INTEGER;
+                  BEGIN
+                      SELECT id INTO bad_id FROM history_probe WHERE NOT valid LIMIT 1;
+                      IF FOUND THEN
+                          RAISE EXCEPTION 'Malformed history: instance=damaged-history execution_id=1 event_id=%', bad_id
+                              USING ERRCODE = '22023';
+                      END IF;
+                  END $$;".to_string(),
+        };
+        runner
+            .apply_migration(&mut connection, &valid)
+            .await
+            .unwrap();
+        let snapshot = format!(
+            "SELECT jsonb_build_object(
+                'ledger', (SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM {schema}._duroxide_migrations m),
+                'history', (SELECT jsonb_agg(to_jsonb(h) ORDER BY id) FROM {schema}.history_probe h),
+                'function', pg_get_functiondef('{schema}.validate_history_probe()'::regprocedure))"
+        );
+        let before: serde_json::Value = sqlx::query_scalar(&snapshot)
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        let invalid = Migration {
+            version: 2,
+            name: "0002_validate_history.sql".to_string(),
+            sql: "INSERT INTO history_probe VALUES (8, true);
+                  ALTER FUNCTION validate_history_probe() STABLE;
+                  SELECT validate_history_probe();"
+                .to_string(),
+        };
+        let error = runner
+            .apply_migration(&mut connection, &invalid)
+            .await
+            .unwrap_err();
+        let after: serde_json::Value = sqlx::query_scalar(&snapshot)
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(&format!("UPDATE {schema}.history_probe SET valid = true"))
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        runner
+            .apply_migration(&mut connection, &invalid)
+            .await
+            .unwrap();
+        let versions = runner.get_applied_versions(&mut connection).await.unwrap();
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+        pool.close().await;
+        assert_eq!(
+            after, before,
+            "failed migration must preserve its ledger, function, and history"
+        );
+        assert_eq!(versions, vec![1, 2]);
+        let database_error = error
+            .downcast_ref::<sqlx::Error>()
+            .and_then(sqlx::Error::as_database_error)
+            .expect("retain the database source");
+        assert_eq!(database_error.code().as_deref(), Some("22023"));
+        let display = error.to_string();
+        for expected in [
+            "Failed to execute statement 3 in migration 2",
+            "Malformed history: instance=damaged-history execution_id=1 event_id=7",
+            "Statement: SELECT validate_history_probe();",
+        ] {
+            assert!(
+                display.contains(expected),
+                "missing {expected:?} in Display: {display}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ddl_retry_logs_sqlstate_and_full_error_context() {
+        #[derive(Clone, Default)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping DDL logging database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let runner = MigrationRunner::new(Arc::new(pool.clone()), "diagnostic_test".to_string());
+        let captured = Capture::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_env_filter("off,duroxide_pg::migrations=warn")
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        for (code, message) in [
+            ("40P01", "simulated migration deadlock"),
+            ("55P03", "simulated migration lock timeout"),
+        ] {
+            let error = sqlx::query(&format!(
+                "DO $$ BEGIN RAISE EXCEPTION '{message}' USING ERRCODE = '{code}'; END $$"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap_err();
+            let error = anyhow::Error::new(error).context("outer migration statement context");
+            assert!(
+                runner
+                    .retry_ddl(
+                        &error,
+                        Instant::now() + Duration::from_secs(5),
+                        "test migration"
+                    )
+                    .await
+            );
+            let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+            assert!(
+                output.contains("sqlstate=") && output.contains(code),
+                "{output}"
+            );
+            assert!(
+                output.contains("outer migration statement context") && output.contains(message),
+                "{output}"
+            );
+        }
+        pool.close().await;
+    }
 
     #[test]
     fn migration_search_path_pins_pg_temp_last() {

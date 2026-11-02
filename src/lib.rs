@@ -73,6 +73,27 @@
 //! |---------------------|-------------|---------|
 //! | `DUROXIDE_PG_POOL_MAX` | Maximum connection pool size | `10` |
 //!
+//! ## Optional Long-Polling
+//!
+//! Long-polling is disabled by default. Enable it on worker providers to wait
+//! for PostgreSQL notifications instead of repeatedly querying empty queues:
+//!
+//! ```rust,no_run
+//! use duroxide_pg::{PostgresProvider, ProviderConfig};
+//!
+//! # async fn example(database_url: &str) -> anyhow::Result<()> {
+//! let mut config = ProviderConfig::url(database_url);
+//! config.long_poll.enabled = true;
+//! let provider = PostgresProvider::new_with_config(config).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! One pool connection is reserved for LISTEN; at least two are required.
+//! Client-only providers can leave this disabled. See [`LongPollConfig`] for
+//! timer and recovery settings. A zero fetch timeout still returns immediately
+//! after checking the queue.
+//!
 //! ## Features
 //!
 //! - Automatic schema migration on startup
@@ -82,7 +103,9 @@
 
 pub mod entra;
 pub mod migrations;
+mod notifier;
 pub mod provider;
 
 pub use entra::EntraAuthOptions;
+pub use notifier::LongPollConfig;
 pub use provider::{ConnectionConfig, MigrationPolicy, PostgresProvider, ProviderConfig};

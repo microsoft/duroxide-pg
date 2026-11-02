@@ -77,4 +77,6 @@ jobs:
         env:
           # Use the PostgreSQL service container for CI tests
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/duroxide_test
-        run: cargo test --verbose
+        run: |
+          cargo test --verbose
+          DUROXIDE_PG_TEST_LONG_POLL=true cargo test --test postgres_provider_test --verbose
