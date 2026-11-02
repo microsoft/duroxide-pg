@@ -207,7 +207,7 @@ Claims and renewals announce their lease deadlines without immediately waking
 fetches. An expired claim can therefore be recovered even if its owner crashes.
 Notifications are hints; queue predicates and locks remain authoritative.
 
-Read-only timer scans run in a transaction with 200 ms server-side lock and
+Timer scans run in a `READ ONLY` transaction with 200 ms server-side lock and
 statement timeouts. PostgreSQL cancels blocked scans, and the rolled-back
 connection returns to the pool rather than leaving a blocked server backend
 behind. Scan errors retry after about one second.
@@ -216,7 +216,9 @@ A one-second client watchdog keeps fetches checking for work if a scan stalls
 beyond those server limits. It does not cancel the scan or start another one;
 the same in-flight scan is retained across listener reconnects. Reconnecting
 also has an independent one-second polling fallback. Successful reconnection
-resubscribes and rechecks work.
+resubscribes and rechecks work. If it adopts a scan started before the new
+subscription, it follows that result with a fresh scan for both queues so
+deadlines created during the reconnect gap are not missed.
 
 An enabled fetch waits for work until its `poll_timeout`; a zero timeout still
 performs a single fetch. The timeout bounds notification waiting, not an
@@ -321,6 +323,13 @@ concurrent orchestration, activity, and session renewals with 60-second leases.
 Both workflow and renewal runs use three 10-second repetitions per mode.
 The renewal workload deliberately saturates renewal calls rather than using
 the runtime's normal renewal intervals.
+
+The benchmark connection needs `pg_read_all_stats` (or superuser privileges) to
+read other sessions' wait events and the standby's `pg_stat_replication.state`
+and `sync_state`. Ask a database administrator to grant that role to the
+benchmark role in the disposable environment; the benchmark does not grant
+itself privileges. Without it, replication columns can be masked even when a
+healthy standby exists.
 
 For a reproducible 10 ms apply-latency experiment, configure the standby's
 connection with `application_name=pr41_bench_standby` and set

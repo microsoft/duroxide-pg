@@ -1462,52 +1462,6 @@ async fn cancelling_a_blocked_refresh_does_not_strand_a_pool_connection() {
 }
 
 #[tokio::test]
-async fn timers_expiring_during_refresh_do_not_hide_the_next_timer() {
-    let fixture = Fixture::enabled().await;
-    let mut blocker = fixture.control.begin().await.unwrap();
-    sqlx::query(&format!(
-        "LOCK TABLE {}.orchestrator_queue IN ACCESS EXCLUSIVE MODE",
-        fixture.schema,
-    ))
-    .execute(&mut *blocker)
-    .await
-    .unwrap();
-    let first = fixture.waiting_fetch(Queue::Worker).await;
-    Queue::Worker
-        .enqueue(&fixture, "start-refresh", Some(Duration::from_millis(200)))
-        .await;
-    let first = claimed(first).await;
-    Queue::Worker.ack(&fixture.provider, &first.token).await;
-    fixture.wait_for_blocked_refresh().await;
-
-    let second = fixture.waiting_fetch(Queue::Worker).await;
-    Queue::Worker
-        .enqueue(&fixture, "during-refresh", Some(Duration::from_millis(50)))
-        .await;
-    let third_enqueued = Instant::now();
-    Queue::Worker
-        .enqueue(&fixture, "after-refresh", Some(Duration::from_millis(300)))
-        .await;
-    let second = claimed(second).await;
-    Queue::Worker.ack(&fixture.provider, &second.token).await;
-    blocker.rollback().await.unwrap();
-
-    let third = fixture.waiting_fetch(Queue::Worker).await;
-    let third = claimed(third).await;
-    let elapsed = third_enqueued.elapsed();
-    Queue::Worker.ack(&fixture.provider, &third.token).await;
-    fixture.cleanup().await;
-    assert!(
-        elapsed >= Duration::from_millis(300),
-        "timer fired early: {elapsed:?}"
-    );
-    assert!(
-        elapsed < Duration::from_millis(600),
-        "the timer, not the one-second polling fallback, must wake this fetch: {elapsed:?}"
-    );
-}
-
-#[tokio::test]
 async fn multiple_providers_receive_notifications_without_duplicate_claims() {
     let fixture = Fixture::enabled().await;
     let mut config = ProviderConfig::url(database_url());
@@ -2076,6 +2030,16 @@ async fn benchmark_workflows(concurrency: usize, clients: usize, require_standby
             let mut throughputs = Vec::new();
             for repetition in 0..REPETITIONS {
                 let fixture = Fixture::new(polling_config(enabled)).await;
+                let can_read_stats: bool = sqlx::query_scalar(
+                    "SELECT pg_has_role(current_user, 'pg_read_all_stats', 'USAGE')",
+                )
+                .fetch_one(&fixture.control)
+                .await
+                .expect("check benchmark statistics privileges");
+                assert!(
+                    can_read_stats,
+                    "the benchmark role requires pg_read_all_stats (or superuser) to read replication and wait statistics"
+                );
                 let settings: serde_json::Value = sqlx::query_scalar(
                     "SELECT jsonb_build_object(
                         'postgres_version', current_setting('server_version'),

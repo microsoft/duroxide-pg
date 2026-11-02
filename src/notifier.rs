@@ -301,7 +301,8 @@ async fn refresh_timers(pool: &PgPool, query: &str) -> Result<TimerDeadlines> {
     let result: Result<_> = async {
         sqlx::Executor::execute(
             &mut *tx,
-            "SET LOCAL lock_timeout = '200ms'; SET LOCAL statement_timeout = '200ms'",
+            "SET TRANSACTION READ ONLY; \
+             SET LOCAL lock_timeout = '200ms'; SET LOCAL statement_timeout = '200ms'",
         )
         .await
         .context("Setting long-poll timer scan timeouts")?;
@@ -339,6 +340,8 @@ async fn run_connected(
     let mut next_refresh = Instant::now();
     let mut next_recovery = next_refresh;
     let mut refresh_started = next_refresh;
+    // An adopted scan may have taken its snapshot before the new LISTEN.
+    let mut pending_catchup = [refresh.task.is_some(); 2];
     refresh.start(pool, timer_query);
     let mut refreshing = true;
     let mut refresh_failed = false;
@@ -346,7 +349,6 @@ async fn run_connected(
     let mut next_backstop = refresh_started + TIMER_REFRESH_BACKSTOP;
     // A paced scan must recheck work that matured since a queue's timer wake.
     // Keep events during an in-flight scan pending for the following scan.
-    let mut pending_catchup = [false; 2];
     let mut refreshing_catchup = [false; 2];
 
     loop {
@@ -539,8 +541,50 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::time::timeout;
+
+    #[derive(Default)]
+    struct ScanGate {
+        calls: AtomicUsize,
+        block_next: AtomicBool,
+        entered: Notify,
+        release: Notify,
+    }
+
+    async fn scan_pool(url: &str, max_connections: u32) -> (PgPool, Arc<ScanGate>) {
+        let gate = Arc::new(ScanGate::default());
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .min_connections(max_connections)
+            .max_connections(max_connections)
+            .before_acquire({
+                let gate = gate.clone();
+                move |_, _| {
+                    let gate = gate.clone();
+                    Box::pin(async move {
+                        gate.calls.fetch_add(1, Ordering::Relaxed);
+                        if gate.block_next.swap(false, Ordering::Relaxed) {
+                            let released = gate.release.notified();
+                            tokio::pin!(released);
+                            released.as_mut().enable();
+                            gate.entered.notify_one();
+                            released.await;
+                        }
+                        Ok(true)
+                    })
+                }
+            })
+            .connect(url)
+            .await
+            .unwrap();
+        (pool, gate)
+    }
+
+    // A session marker survives COMMIT but not a failed/rolled-back scan.
+    const MARK_COMPLETED_SCAN: &str = "pg_catalog.set_config(
+        'duroxide_test.completed_scans',
+        (COALESCE(NULLIF(current_setting('duroxide_test.completed_scans', true), ''), '0')::INT + 1)::TEXT,
+        false)";
 
     #[test]
     fn defaults_preserve_short_polling() {
@@ -654,6 +698,227 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timer_scan_is_read_only_and_preserves_connection_defaults() {
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping read-only timer database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let schema = format!("readonly_scan_{}", uuid::Uuid::new_v4().simple());
+        sqlx::Executor::execute(
+            &pool,
+            format!(
+                "CREATE SCHEMA {schema}; CREATE TABLE {schema}.probe (id BIGINT);
+             INSERT INTO {schema}.probe VALUES (7)"
+            )
+            .as_str(),
+        )
+        .await
+        .unwrap();
+        let before: (i32, String) =
+            sqlx::query_as("SELECT pg_backend_pid(), current_setting('transaction_read_only')")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let read_only = refresh_timers(
+            &pool,
+            "SELECT (current_setting('transaction_read_only') = 'on')::INT::BIGINT, $1::BIGINT",
+        )
+        .await
+        .unwrap()
+        .0;
+        let write = refresh_timers(
+            &pool,
+            &format!(
+                "WITH inserted AS (INSERT INTO {schema}.probe VALUES ($1) RETURNING id)
+             SELECT id, NULL::BIGINT FROM inserted"
+            ),
+        )
+        .await;
+        let after: (i32, String) =
+            sqlx::query_as("SELECT pg_backend_pid(), current_setting('transaction_read_only')")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let rows: Vec<i64> =
+            sqlx::query_scalar(&format!("SELECT id FROM {schema}.probe ORDER BY id"))
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        assert_eq!(read_only, Some(1), "the scan transaction must be READ ONLY");
+        let error = write.expect_err("the timer transaction must reject writes");
+        let code = error
+            .downcast_ref::<sqlx::Error>()
+            .and_then(sqlx::Error::as_database_error)
+            .and_then(|error| error.code());
+        assert_eq!(code.as_deref(), Some("25006"));
+        assert_eq!(rows, vec![7]);
+        assert_eq!(
+            after, before,
+            "rollback must preserve connection defaults and reuse"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_catches_up_after_a_scan_from_before_listen() {
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping reconnect snapshot database test");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(3)
+            .connect(&url)
+            .await
+            .unwrap();
+        let schema = format!("reconnect_snapshot_{}", uuid::Uuid::new_v4().simple());
+        sqlx::Executor::execute(
+            &pool,
+            format!(
+            "CREATE SCHEMA {schema}; CREATE TABLE {schema}.deadlines (queue INTEGER, due BIGINT)"
+        )
+            .as_str(),
+        )
+        .await
+        .unwrap();
+        let query = format!(
+            "SELECT min(due) FILTER (WHERE queue = 0), min(due) FILTER (WHERE queue = 1)
+             FROM {schema}.deadlines WHERE due > $1"
+        );
+        let channels = [format!("{schema}_orch"), format!("{schema}_worker")];
+        let mut listener = subscribe(&pool, &channels).await.unwrap();
+        let pid: i32 = sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity WHERE query LIKE 'LISTEN%' AND strpos(query, $1) > 0",
+        )
+        .bind(&channels[0])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let notifications = [Arc::new(Notify::new()), Arc::new(Notify::new())];
+        let (snapshot_tx, snapshot_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let mut refresh = TimerRefresh {
+            task: Some(tokio::spawn({
+                let pool = pool.clone();
+                let query = query.clone();
+                async move {
+                    let result = refresh_timers(&pool, &query).await?;
+                    snapshot_tx.send(result).unwrap();
+                    release_rx.await.unwrap();
+                    Ok(result)
+                }
+            })),
+        };
+        let config = LongPollConfig {
+            enabled: true,
+            timer_grace_period: Duration::ZERO,
+            ..Default::default()
+        };
+        let disconnect = async {
+            assert_eq!(snapshot_rx.await.unwrap(), (None, None));
+            sqlx::query("SELECT pg_terminate_backend($1)")
+                .bind(pid)
+                .execute(&pool)
+                .await
+                .unwrap();
+        };
+        let (disconnected, ()) = timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                run_connected(
+                    &pool,
+                    &mut listener,
+                    &channels,
+                    &notifications,
+                    &query,
+                    &config,
+                    &mut refresh
+                ),
+                disconnect,
+            )
+        })
+        .await
+        .unwrap();
+        assert!(
+            disconnected.is_ok()
+                || disconnected
+                    .unwrap_err()
+                    .downcast_ref::<sqlx::Error>()
+                    .is_some()
+        );
+        drop(listener);
+        // The successful snapshot is already old, but its result is still in flight.
+        let first = PostgresProvider::now_millis() + 1000;
+        let second = first + 200;
+        sqlx::query(&format!(
+            "INSERT INTO {schema}.deadlines VALUES (0, $1), (1, $2)"
+        ))
+        .bind(first)
+        .bind(second)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut listener = subscribe(&pool, &channels).await.unwrap();
+        release_tx.send(()).unwrap();
+        let recovered = {
+            let connected = run_connected(
+                &pool,
+                &mut listener,
+                &channels,
+                &notifications,
+                &query,
+                &config,
+                &mut refresh,
+            );
+            tokio::pin!(connected);
+            let notifications = &notifications;
+            let wait = |index: usize, due: i64| async move {
+                fetch_with_poll(
+                    Some(notifications[index].as_ref()),
+                    Duration::from_secs(10),
+                    "test",
+                    || async move { Ok((PostgresProvider::now_millis() >= due).then_some(due)) },
+                )
+                .await
+                .unwrap()
+            };
+            timeout(Duration::from_secs(3), async {
+                tokio::select! {
+                    result = &mut connected => panic!("listener stopped unexpectedly: {result:?}"),
+                    deadlines = async { tokio::join!(wait(0, first), wait(1, second)) } => deadlines,
+                }
+            }).await
+        };
+        drop(refresh);
+        drop(listener);
+        let deadlines: Vec<i64> = sqlx::query_scalar(&format!(
+            "SELECT due FROM {schema}.deadlines ORDER BY queue"
+        ))
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        assert_eq!(deadlines, vec![first, second]);
+        assert_eq!(
+            recovered.expect("both queues need fresh deadlines after resubscribing"),
+            (Some(first), Some(second))
+        );
+    }
+
+    #[tokio::test]
     async fn timer_scan_timeouts_are_server_errors_and_reuse_the_connection() {
         dotenvy::dotenv().ok();
         let Ok(url) = std::env::var("DATABASE_URL") else {
@@ -743,22 +1008,11 @@ mod tests {
             eprintln!("DATABASE_URL not set; skipping timer-refresh database test");
             return;
         };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(3)
-            .connect(&url)
-            .await
-            .unwrap();
+        let (pool, gate) = scan_pool(&url, 2).await;
         let schema = format!("timer_scan_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(&format!("CREATE SEQUENCE {schema}.calls"))
-            .execute(&pool)
-            .await
-            .unwrap();
         let channels = [format!("{schema}_orch"), format!("{schema}_worker")];
         let mut listener = subscribe(&pool, &channels).await.unwrap();
+        gate.calls.store(0, Ordering::Relaxed);
         let notifications = [Arc::new(Notify::new()), Arc::new(Notify::new())];
         let config = LongPollConfig {
             enabled: true,
@@ -766,10 +1020,7 @@ mod tests {
         };
         // A future timestamp matures during every query, as with dense timers
         // and nontrivial round-trip latency. Count scans without global resets.
-        let query = format!(
-            "SELECT $1::BIGINT + 1, NULL::BIGINT FROM pg_catalog.pg_sleep(0.005), \
-             pg_catalog.nextval('{schema}.calls')",
-        );
+        let query = "SELECT $1::BIGINT + 1, NULL::BIGINT FROM pg_catalog.pg_sleep(0.005)";
         let mut worker_wakes = 0;
         {
             let mut refresh = TimerRefresh::default();
@@ -778,7 +1029,7 @@ mod tests {
                 &mut listener,
                 &channels,
                 &notifications,
-                &query,
+                query,
                 &config,
                 &mut refresh,
             );
@@ -793,15 +1044,8 @@ mod tests {
             });
             assert!(duration.await.is_err());
         }
-        let calls: i64 = sqlx::query_scalar(&format!("SELECT last_value FROM {schema}.calls"))
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let calls = gate.calls.load(Ordering::Relaxed);
         drop(listener);
-        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-            .execute(&pool)
-            .await
-            .unwrap();
         pool.close().await;
         assert!((2..=5).contains(&calls), "refreshes in 350ms: {calls}");
         assert_eq!(
@@ -817,50 +1061,26 @@ mod tests {
             eprintln!("DATABASE_URL not set; skipping catch-up database test");
             return;
         };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .unwrap();
+        let (pool, gate) = scan_pool(&url, 2).await;
         let control = sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
             .connect(&url)
             .await
             .unwrap();
         let schema = format!("catchup_{}", uuid::Uuid::new_v4().simple());
-        let gate_key = i64::from_be_bytes(uuid::Uuid::new_v4().as_bytes()[..8].try_into().unwrap());
-        sqlx::Executor::execute(
-            &control,
-            format!(
-                "CREATE SCHEMA {schema};
-             CREATE SEQUENCE {schema}.calls;
-             CREATE FUNCTION {schema}.scan(p_now BIGINT) RETURNS TABLE(orch BIGINT, worker BIGINT)
-             LANGUAGE plpgsql AS $$
-             DECLARE n BIGINT := nextval('{schema}.calls');
-             BEGIN
-                 IF n = 2 THEN
-                     PERFORM pg_advisory_xact_lock({gate_key});
-                 END IF;
-                 RETURN QUERY SELECT CASE WHEN n = 1 THEN p_now + 20 END, NULL::BIGINT;
-             END $$"
-            )
-            .as_str(),
-        )
-        .await
-        .unwrap();
-        let mut gate = control.begin().await.unwrap();
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(gate_key)
-            .execute(&mut *gate)
-            .await
-            .unwrap();
         let channels = [format!("{schema}_orch"), format!("{schema}_worker")];
         let mut listener = subscribe(&pool, &channels).await.unwrap();
         let notifications = [Arc::new(Notify::new()), Arc::new(Notify::new())];
+        let initial_scan = notifications[0].notified();
+        tokio::pin!(initial_scan);
+        initial_scan.as_mut().enable();
         let task = tokio::spawn({
             let pool = pool.clone();
             let notifications = notifications.clone();
-            let query = format!("SELECT * FROM {schema}.scan($1)");
+            let channels = channels.clone();
+            let query = format!(
+                "SELECT NULL::BIGINT, NULL::BIGINT FROM {MARK_COMPLETED_SCAN} WHERE $1::BIGINT IS NOT NULL"
+            );
             async move {
                 let mut refresh = TimerRefresh::default();
                 run_connected(
@@ -878,37 +1098,135 @@ mod tests {
                 .await
             }
         });
-        let pid = timeout(Duration::from_secs(2), async {
-            loop {
-                let pid: Option<i32> = sqlx::query_scalar(
-                    "SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
-                     AND strpos(query, $1) > 0",
-                )
-                .bind(format!("{schema}.scan"))
-                .fetch_optional(&control)
-                .await
-                .unwrap();
-                if let Some(pid) = pid {
-                    break pid;
-                }
-                sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("the catch-up scan must reach the gate");
+        timeout(Duration::from_secs(3), initial_scan).await.unwrap();
+        gate.block_next.store(true, Ordering::Relaxed);
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(&channels[0])
+            .bind((PostgresProvider::now_millis() + 50).to_string())
+            .execute(&control)
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(3), gate.entered.notified())
+            .await
+            .unwrap();
         // Register after the timer's wake but before its catch-up scan completes.
         let notified = notifications[0].notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        gate.rollback().await.unwrap();
+        gate.release.notify_waiters();
         let wake = timeout(Duration::from_secs(1), notified).await;
-        let scan_succeeded: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND state = 'idle')",
+        let completed: i32 =
+            sqlx::query_scalar("SELECT current_setting('duroxide_test.completed_scans')::INT")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        pool.close().await;
+        control.close().await;
+        wake.expect("a catch-up scan must wake work that matured before its snapshot");
+        assert_eq!(
+            completed, 2,
+            "both scans must have committed; idle alone is not success"
+        );
+    }
+
+    #[tokio::test]
+    async fn timers_expiring_during_refresh_do_not_hide_the_next_timer() {
+        dotenvy::dotenv().ok();
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL not set; skipping in-flight timer database test");
+            return;
+        };
+        let (pool, gate) = scan_pool(&url, 2).await;
+        let control = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let schema = format!("inflight_timer_{}", uuid::Uuid::new_v4().simple());
+        sqlx::Executor::execute(
+            &control,
+            format!("CREATE SCHEMA {schema}; CREATE TABLE {schema}.deadlines (due BIGINT)")
+                .as_str(),
         )
-        .bind(pid)
-        .fetch_one(&control)
         .await
         .unwrap();
+        let channels = [format!("{schema}_orch"), format!("{schema}_worker")];
+        let listener = subscribe(&pool, &channels).await.unwrap();
+        let notifications = [Arc::new(Notify::new()), Arc::new(Notify::new())];
+        let initial_scan = notifications[0].notified();
+        tokio::pin!(initial_scan);
+        initial_scan.as_mut().enable();
+        let task = tokio::spawn(run(
+            pool.clone(),
+            listener,
+            channels.clone(),
+            notifications.clone(),
+            format!(
+                "SELECT NULL::BIGINT, (SELECT min(due) FROM {schema}.deadlines WHERE due > $1)
+                     FROM {MARK_COMPLETED_SCAN}"
+            ),
+            LongPollConfig {
+                enabled: true,
+                timer_grace_period: Duration::ZERO,
+                ..Default::default()
+            },
+        ));
+        timeout(Duration::from_secs(3), initial_scan).await.unwrap();
+        gate.block_next.store(true, Ordering::Relaxed);
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(&channels[1])
+            .bind((PostgresProvider::now_millis() + 50).to_string())
+            .execute(&control)
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(3), gate.entered.notified())
+            .await
+            .unwrap();
+
+        // Stall acquisition, not a SQL statement subject to the 200ms timeout.
+        let second = PostgresProvider::now_millis() + 50;
+        let third = second + 500;
+        sqlx::query(&format!("INSERT INTO {schema}.deadlines VALUES ($1), ($2)"))
+            .bind(second)
+            .bind(third)
+            .execute(&control)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_notify($1, $2), pg_notify($1, $3)")
+            .bind(&channels[1])
+            .bind(second.to_string())
+            .bind(third.to_string())
+            .execute(&control)
+            .await
+            .unwrap();
+        let wait = |due: i64| {
+            fetch_with_poll(
+                Some(notifications[1].as_ref()),
+                Duration::from_secs(10),
+                "test",
+                move || async move { Ok((PostgresProvider::now_millis() >= due).then_some(due)) },
+            )
+        };
+        assert_eq!(
+            timeout(Duration::from_secs(3), wait(second))
+                .await
+                .unwrap()
+                .unwrap(),
+            Some(second)
+        );
+        gate.release.notify_waiters();
+        assert!(
+            PostgresProvider::now_millis() < third,
+            "register before the final timer matures"
+        );
+        let result = timeout(Duration::from_secs(3), wait(third)).await;
+        let completed: i32 =
+            sqlx::query_scalar("SELECT current_setting('duroxide_test.completed_scans')::INT")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         pool.close().await;
@@ -917,10 +1235,15 @@ mod tests {
             .await
             .unwrap();
         control.close().await;
-        wake.expect("a catch-up scan must wake work that matured before its snapshot");
+        assert_eq!(
+            result
+                .expect("the next timer must beat the polling timeout")
+                .unwrap(),
+            Some(third)
+        );
         assert!(
-            scan_succeeded,
-            "a scan timeout must not substitute for the catch-up wake"
+            completed >= 3,
+            "the initial, gated, and catch-up scans must commit successfully"
         );
     }
 
@@ -931,27 +1254,13 @@ mod tests {
             eprintln!("DATABASE_URL not set; skipping timer-refresh database test");
             return;
         };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(3)
-            .connect(&url)
-            .await
-            .unwrap();
+        let (pool, gate) = scan_pool(&url, 2).await;
         let schema = format!("failed_scan_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(&format!("CREATE SEQUENCE {schema}.calls"))
-            .execute(&pool)
-            .await
-            .unwrap();
         let channels = [format!("{schema}_orch"), format!("{schema}_worker")];
         let mut listener = subscribe(&pool, &channels).await.unwrap();
+        gate.calls.store(0, Ordering::Relaxed);
         let notifications = [Arc::new(Notify::new()), Arc::new(Notify::new())];
-        let query = format!(
-            "WITH attempt AS MATERIALIZED (SELECT nextval('{schema}.calls') AS n) \
-             SELECT 1 / (n - 1), NULL::BIGINT FROM attempt WHERE $1::BIGINT IS NOT NULL"
-        );
+        let query = "SELECT $1::BIGINT / 0, NULL::BIGINT";
         let mut refresh = TimerRefresh::default();
         let result = tokio::time::timeout(
             Duration::from_millis(1500),
@@ -960,7 +1269,7 @@ mod tests {
                 &mut listener,
                 &channels,
                 &notifications,
-                &query,
+                query,
                 &LongPollConfig {
                     enabled: true,
                     ..Default::default()
@@ -974,15 +1283,11 @@ mod tests {
             result.is_err(),
             "the listener should stay connected after a scan error"
         );
-        let calls: i64 = sqlx::query_scalar(&format!("SELECT last_value FROM {schema}.calls"))
-            .fetch_one(&pool)
+        let calls = gate.calls.load(Ordering::Relaxed);
+        assert!(refresh_timers(&pool, "SELECT $1::BIGINT, NULL::BIGINT")
             .await
-            .unwrap();
+            .is_ok());
         drop(listener);
-        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-            .execute(&pool)
-            .await
-            .unwrap();
         pool.close().await;
         assert!(
             calls >= 2,
@@ -1018,56 +1323,21 @@ mod tests {
 
     #[tokio::test]
     async fn watchdog_and_reconnect_keep_the_same_pending_timer_scan() {
-        use std::sync::atomic::AtomicBool;
-
         dotenvy::dotenv().ok();
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("DATABASE_URL not set; skipping pending-scan database test");
             return;
         };
-        let block_next = Arc::new(AtomicBool::new(false));
-        let entered = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .min_connections(3)
-            .max_connections(3)
-            .before_acquire({
-                let block_next = block_next.clone();
-                let entered = entered.clone();
-                let release = release.clone();
-                move |_, _| {
-                    let block_next = block_next.clone();
-                    let entered = entered.clone();
-                    let release = release.clone();
-                    Box::pin(async move {
-                        if block_next.swap(false, Ordering::Relaxed) {
-                            let released = release.notified();
-                            tokio::pin!(released);
-                            released.as_mut().enable();
-                            entered.notify_one();
-                            released.await;
-                        }
-                        Ok(true)
-                    })
-                }
-            })
-            .connect(&url)
-            .await
-            .unwrap();
+        let (pool, gate) = scan_pool(&url, 3).await;
         let control = sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
             .connect(&url)
             .await
             .unwrap();
         let schema = format!("pending_scan_{}", uuid::Uuid::new_v4().simple());
-        sqlx::Executor::execute(
-            &control,
-            format!("CREATE SCHEMA {schema}; CREATE SEQUENCE {schema}.calls").as_str(),
-        )
-        .await
-        .unwrap();
         let channels = [format!("{schema}_orch"), format!("{schema}_worker")];
         let listener = subscribe(&pool, &channels).await.unwrap();
+        gate.calls.store(0, Ordering::Relaxed);
         let pid: i32 = sqlx::query_scalar(
             "SELECT pid FROM pg_stat_activity WHERE query LIKE 'LISTEN%' AND strpos(query, $1) > 0",
         )
@@ -1080,8 +1350,11 @@ mod tests {
         tokio::pin!(initial_scan);
         initial_scan.as_mut().enable();
         let task = tokio::spawn(run(
-            pool.clone(), listener, channels.clone(), notifications.clone(),
-            format!("SELECT NULL::BIGINT, NULL::BIGINT FROM nextval('{schema}.calls') WHERE $1::BIGINT IS NOT NULL"),
+            pool.clone(),
+            listener,
+            channels.clone(),
+            notifications.clone(),
+            "SELECT NULL::BIGINT, NULL::BIGINT WHERE $1::BIGINT IS NOT NULL".to_string(),
             LongPollConfig {
                 enabled: true,
                 notifier_poll_interval: Duration::from_millis(50),
@@ -1089,8 +1362,8 @@ mod tests {
             },
         ));
         timeout(Duration::from_secs(3), initial_scan).await.unwrap();
-        block_next.store(true, Ordering::Relaxed);
-        timeout(Duration::from_secs(3), entered.notified())
+        gate.block_next.store(true, Ordering::Relaxed);
+        timeout(Duration::from_secs(3), gate.entered.notified())
             .await
             .unwrap();
         for _ in 0..2 {
@@ -1098,11 +1371,7 @@ mod tests {
                 .await
                 .expect("the watchdog must wake fetches while a scan is pending");
         }
-        let before_reconnect: i64 =
-            sqlx::query_scalar(&format!("SELECT last_value FROM {schema}.calls"))
-                .fetch_one(&control)
-                .await
-                .unwrap();
+        let before_reconnect = gate.calls.load(Ordering::Relaxed);
         sqlx::query("SELECT pg_terminate_backend($1)")
             .bind(pid)
             .execute(&control)
@@ -1127,42 +1396,36 @@ mod tests {
         })
         .await
         .expect("listener must reconnect without replacing the pending scan");
-        let after_reconnect: i64 =
-            sqlx::query_scalar(&format!("SELECT last_value FROM {schema}.calls"))
-                .fetch_one(&control)
+        // LISTEN completing is not enough: let the re-entered loop process a
+        // notification and a subsequent watchdog tick while the scan is gated.
+        for _ in 0..2 {
+            timeout(Duration::from_millis(1500), notifications[0].notified())
                 .await
                 .unwrap();
-        release.notify_waiters();
+        }
+        let after_reconnect = gate.calls.load(Ordering::Relaxed);
+        gate.release.notify_waiters();
         timeout(Duration::from_secs(3), async {
             loop {
-                let calls: i64 =
-                    sqlx::query_scalar(&format!("SELECT last_value FROM {schema}.calls"))
-                        .fetch_one(&control)
-                        .await
-                        .unwrap();
-                if calls >= 2 {
+                if gate.calls.load(Ordering::Relaxed) >= 5 {
                     break;
                 }
                 sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("the original scan must resume once connection acquisition finishes");
+        .expect("the original scan must finish before starting the post-reconnect catch-up");
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         timeout(Duration::from_secs(3), pool.close()).await.unwrap();
-        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-            .execute(&control)
-            .await
-            .unwrap();
         control.close().await;
         assert_eq!(
-            before_reconnect, 1,
+            before_reconnect, 2,
             "the watchdog must not replace the blocked scan"
         );
         assert_eq!(
-            after_reconnect, 1,
-            "reconnecting must not replace the blocked scan"
+            after_reconnect, 4,
+            "reconnecting may acquire LISTEN and its warm connection, not another scan"
         );
     }
 
