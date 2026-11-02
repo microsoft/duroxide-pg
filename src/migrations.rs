@@ -177,7 +177,7 @@ impl MigrationRunner {
         // recognize (schema is ahead of the code).
         self.check_no_unknown_migrations(conn).await?;
 
-        let migrations = self.load_migrations()?;
+        let migrations = Self::load_migrations()?;
         let applied = self.get_applied_versions(conn).await?;
         self.validate_applied_prefix(&migrations, &applied)?;
         let existing_tables = self.get_existing_core_relations(conn).await?;
@@ -347,8 +347,7 @@ impl MigrationRunner {
         }
 
         let applied = self.get_applied_versions(conn).await?;
-        let expected: std::collections::HashSet<i64> = self
-            .load_migrations()?
+        let expected: std::collections::HashSet<i64> = Self::load_migrations()?
             .into_iter()
             .map(|m| m.version)
             .collect();
@@ -523,7 +522,7 @@ impl MigrationRunner {
         }
 
         // Load migrations from filesystem
-        let migrations = self.load_migrations()?;
+        let migrations = Self::load_migrations()?;
 
         tracing::debug!(
             "Loaded {} migrations for schema {}",
@@ -571,7 +570,7 @@ impl MigrationRunner {
     }
 
     /// Load migrations from the embedded migrations directory
-    fn load_migrations(&self) -> Result<Vec<Migration>> {
+    fn load_migrations() -> Result<Vec<Migration>> {
         let mut migrations = Vec::new();
 
         // Get all files from embedded directory
@@ -595,7 +594,7 @@ impl MigrationRunner {
                 .ok_or_else(|| anyhow::anyhow!("Migration file is not valid UTF-8: {file_name}"))?
                 .to_string();
 
-            let version = self.parse_version(file_name)?;
+            let version = Self::parse_version(file_name)?;
             let name = file_name.to_string();
 
             migrations.push(Migration { version, name, sql });
@@ -605,7 +604,7 @@ impl MigrationRunner {
     }
 
     /// Parse version number from migration filename (e.g., "0001_initial.sql" -> 1)
-    fn parse_version(&self, filename: &str) -> Result<i64> {
+    fn parse_version(filename: &str) -> Result<i64> {
         let version_str = filename
             .split('_')
             .next()
@@ -986,8 +985,7 @@ mod tests {
             .await
             .unwrap();
         runner.ensure_migration_table(&mut control).await.unwrap();
-        let versions: Vec<_> = runner
-            .load_migrations()
+        let versions: Vec<_> = MigrationRunner::load_migrations()
             .unwrap()
             .iter()
             .map(|m| m.version)
