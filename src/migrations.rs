@@ -3,8 +3,7 @@
 
 use anyhow::{Context, Result};
 use include_dir::{include_dir, Dir};
-use sqlx::Connection;
-use sqlx::PgPool;
+use sqlx::{pool::PoolConnection, Connection, PgPool, Postgres};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,6 +55,19 @@ struct Migration {
 pub struct MigrationRunner {
     pool: Arc<PgPool>,
     schema_name: String,
+}
+
+struct MigrationConnection {
+    connection: PoolConnection<Postgres>,
+    reusable: bool,
+}
+
+impl Drop for MigrationConnection {
+    fn drop(&mut self) {
+        if !self.reusable {
+            self.connection.close_on_drop();
+        }
+    }
 }
 
 impl MigrationRunner {
@@ -115,10 +127,12 @@ impl MigrationRunner {
     }
 
     pub(crate) async fn migrate_with_notifications(&self, notifications: bool) -> Result<()> {
-        let mut connection = self.pool.acquire().await?;
         // Cancellation or failed unlocking must not return a session lock to the pool.
-        connection.close_on_drop();
-        let conn = &mut *connection;
+        let mut guard = MigrationConnection {
+            connection: self.pool.acquire().await?,
+            reusable: false,
+        };
+        let conn = &mut *guard.connection;
         self.lock_for_migrations(conn).await?;
 
         // Reject unknown migrations while holding the advisory lock so that an
@@ -137,8 +151,7 @@ impl MigrationRunner {
         let unlock_result = self.unlock_for_migrations(conn).await;
         result?;
         unlock_result?;
-        // Explicit return bypasses close-on-drop only after the unlock is confirmed.
-        connection.return_to_pool().await;
+        guard.reusable = true;
         Ok(())
     }
 
@@ -906,7 +919,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn migration_connection_stays_warm_after_successful_unlock() {
+    async fn migration_connection_is_reused_after_successful_unlock() {
         dotenvy::dotenv().ok();
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("DATABASE_URL not set; skipping migration connection database test");
@@ -919,7 +932,7 @@ mod tests {
             .await
             .unwrap();
         let mut control = sqlx::PgConnection::connect(&url).await.unwrap();
-        let schema = format!("warm_migration_{}", uuid::Uuid::new_v4().simple());
+        let schema = format!("reuse_migration_{}", uuid::Uuid::new_v4().simple());
         let runner = MigrationRunner::new(Arc::new(pool.clone()), schema.clone());
         let original_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&pool)
@@ -931,7 +944,6 @@ mod tests {
                 .migrate_with_notifications(notifications)
                 .await
                 .unwrap();
-            let idle = pool.num_idle();
             let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
                 .fetch_one(&pool)
                 .await
@@ -941,25 +953,21 @@ mod tests {
                 .fetch_one(&mut control)
                 .await
                 .unwrap();
-            results.push((idle, pid, unlocked));
+            results.push((pid, unlocked));
         }
         pool.close().await;
         sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
             .execute(&mut control)
             .await
             .unwrap();
-        for (idle, pid, unlocked) in results {
+        for (pid, unlocked) in results {
             assert_eq!(
                 pid, original_pid,
                 "migration success must not force a new connection"
             );
-            assert_eq!(
-                idle, 1,
-                "the original connection must be idle before startup returns"
-            );
             assert!(
                 unlocked,
-                "the warm connection must not retain the migration lock"
+                "the reused connection must not retain the migration lock"
             );
         }
     }

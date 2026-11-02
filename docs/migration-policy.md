@@ -38,9 +38,10 @@ lock timeouts (`55P03`) roll back and retry the entire transaction with jitter,
 within a ten-second contention budget per migration. Other errors return
 immediately. A failed attempt does not advance the migration ledger. After
 successful migration and confirmed advisory-lock release, the connection is
-returned to the pool so the first fetch can reuse it. Errors or cancellation
-still close the migration connection, preventing an unconfirmed session
-advisory lock from being returned to the pool.
+returned through SQLx's normal asynchronous pool-return path instead of being
+closed. It need not already be idle when provider construction returns.
+Errors or cancellation still close the migration connection, preventing an
+unconfirmed session advisory lock from being returned to the pool.
 
 The contention budget is currently fixed, not a provider configuration option.
 If it runs out, inspect the logged schema, SQLSTATE, and error chain, stop or

@@ -52,8 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error context. Migration statement errors also retain the database message
   in ordinary error display while preserving the original source for SQLSTATE
   checks.
-- Successful migrations return their unlocked connection to the pool, keeping
-  short-poll startup warm. Errors and cancellation still discard the connection.
+- Successful migrations preserve their unlocked connection for reuse through
+  SQLx's normal asynchronous pool return, without relying on a hidden API.
+  Errors and cancellation still discard the connection.
 - Add a reproducible sparse/loaded workflow benchmark alongside the idle-query
   benchmark, recording concurrency, duration, pool size, and commit settings.
 - Add a synchronous-standby contention profile with 16 orchestration and
