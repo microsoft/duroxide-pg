@@ -10,7 +10,7 @@ use duroxide::provider_validation::{
 };
 use duroxide::provider_validations::{race_replay, ProviderFactory};
 use duroxide::providers::Provider;
-use duroxide_pg::PostgresProvider;
+use duroxide_pg::{PostgresProvider, ProviderConfig};
 use sqlx::{postgres::PgPoolOptions, Executor};
 use tracing_subscriber::EnvFilter;
 
@@ -76,6 +76,7 @@ pub struct PostgresProviderFactory {
     database_url: String,
     lock_timeout_ms: u64,
     current_schema_name: std::sync::Mutex<Option<String>>,
+    long_poll: bool,
 }
 
 impl Default for PostgresProviderFactory {
@@ -87,10 +88,19 @@ impl Default for PostgresProviderFactory {
 impl PostgresProviderFactory {
     pub fn new() -> Self {
         init_test_logging();
+        let long_poll = std::env::var_os("DUROXIDE_PG_TEST_LONG_POLL")
+            .map(|value| {
+                value
+                    .to_str()
+                    .and_then(|value| value.parse::<bool>().ok())
+                    .expect("DUROXIDE_PG_TEST_LONG_POLL must be true or false")
+            })
+            .unwrap_or(false);
         Self {
             database_url: get_database_url(),
             lock_timeout_ms: 30_000, // 30 seconds - must match hardcoded timeout in validation tests
             current_schema_name: std::sync::Mutex::new(None),
+            long_poll,
         }
     }
 
@@ -101,7 +111,10 @@ impl PostgresProviderFactory {
         // Store schema name for cleanup
         *self.current_schema_name.lock().unwrap() = Some(schema_name.clone());
 
-        let provider = PostgresProvider::new_with_schema(&self.database_url, Some(&schema_name))
+        let mut config = ProviderConfig::url(&self.database_url);
+        config.schema_name = Some(schema_name);
+        config.long_poll.enabled = self.long_poll;
+        let provider = PostgresProvider::new_with_config(config)
             .await
             .expect("Failed to create Postgres provider for validation tests");
 
@@ -340,7 +353,10 @@ mod long_polling_tests {
 
     #[tokio::test]
     async fn test_short_poll_returns_immediately() {
-        let factory = PostgresProviderFactory::new();
+        let factory = PostgresProviderFactory {
+            long_poll: false,
+            ..PostgresProviderFactory::new()
+        };
         let provider = factory.create_provider().await;
         long_polling::test_short_poll_returns_immediately(
             &*provider,
@@ -352,7 +368,10 @@ mod long_polling_tests {
 
     #[tokio::test]
     async fn test_short_poll_work_item_returns_immediately() {
-        let factory = PostgresProviderFactory::new();
+        let factory = PostgresProviderFactory {
+            long_poll: false,
+            ..PostgresProviderFactory::new()
+        };
         let provider = factory.create_provider().await;
         long_polling::test_short_poll_work_item_returns_immediately(
             &*provider,
@@ -369,10 +388,6 @@ mod long_polling_tests {
         long_polling::test_fetch_respects_timeout_upper_bound(&*provider).await;
         factory.cleanup_schema().await;
     }
-
-    // test_long_poll_waits_for_timeout: Not applicable to short-poll providers.
-    // This test asserts that fetch blocks for poll_timeout, which short-poll
-    // providers correctly do NOT do (they return immediately).
 }
 
 mod cancellation_tests {
