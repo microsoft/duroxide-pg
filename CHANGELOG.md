@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It locks only instances with deletion candidates.
   Public-schema cleanup also removes the batch-pruning function.
 
+### Changed
+
+- Update the provider and stress harness to Duroxide `0.2.0`. Provider trait
+  signatures and stored payload formats are unchanged. The runtime now retries
+  transient activity acknowledgement failures; the new upstream validation
+  verifies that a duplicate acknowledgement fails permanently and cannot enqueue
+  a second completion. Activity-admission worker-queue progress support is tracked
+  separately in [#51](https://github.com/microsoft/duroxide-pg/pull/51).
+
 ### Upgrading
 
 - **Migrations `0027` and `0028` require a fully drained upgrade.** Pause delete

@@ -216,6 +216,7 @@ mod atomicity_tests {
     provider_validation_test!(atomicity::test_multi_operation_atomic_ack);
     provider_validation_test!(atomicity::test_lock_released_only_on_successful_ack);
     provider_validation_test!(atomicity::test_concurrent_ack_prevention);
+    provider_validation_test!(atomicity::test_ack_work_item_duplicate_rejected);
 }
 
 mod error_handling_tests {
