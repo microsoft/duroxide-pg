@@ -32,12 +32,14 @@
 //! - `pruning`: batch pruning against deletion/recreation and execution updates.
 //! - `victim_retry`: the provider retries a renewal aborted as a deadlock
 //!   victim.
+//! - `notification_ddl`: notification upgrades and activation under queue contention.
 //! - `harness`: shared helpers, also used by
 //!   `tests/orchestration_lock_renewal_tests.rs` and
 //!   `tests/orchestration_ack_lease_tests.rs`.
 
 mod ack_fetch;
 mod harness;
+mod notification_ddl;
 mod pruning;
 mod renew_ack_abandon;
 mod renew_fetch;
@@ -48,6 +50,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("main.rs", include_str!("main.rs")),
     ("ack_fetch.rs", include_str!("ack_fetch.rs")),
     ("harness.rs", include_str!("harness.rs")),
+    ("notification_ddl.rs", include_str!("notification_ddl.rs")),
     ("pruning.rs", include_str!("pruning.rs")),
     ("renew_ack_abandon.rs", include_str!("renew_ack_abandon.rs")),
     ("renew_fetch.rs", include_str!("renew_fetch.rs")),
