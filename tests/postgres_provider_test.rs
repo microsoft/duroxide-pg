@@ -75,7 +75,7 @@ async fn reset_schema(database_url: &str, schema_name: &str) {
 pub struct PostgresProviderFactory {
     database_url: String,
     lock_timeout_ms: u64,
-    current_schema_name: std::sync::Mutex<Option<String>>,
+    schema_names: std::sync::Mutex<Vec<String>>,
 }
 
 impl Default for PostgresProviderFactory {
@@ -90,7 +90,7 @@ impl PostgresProviderFactory {
         Self {
             database_url: get_database_url(),
             lock_timeout_ms: 30_000, // 30 seconds - must match hardcoded timeout in validation tests
-            current_schema_name: std::sync::Mutex::new(None),
+            schema_names: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -98,8 +98,8 @@ impl PostgresProviderFactory {
         let schema_name = next_schema_name();
         reset_schema(&self.database_url, &schema_name).await;
 
-        // Store schema name for cleanup
-        *self.current_schema_name.lock().unwrap() = Some(schema_name.clone());
+        // A validation can create multiple providers (e.g. session and non-session cases).
+        self.schema_names.lock().unwrap().push(schema_name.clone());
 
         let provider = PostgresProvider::new_with_schema(&self.database_url, Some(&schema_name))
             .await
@@ -108,9 +108,18 @@ impl PostgresProviderFactory {
         Arc::new(provider)
     }
 
-    async fn cleanup_schema(&self) {
-        let schema_name = self.current_schema_name.lock().unwrap().take();
-        if let Some(schema_name) = schema_name {
+    fn current_schema_name(&self) -> String {
+        self.schema_names
+            .lock()
+            .unwrap()
+            .last()
+            .expect("validation provider not created")
+            .clone()
+    }
+
+    async fn cleanup_schemas(&self) {
+        let schema_names = std::mem::take(&mut *self.schema_names.lock().unwrap());
+        for schema_name in schema_names {
             reset_schema(&self.database_url, &schema_name).await;
         }
     }
@@ -131,7 +140,7 @@ impl ProviderFactory for PostgresProviderFactory {
     }
 
     async fn corrupt_instance_history(&self, instance: &str) {
-        let schema = self.current_schema_name.lock().unwrap().clone().unwrap();
+        let schema = self.current_schema_name();
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&self.database_url)
@@ -149,7 +158,7 @@ impl ProviderFactory for PostgresProviderFactory {
     }
 
     async fn get_max_attempt_count(&self, instance: &str) -> u32 {
-        let schema = self.current_schema_name.lock().unwrap().clone().unwrap();
+        let schema = self.current_schema_name();
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&self.database_url)
@@ -174,7 +183,7 @@ macro_rules! provider_validation_test {
         async fn $test_fn() {
             let factory = PostgresProviderFactory::new();
             $module::$test_fn(&factory).await;
-            factory.cleanup_schema().await;
+            factory.cleanup_schemas().await;
         }
     };
 }
@@ -198,14 +207,14 @@ mod race_replay_tests {
     async fn test_continue_as_new_transition_delivery_legacy_stamp() {
         let factory = PostgresProviderFactory::new();
         race_replay::test_continue_as_new_transition_delivery(&factory, "0.1.30").await;
-        factory.cleanup_schema().await;
+        factory.cleanup_schemas().await;
     }
 
     #[tokio::test]
     async fn test_continue_as_new_transition_delivery_new_stamp() {
         let factory = PostgresProviderFactory::new();
         race_replay::test_continue_as_new_transition_delivery(&factory, "0.1.31").await;
-        factory.cleanup_schema().await;
+        factory.cleanup_schemas().await;
     }
 }
 
@@ -289,6 +298,9 @@ mod queue_semantics_tests {
     use super::*;
 
     provider_validation_test!(queue_semantics::test_worker_queue_fifo_ordering);
+    provider_validation_test!(
+        queue_semantics::test_worker_deferred_item_does_not_starve_ready_work
+    );
     provider_validation_test!(queue_semantics::test_worker_peek_lock_semantics);
     provider_validation_test!(queue_semantics::test_worker_ack_atomicity);
     provider_validation_test!(queue_semantics::test_timer_delayed_visibility);
@@ -348,7 +360,7 @@ mod long_polling_tests {
             factory.short_poll_threshold(),
         )
         .await;
-        factory.cleanup_schema().await;
+        factory.cleanup_schemas().await;
     }
 
     #[tokio::test]
@@ -360,7 +372,7 @@ mod long_polling_tests {
             factory.short_poll_threshold(),
         )
         .await;
-        factory.cleanup_schema().await;
+        factory.cleanup_schemas().await;
     }
 
     #[tokio::test]
@@ -368,7 +380,7 @@ mod long_polling_tests {
         let factory = PostgresProviderFactory::new();
         let provider = factory.create_provider().await;
         long_polling::test_fetch_respects_timeout_upper_bound(&*provider).await;
-        factory.cleanup_schema().await;
+        factory.cleanup_schemas().await;
     }
 
     // test_long_poll_waits_for_timeout: Not applicable to short-poll providers.

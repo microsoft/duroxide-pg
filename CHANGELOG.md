@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recheck eligibility to protect replacement instances. Atomic deletion uses the
   same instance-ID lock order to prevent multi-instance deadlocks with pruning
   (migration `0028`).
+- Deferred activities no longer repeatedly overtake already-ready work after
+  their retry delay expires. Migration `0029` orders eligible worker items by
+  visibility time and then queue ID, with a matching index, for both session and
+  non-session workers. Session ownership, tag filtering, lock handling, and
+  attempt accounting are unchanged.
 
 ### Added
 
@@ -32,12 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Update the provider and stress harness to Duroxide `0.2.0`. Provider trait
+- Update the provider and stress harness from Duroxide `0.1.32` to
+  [Duroxide `0.2.0`](https://github.com/microsoft/duroxide/releases/tag/v0.2.0).
+  Applications using this provider must also use the `0.2.x` runtime. Provider trait
   signatures and stored payload formats are unchanged. The runtime now retries
   transient activity acknowledgement failures; the new upstream validation
   verifies that a duplicate acknowledgement fails permanently and cannot enqueue
-  a second completion. Activity-admission worker-queue progress support is tracked
-  separately in [#51](https://github.com/microsoft/duroxide-pg/pull/51).
+  a second completion.
 
 ### Upgrading
 
@@ -59,6 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [explicit repair procedure](migrations/README.md#repairing-missing-continued-execution-timestamps).
   Re-running the backfill while old calls remain in flight does not close that
   race.
+- Migration `0029` replaces `fetch_work_item` without changing its signature
+  and adds an index on `worker_queue(visible_at, id)`. On busy queues,
+  [prebuild the index concurrently](migrations/README.md#worker-queue-progress-migration-0029).
+  A valid prebuild skips index creation, but the migration still blocks writes
+  to `worker_queue` until commit. Older binaries reject `0029` on startup.
 
 ## [0.1.38] - 2026-10-26
 
