@@ -12,7 +12,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-duroxide-pg = "0.1"
+duroxide-pg = "0.2"
 ```
 
 ## Usage
@@ -368,22 +368,25 @@ service's replication topology.
 - Orchestration stats introspection via `Client::get_orchestration_stats()`
 - Microsoft Entra ID authentication for Azure Database for PostgreSQL (managed identity, Workload Identity, az CLI)
 
-## Latest Release (0.1.38)
+## Latest Release (0.2.0)
+
+- Requires Duroxide `0.2.x`. If your application depends on both crates, upgrade them together.
+- **Upgrading from 0.1.38 or earlier requires downtime.** Pause retention, [stop and drain all provider and direct SQL callers](migrations/README.md#upgrading-safely), and let one new `ApplyAll` process finish migrations `0027` through `0030` before resuming traffic.
+- Age-based retention can now prune old continue-as-new generations without deleting pending continuations. The new `prune_executions_batch` SQL function lets maintenance jobs scan a page of executions at a time.
+- Deferred activities no longer jump ahead of work that was already ready, for both session and non-session workers.
+- [Opt-in long polling](#optional-long-polling) wakes idle workers and orchestration dispatchers using PostgreSQL `LISTEN`/`NOTIFY`. Short polling remains the default.
+
+See [CHANGELOG.md](CHANGELOG.md) for full version history.
+
+> **Releases are published by Microsoft's internal OSS infrastructure.** See
+> [RELEASE_POLICY.md](RELEASE_POLICY.md) for details.
+
+## Previous Release (0.1.38)
 
 - Fixes an orchestration acknowledge that could commit after another worker had taken the instance over. The consumed messages stayed queued and were processed again, so one queue message or external event could run an activity twice (migration `0026`).
 - Fixes deadlocks between orchestration lock renewal and fetch, acknowledge or abandon, and stops renewal from reviving an expired lease or shortening a live one (migration `0026`).
 - Retries transient renewal errors, and finds leases by lock token through a new unique index instead of a table scan.
 - Adds a deadlock test suite that runs in every `cargo test`, and a TLA+ model of the lease procedures under worker clock skew (`docs/tla/orchestration-leases`).
-- See [CHANGELOG.md](CHANGELOG.md) for full version history.
-
-> **Releases are published by Microsoft's internal OSS infrastructure.** See
-> [RELEASE_POLICY.md](RELEASE_POLICY.md) for details.
-
-## Previous Release (0.1.37)
-
-- Fails startup on catalog errors, inconsistent migration history, or missing, unexpected, or non-table Duroxide relations without deleting migration records or re-applying old SQL.
-- Reports malformed KV snapshots through `history_error`, allowing the runtime to poison the instance after `max_attempts` instead of replaying an empty snapshot or retrying forever.
-- Keeps malformed durable history out of orphan-message cleanup so its queue messages are not acknowledged before runtime poison/backoff handling.
 
 ## Support
 
