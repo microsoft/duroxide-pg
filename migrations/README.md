@@ -238,9 +238,9 @@ The migration adds `idx_worker_ready_order` on `worker_queue(visible_at, id)`.
 the index already exists, and holds it **until the migration transaction
 commits**, not just until index creation finishes. This blocks worker fetch,
 acknowledge, abandon, and lock renewal, as well as orchestration acknowledgements
-that write worker rows. The migration sets no `lock_timeout`, so acquiring the
-lock can also wait indefinitely. Plan a maintenance window or set an appropriate
-deployment-session `lock_timeout` through PostgreSQL connection options.
+that write worker rows. The migration runner uses bounded lock waits and a
+ten-second retry budget; the SQL file itself sets no `lock_timeout` when run
+directly. Plan a maintenance window and allow time for the index build.
 
 For a busy or large queue, pre-build the index **before starting the migration**,
 outside any transaction, in each target schema. Replace `duroxide` below with
@@ -268,6 +268,54 @@ If the schema already has `0027` and `0028`, running providers can keep using
 `fetch_work_item` across `0029`: its signature is unchanged. Older binaries
 still refuse to restart against an unknown migration version. If `0027` or
 `0028` is also pending, [drain all callers before upgrading](#upgrading-safely).
+
+## Long-Poll Notifications (Migration 0030)
+
+Migration `0030` installs disabled queue-notification triggers. A provider with
+`MigrationPolicy::ApplyAll` and `long_poll.enabled = true` activates them for the
+schema under the migration lock. `VerifyOnly` requires prior activation. See
+[Migration Policy](../docs/migration-policy.md) for compatibility and privilege
+requirements.
+The six triggers cover both queues and session leases. Claims and renewals send
+future lease-expiry hints; releasing an orchestration claim also sends an
+immediate hint, even when the abandoned message is delayed. Installation and
+activation use bounded transaction retries under lock contention.
+
+Apply `0027` through `0030` in order. Even with notifications disabled, `0030`
+requires the preceding migrations; its `cleanup_schema` retains `0028`'s
+batched-pruning cleanup. The provider rejects a ledger with a missing
+predecessor rather than replaying migrations. Do not edit the ledger to fill gaps.
+
+Disposable development/test databases that applied an earlier draft of the
+long-poll migration as `0027` must be recreated before using this sequence.
+Do not delete migration records or apply this draft over such a database that
+contains data you need to preserve.
+
+The provider validation harness can exercise either mode:
+
+```sh
+cargo nextest run --test postgres_provider_test
+DUROXIDE_PG_TEST_LONG_POLL=true cargo nextest run --test postgres_provider_test
+cargo nextest run --test long_poll_tests
+```
+
+The ignored two-phase-commit test additionally requires a disposable PostgreSQL
+server with `max_prepared_transactions >= 1`:
+
+```sh
+cargo nextest run --test long_poll_tests --run-ignored only \
+  -E 'test(two_phase_commit_is_preserved_until_explicit_notification_activation)'
+```
+
+The ignored idle-query benchmark requires `pg_stat_statements` to be preloaded
+and installed in a disposable local database, and an optimized PostgreSQL build
+without assertions or memory wiping. It measures 65 seconds per mode, including
+the normal long-poll timeouts and notifier refresh:
+
+```sh
+cargo nextest run --release --test long_poll_tests --run-ignored only \
+  -E 'test(idle_query_load_is_reduced_with_long_polling)' --success-output final
+```
 
 ## Migration Execution Context
 

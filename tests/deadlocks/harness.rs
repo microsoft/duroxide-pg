@@ -60,6 +60,43 @@ pub async fn raw_pool(database_url: &str) -> PgPool {
         .expect("failed to create raw PostgreSQL pool")
 }
 
+pub async fn migrate_through(pool: &PgPool, schema: &str, last_version: i64) {
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(pool)
+        .await
+        .unwrap();
+    let directory = include_dir::include_dir!("$CARGO_MANIFEST_DIR/migrations");
+    let mut files: Vec<_> = directory
+        .files()
+        .filter(|file| file.path().extension().is_some_and(|ext| ext == "sql"))
+        .collect();
+    files.sort_by_key(|file| file.path());
+    for file in files {
+        let name = file.path().file_name().unwrap().to_str().unwrap();
+        let version: i64 = name.split('_').next().unwrap().parse().unwrap();
+        if version > last_version {
+            break;
+        }
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query(&format!("SET LOCAL search_path TO {schema}, pg_temp"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::Executor::execute(&mut *tx, file.contents_utf8().unwrap())
+            .await
+            .unwrap();
+        sqlx::query(&format!(
+            "INSERT INTO {schema}._duroxide_migrations(version, name) VALUES ($1, $2)"
+        ))
+        .bind(version)
+        .bind(name)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+}
+
 pub async fn timed<T>(what: &str, future: impl Future<Output = T>) -> T {
     tokio::time::timeout(STEP_TIMEOUT, future)
         .await
