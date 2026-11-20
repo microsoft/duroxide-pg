@@ -29,6 +29,7 @@
 //!   (migration 0026).
 //! - `renew_fetch`: renewal against fetch, forced and raced (migration 0026).
 //! - `renew_ack_abandon`: renewal against acknowledge and abandon.
+//! - `pruning`: batch pruning against deletion/recreation and execution updates.
 //! - `victim_retry`: the provider retries a renewal aborted as a deadlock
 //!   victim.
 //! - `harness`: shared helpers, also used by
@@ -37,6 +38,7 @@
 
 mod ack_fetch;
 mod harness;
+mod pruning;
 mod renew_ack_abandon;
 mod renew_fetch;
 mod victim_retry;
@@ -46,6 +48,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("main.rs", include_str!("main.rs")),
     ("ack_fetch.rs", include_str!("ack_fetch.rs")),
     ("harness.rs", include_str!("harness.rs")),
+    ("pruning.rs", include_str!("pruning.rs")),
     ("renew_ack_abandon.rs", include_str!("renew_ack_abandon.rs")),
     ("renew_fetch.rs", include_str!("renew_fetch.rs")),
     ("victim_retry.rs", include_str!("victim_retry.rs")),

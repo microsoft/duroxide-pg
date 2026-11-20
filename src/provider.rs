@@ -2654,7 +2654,8 @@ impl ProviderAdmin for PostgresProvider {
             ));
         }
 
-        // Add completed_before filter if provided
+        // A pending continuation is still a live instance. Before migration 0027
+        // its NULL completed_at implicitly excluded it from age-based deletion.
         if filter.completed_before.is_some() {
             let param_num = filter
                 .instance_ids
@@ -2663,7 +2664,7 @@ impl ProviderAdmin for PostgresProvider {
                 .unwrap_or(0)
                 + 1;
             sql.push_str(&format!(
-                " AND e.completed_at < TO_TIMESTAMP(${} / 1000.0)",
+                " AND e.status OPERATOR(pg_catalog.=) ANY(ARRAY['Completed', 'Failed']) AND e.completed_at < TO_TIMESTAMP(${} / 1000.0)",
                 param_num
             ));
         }
